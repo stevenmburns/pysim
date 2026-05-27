@@ -9,13 +9,18 @@ type SolveResponse = {
   z_in_im: number;
   angle_deg: number;
   n_per_arm: number;
+  design_freq_mhz: number;
+  measurement_freq_mhz: number;
+  halfdriver_factor: number;
+  arm_len_m: number;
   solve_ms: number;
 };
 
 type SolveRequest = {
   angle_deg: number;
   n_per_arm: number;
-  wavelength: number;
+  design_freq_mhz: number;
+  measurement_freq_mhz: number;
   halfdriver_factor: number;
   wire_radius: number;
 };
@@ -25,9 +30,21 @@ const WS_URL = `ws://${window.location.host}/ws`;
 export function App() {
   const [angle, setAngle] = useState(30);
   const [nPerArm, setNPerArm] = useState(30);
-  const [wavelength, setWavelength] = useState(22.0);
+  const [designFreq, setDesignFreq] = useState(13.625);
+  const [measFreq, setMeasFreq] = useState(13.625);
   const [halfdriverFactor, setHalfdriverFactor] = useState(0.962);
+  const [linkMeas, setLinkMeas] = useState(true);
   const [wireRadius, setWireRadius] = useState(0.0005);
+
+  // When linked, design and measurement freq move together.
+  function updateDesignFreq(v: number) {
+    setDesignFreq(v);
+    if (linkMeas) setMeasFreq(v);
+  }
+  function toggleLink(next: boolean) {
+    setLinkMeas(next);
+    if (next) setMeasFreq(designFreq);
+  }
 
   const [result, setResult] = useState<SolveResponse | null>(null);
   const [status, setStatus] = useState<"connecting" | "open" | "closed">("connecting");
@@ -43,7 +60,8 @@ export function App() {
   const controlsRef = useRef<SolveRequest>({
     angle_deg: angle,
     n_per_arm: nPerArm,
-    wavelength,
+    design_freq_mhz: designFreq,
+    measurement_freq_mhz: measFreq,
     halfdriver_factor: halfdriverFactor,
     wire_radius: wireRadius,
   });
@@ -52,12 +70,13 @@ export function App() {
     controlsRef.current = {
       angle_deg: angle,
       n_per_arm: nPerArm,
-      wavelength,
+      design_freq_mhz: designFreq,
+      measurement_freq_mhz: measFreq,
       halfdriver_factor: halfdriverFactor,
       wire_radius: wireRadius,
     };
     requestSolve();
-  }, [angle, nPerArm, wavelength, halfdriverFactor, wireRadius]);
+  }, [angle, nPerArm, designFreq, measFreq, halfdriverFactor, wireRadius]);
 
   function requestSolve() {
     const ws = wsRef.current;
@@ -105,6 +124,8 @@ export function App() {
       <aside className="sidebar">
         <h1>inverted V — interactive</h1>
 
+        <div className="group-label">antenna</div>
+
         <div className="field">
           <label>
             <span>droop angle</span>
@@ -119,6 +140,50 @@ export function App() {
             onInput={(e) => setAngle(Number((e.target as HTMLInputElement).value))}
           />
         </div>
+
+        <div className="field">
+          <label>
+            <span>halfdriver factor</span>
+            <span>{halfdriverFactor.toFixed(3)}</span>
+          </label>
+          <input
+            type="range"
+            min={0.5}
+            max={1.2}
+            step={0.001}
+            value={halfdriverFactor}
+            onInput={(e) => setHalfdriverFactor(Number((e.target as HTMLInputElement).value))}
+          />
+        </div>
+
+        <div className="field">
+          <label>
+            <span>design freq</span>
+            <span>{designFreq.toFixed(3)} MHz</span>
+          </label>
+          <input
+            type="range"
+            min={1}
+            max={30}
+            step={0.005}
+            value={designFreq}
+            onInput={(e) => updateDesignFreq(Number((e.target as HTMLInputElement).value))}
+          />
+        </div>
+
+        <div className="field">
+          <label>
+            <span>wire radius (m)</span>
+          </label>
+          <input
+            type="number"
+            step={0.0001}
+            value={wireRadius}
+            onChange={(e) => setWireRadius(Number(e.target.value) || 0)}
+          />
+        </div>
+
+        <div className="group-label">simulation</div>
 
         <div className="field">
           <label>
@@ -137,38 +202,26 @@ export function App() {
 
         <div className="field">
           <label>
-            <span>wavelength (m)</span>
+            <span>measurement freq</span>
+            <span>{measFreq.toFixed(3)} MHz</span>
           </label>
           <input
-            type="number"
-            step={0.5}
-            value={wavelength}
-            onChange={(e) => setWavelength(Number(e.target.value) || 0)}
+            type="range"
+            min={1}
+            max={30}
+            step={0.005}
+            value={measFreq}
+            disabled={linkMeas}
+            onInput={(e) => setMeasFreq(Number((e.target as HTMLInputElement).value))}
           />
-        </div>
-
-        <div className="field">
-          <label>
-            <span>halfdriver factor</span>
+          <label className="link-toggle">
+            <input
+              type="checkbox"
+              checked={linkMeas}
+              onChange={(e) => toggleLink(e.target.checked)}
+            />
+            lock to design freq
           </label>
-          <input
-            type="number"
-            step={0.01}
-            value={halfdriverFactor}
-            onChange={(e) => setHalfdriverFactor(Number(e.target.value) || 0)}
-          />
-        </div>
-
-        <div className="field">
-          <label>
-            <span>wire radius (m)</span>
-          </label>
-          <input
-            type="number"
-            step={0.0001}
-            value={wireRadius}
-            onChange={(e) => setWireRadius(Number(e.target.value) || 0)}
-          />
         </div>
 
         <div className="readout">
@@ -178,7 +231,13 @@ export function App() {
           </div>
           <div className="row">
             <span>X</span>
-            <span className="val">{result ? `${result.z_in_im.toFixed(2)} Ω` : "—"}</span>
+            <span className={result && Math.abs(result.z_in_im) < 2 ? "val val-hot" : "val"}>
+              {result ? `${result.z_in_im.toFixed(2)} Ω` : "—"}
+            </span>
+          </div>
+          <div className="row">
+            <span>arm length</span>
+            <span className="val">{result ? `${result.arm_len_m.toFixed(3)} m` : "—"}</span>
           </div>
           <div className="row">
             <span>|I_feed|</span>

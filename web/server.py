@@ -41,21 +41,40 @@ def _inverted_v_polyline(arm_len: float, angle_deg: float) -> np.ndarray:
     return np.vstack([left, apex, right])
 
 
+C_LIGHT = 299_792_458.0  # m/s, matches AbstractPySim's eps*mu derivation to ~1e-9
+
+
 def solve(
     *,
     angle_deg: float,
     n_per_arm: int,
-    wavelength: float,
+    design_freq_mhz: float,
+    measurement_freq_mhz: float,
     halfdriver_factor: float,
     wire_radius: float,
 ) -> dict:
+    """Solve at measurement_freq_mhz for a wire built to resonate (nominally)
+    at design_freq_mhz, scaled by halfdriver_factor.
+
+    Arm length is set by design freq:  arm = halfdriver_factor * c / (4 * f_design).
+    The MoM kernel uses measurement freq:  k = 2*pi*f_meas / c.
+    The two are independent so the user can sweep measurement freq across a
+    fixed antenna (SWR-meter UX) or tune length-factor at fixed design freq
+    (wire-trimming UX).
+    """
+    f_design = design_freq_mhz * 1e6
+    f_meas = measurement_freq_mhz * 1e6
+    wavelength_design = C_LIGHT / f_design
+    wavelength_meas = C_LIGHT / f_meas
+    arm_len = halfdriver_factor * wavelength_design / 4.0
+
     sim = BentTriangularPySim(
-        wavelength=wavelength,
-        halfdriver_factor=halfdriver_factor,
+        wavelength=wavelength_meas,
+        halfdriver_factor=halfdriver_factor,  # ignored: we override polyline below
         nsegs=n_per_arm,
     )
     sim.wire_radius = wire_radius
-    polyline = _inverted_v_polyline(sim.halfdriver, angle_deg)
+    polyline = _inverted_v_polyline(arm_len, angle_deg)
     sim.polyline = polyline
     sim.n_per_edge = [n_per_arm, n_per_arm]
 
@@ -93,6 +112,10 @@ def solve(
         "z_in_im": float(z_in.imag),
         "angle_deg": angle_deg,
         "n_per_arm": n_per_arm,
+        "design_freq_mhz": design_freq_mhz,
+        "measurement_freq_mhz": measurement_freq_mhz,
+        "halfdriver_factor": halfdriver_factor,
+        "arm_len_m": arm_len,
         "solve_ms": solve_ms,
     }
 
@@ -109,10 +132,13 @@ async def ws_endpoint(ws: WebSocket):
         while True:
             raw = await ws.receive_text()
             req = json.loads(raw)
+            # Default design freq matches the legacy wavelength=22 default
+            # (c/22 ≈ 13.625 MHz, near the 20 m amateur band).
             result = solve(
                 angle_deg=float(req.get("angle_deg", 30.0)),
                 n_per_arm=int(req.get("n_per_arm", 40)),
-                wavelength=float(req.get("wavelength", 22.0)),
+                design_freq_mhz=float(req.get("design_freq_mhz", 13.625)),
+                measurement_freq_mhz=float(req.get("measurement_freq_mhz", 13.625)),
                 halfdriver_factor=float(req.get("halfdriver_factor", 0.962)),
                 wire_radius=float(req.get("wire_radius", 0.0005)),
             )
