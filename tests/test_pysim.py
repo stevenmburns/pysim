@@ -109,7 +109,7 @@ def test_spline_fit():
         ax1.plot(xs, np.angle(i) * 180 / np.pi, color=color)
         color = "tab:olive"
         ax1.plot(xs, np.angle(interp(xs)) * 180 / np.pi, color=color)
-    plt.show()
+    save_or_show(plt, fn)
 
 
 @pytest.mark.plot
