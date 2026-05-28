@@ -117,6 +117,9 @@ class TriangularYagiPySim(AbstractPySim):
         n_qp_cross=4,
         reflector_factor=1.05,
         spacing_factor=1.0,
+        n_directors=0,
+        director_spacing_factor=0.2,
+        director_size_factor=0.95,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -124,16 +127,24 @@ class TriangularYagiPySim(AbstractPySim):
         self.n_qp_cross = n_qp_cross
         self.reflector_factor = reflector_factor
         self.spacing_factor = spacing_factor
+        self.n_directors = int(n_directors)
+        self.director_spacing_factor = director_spacing_factor
+        self.director_size_factor = director_size_factor
 
-    def compute_impedance(self, *, ntrap=None):
-        N = self.nsegs
-        a = self.wire_radius
-        k = self.k
+    def _build_wires(self):
+        """Driver + reflector + n_directors directors, all y-directed.
 
+        Spacing is in units of halfdriver (matches `spacing_factor`'s convention
+        for the reflector). Directors are uniformly spaced in +x; reflector
+        sits at -spacing in -x. Each director's length is
+        2·director_size_factor·halfdriver.
+        """
         h_driver = self.halfdriver
         L_driver = 2 * h_driver
         L_refl = 2 * self.reflector_factor * h_driver
         spacing = self.spacing_factor * h_driver
+        dspacing = self.director_spacing_factor * h_driver
+        dh = self.director_size_factor * h_driver
 
         wires = [
             (np.array([0.0, -h_driver, 0.0]), np.array([0.0, +h_driver, 0.0])),
@@ -143,6 +154,18 @@ class TriangularYagiPySim(AbstractPySim):
             ),
         ]
         L_per_wire = [L_driver, L_refl]
+        for i in range(self.n_directors):
+            x = (i + 1) * dspacing
+            wires.append((np.array([x, -dh, 0.0]), np.array([x, +dh, 0.0])))
+            L_per_wire.append(2 * dh)
+        return wires, L_per_wire, L_driver
+
+    def compute_impedance(self, *, ntrap=None):
+        N = self.nsegs
+        a = self.wire_radius
+        k = self.k
+
+        wires, L_per_wire, L_driver = self._build_wires()
         h_per_wire = np.array([L_w / N for L_w in L_per_wire])
         n_wires = len(wires)
 
@@ -254,19 +277,7 @@ class TriangularYagiPySim(AbstractPySim):
         n_k = len(k_array)
         omega_array = k_array * self.c
 
-        h_driver = self.halfdriver
-        L_driver = 2 * h_driver
-        L_refl = 2 * self.reflector_factor * h_driver
-        spacing = self.spacing_factor * h_driver
-
-        wires = [
-            (np.array([0.0, -h_driver, 0.0]), np.array([0.0, +h_driver, 0.0])),
-            (
-                np.array([-spacing, -self.reflector_factor * h_driver, 0.0]),
-                np.array([-spacing, +self.reflector_factor * h_driver, 0.0]),
-            ),
-        ]
-        L_per_wire = [L_driver, L_refl]
+        wires, L_per_wire, L_driver = self._build_wires()
         h_per_wire = np.array([L_w / N for L_w in L_per_wire])
         n_wires = len(wires)
 

@@ -47,6 +47,9 @@ type SolveRequest = {
   driver_length_factor?: number;
   reflector_length_factor?: number;
   spacing_wavelengths?: number;
+  n_directors?: number;
+  director_spacing_wavelengths?: number;
+  director_size_factor?: number;
 };
 
 type SweepData = {
@@ -126,6 +129,9 @@ export function App() {
   const [driverLengthFactor, setDriverLengthFactor] = useState(0.962);
   const [reflectorLengthFactor, setReflectorLengthFactor] = useState(1.01);
   const [spacingWavelengths, setSpacingWavelengths] = useState(0.15);
+  const [nDirectors, setNDirectors] = useState(0);
+  const [directorSpacingWavelengths, setDirectorSpacingWavelengths] = useState(0.2);
+  const [directorSizeFactor, setDirectorSizeFactor] = useState(0.95);
   // Shared
   const [solver, setSolver] = useState<"pysim" | "pynec">("pysim");
   const [nPerWire, setNPerWire] = useState(30);
@@ -207,6 +213,9 @@ export function App() {
       base.driver_length_factor = driverLengthFactor;
       base.reflector_length_factor = reflectorLengthFactor;
       base.spacing_wavelengths = spacingWavelengths;
+      base.n_directors = nDirectors;
+      base.director_spacing_wavelengths = directorSpacingWavelengths;
+      base.director_size_factor = directorSizeFactor;
     }
     return base;
   }
@@ -223,6 +232,7 @@ export function App() {
     geometry, solver,
     angle, halfdriverFactor,
     driverLengthFactor, reflectorLengthFactor, spacingWavelengths,
+    nDirectors, directorSpacingWavelengths, directorSizeFactor,
     nPerWire, designFreq, measFreq, wireRadius,
     groundEnabled, heightM,
   ]);
@@ -247,6 +257,7 @@ export function App() {
     geometry, solver,
     angle, halfdriverFactor,
     driverLengthFactor, reflectorLengthFactor, spacingWavelengths,
+    nDirectors, directorSpacingWavelengths, directorSizeFactor,
     nPerWire, designFreq, wireRadius,
     groundEnabled, heightM,
   ]);
@@ -269,6 +280,7 @@ export function App() {
     geometry, solver,
     angle, halfdriverFactor,
     driverLengthFactor, reflectorLengthFactor, spacingWavelengths,
+    nDirectors, directorSpacingWavelengths, directorSizeFactor,
     nPerWire, designFreq, measFreq, wireRadius,
     groundEnabled, heightM,
   ]);
@@ -479,6 +491,52 @@ export function App() {
                 onInput={(e) => setSpacingWavelengths(Number((e.target as HTMLInputElement).value))}
               />
             </div>
+            <div className="field">
+              <label>
+                <span># directors</span>
+                <span>{nDirectors}</span>
+              </label>
+              <input
+                type="range"
+                min={0}
+                max={8}
+                step={1}
+                value={nDirectors}
+                onInput={(e) => setNDirectors(Number((e.target as HTMLInputElement).value))}
+              />
+            </div>
+            {nDirectors > 0 && (
+              <>
+                <div className="field">
+                  <label>
+                    <span>director spacing (λ)</span>
+                    <span>{directorSpacingWavelengths.toFixed(3)}</span>
+                  </label>
+                  <input
+                    type="range"
+                    min={0.05}
+                    max={0.5}
+                    step={0.001}
+                    value={directorSpacingWavelengths}
+                    onInput={(e) => setDirectorSpacingWavelengths(Number((e.target as HTMLInputElement).value))}
+                  />
+                </div>
+                <div className="field">
+                  <label>
+                    <span>director size factor</span>
+                    <span>{directorSizeFactor.toFixed(3)}</span>
+                  </label>
+                  <input
+                    type="range"
+                    min={0.5}
+                    max={1.2}
+                    step={0.001}
+                    value={directorSizeFactor}
+                    onInput={(e) => setDirectorSizeFactor(Number((e.target as HTMLInputElement).value))}
+                  />
+                </div>
+              </>
+            )}
           </>
         )}
 
