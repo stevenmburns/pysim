@@ -157,6 +157,10 @@ html, body, #root {
   border-radius: 4px;
 }
 
+.farfield + .farfield {
+  margin-top: 6px;
+}
+
 .link-toggle {
   display: flex;
   gap: 6px;

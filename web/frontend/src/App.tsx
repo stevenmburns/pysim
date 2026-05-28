@@ -483,7 +483,8 @@ export function App() {
       <main className="stage">
         <CurrentCanvas result={result} />
         <div className="farfield-panel">
-          <FarFieldChart result={result} size={240} />
+          <FarFieldChart result={result} size={220} cut="xy" />
+          <FarFieldChart result={result} size={220} cut="yz" />
         </div>
         <div className="smith-panel">
           <SmithChart
@@ -526,7 +527,17 @@ function formatSwr(r: number, x: number, z0: number): string {
   return swr.toFixed(2);
 }
 
-function FarFieldChart({ result, size }: { result: SolveResponse | null; size: number }) {
+type FarFieldCut = "xy" | "yz";
+
+function FarFieldChart({
+  result,
+  size,
+  cut,
+}: {
+  result: SolveResponse | null;
+  size: number;
+  cut: FarFieldCut;
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -572,24 +583,28 @@ function FarFieldChart({ result, size }: { result: SolveResponse | null; size: n
     ctx.lineTo(cx, cy + R);
     ctx.stroke();
 
-    // Axis labels match the wire-canvas orientation: +x to the right (where
-    // the right arm tip lies), +y up (broadside to the wire).
+    // Axis labels parameterized by cut plane. The "horizontal" axis on the
+    // canvas is whichever world axis lies in the cut and serves as the
+    // 0-angle reference (cos t); "vertical" is the second cut axis (sin t).
+    const horizLabel = cut === "xy" ? "x" : "y";
+    const vertLabel = cut === "xy" ? "y" : "z";
     ctx.fillStyle = "#4a5160";
     ctx.font = "10px ui-monospace, monospace";
-    ctx.fillText("xy plane (dBi)", 6, 14);
+    ctx.fillText(`${cut} plane (dBi)`, 6, 14);
     ctx.fillStyle = "#7b8493";
-    ctx.fillText("+x", cx + R - 14, cy + 11);
-    ctx.fillText("−x", cx - R + 2, cy + 11);
-    ctx.fillText("+y", cx - 8, cy - R + 12);
-    ctx.fillText("−y", cx - 7, cy + R - 2);
+    ctx.fillText(`+${horizLabel}`, cx + R - 14, cy + 11);
+    ctx.fillText(`−${horizLabel}`, cx - R + 2, cy + 11);
+    ctx.fillText(`+${vertLabel}`, cx - 8, cy - R + 12);
+    ctx.fillText(`−${vertLabel}`, cx - 7, cy + R - 2);
 
     if (!result) return;
 
-    // Azimuth cut: r̂ = (cos φ, sin φ, 0) for φ in [0, 2π).
-    // For each direction compute the moment integral over ALL wires:
+    // Planar cut: r̂(t) = u·cos t + v·sin t, where (u, v) are the two world
+    // basis vectors in the cut plane (xy: (x̂, ŷ); yz: (ŷ, ẑ)). For each
+    // direction compute the moment integral over ALL wires:
     //   M(r̂) = Σ_segments I_mid · (r_{n+1} − r_n) · exp(jk r̂·r_mid)
     // and take |M_perp|² (component perpendicular to r̂).
-    const N_PHI = 180;
+    const N_DIR = 180;
     const c = 299_792_458;
     const k = (2 * Math.PI * result.measurement_freq_mhz * 1e6) / c;
 
@@ -601,6 +616,7 @@ function FarFieldChart({ result, size }: { result: SolveResponse | null; size: n
     const dz = new Float64Array(nSeg);
     const midx = new Float64Array(nSeg);
     const midy = new Float64Array(nSeg);
+    const midz = new Float64Array(nSeg);
     const Ire = new Float64Array(nSeg);
     const Iim = new Float64Array(nSeg);
     let off = 0;
@@ -616,19 +632,24 @@ function FarFieldChart({ result, size }: { result: SolveResponse | null; size: n
         dz[off] = b[2] - a[2];
         midx[off] = 0.5 * (a[0] + b[0]);
         midy[off] = 0.5 * (a[1] + b[1]);
+        midz[off] = 0.5 * (a[2] + b[2]);
         Ire[off] = 0.5 * (cre[n] + cre[n + 1]);
         Iim[off] = 0.5 * (cim[n] + cim[n + 1]);
         off++;
       }
     }
 
-    const mag2s = new Array<number>(N_PHI);
+    const mag2s = new Array<number>(N_DIR);
     let maxMag2 = 0;
 
-    for (let pi = 0; pi < N_PHI; pi++) {
-      const phi = (2 * Math.PI * pi) / N_PHI;
-      const rx = Math.cos(phi);
-      const ry = Math.sin(phi);
+    for (let pi = 0; pi < N_DIR; pi++) {
+      const t = (2 * Math.PI * pi) / N_DIR;
+      const ct = Math.cos(t);
+      const st = Math.sin(t);
+      // (u, v) = (x̂, ŷ) for xy cut, (ŷ, ẑ) for yz cut.
+      const rx = cut === "xy" ? ct : 0;
+      const ry = cut === "xy" ? st : ct;
+      const rz = cut === "xy" ? 0 : st;
 
       let mxRe = 0;
       let mxIm = 0;
@@ -637,7 +658,7 @@ function FarFieldChart({ result, size }: { result: SolveResponse | null; size: n
       let mzRe = 0;
       let mzIm = 0;
       for (let n = 0; n < nSeg; n++) {
-        const phase = k * (rx * midx[n] + ry * midy[n]);
+        const phase = k * (rx * midx[n] + ry * midy[n] + rz * midz[n]);
         const cph = Math.cos(phase);
         const sph = Math.sin(phase);
         // I_mid * exp(jphase)
@@ -650,16 +671,16 @@ function FarFieldChart({ result, size }: { result: SolveResponse | null; size: n
         mzRe += ire * dz[n];
         mzIm += iim * dz[n];
       }
-      // Component along r̂: M·r̂ = M_x*rx + M_y*ry  (rz = 0)
-      const mDotRre = mxRe * rx + myRe * ry;
-      const mDotRim = mxIm * rx + myIm * ry;
+      // M·r̂ uses all three components now.
+      const mDotRre = mxRe * rx + myRe * ry + mzRe * rz;
+      const mDotRim = mxIm * rx + myIm * ry + mzIm * rz;
       // M_perp = M − (M·r̂) r̂
       const pxRe = mxRe - mDotRre * rx;
       const pxIm = mxIm - mDotRim * rx;
       const pyRe = myRe - mDotRre * ry;
       const pyIm = myIm - mDotRim * ry;
-      const pzRe = mzRe;
-      const pzIm = mzIm;
+      const pzRe = mzRe - mDotRre * rz;
+      const pzIm = mzIm - mDotRim * rz;
       const mag2 =
         pxRe * pxRe + pxIm * pxIm +
         pyRe * pyRe + pyIm * pyIm +
@@ -679,14 +700,14 @@ function FarFieldChart({ result, size }: { result: SolveResponse | null; size: n
         : 1 / maxMag2;
 
     ctx.beginPath();
-    for (let pi = 0; pi <= N_PHI; pi++) {
-      const phi = (2 * Math.PI * pi) / N_PHI;
-      const D = norm * mag2s[pi % N_PHI];
+    for (let pi = 0; pi <= N_DIR; pi++) {
+      const t = (2 * Math.PI * pi) / N_DIR;
+      const D = norm * mag2s[pi % N_DIR];
       const dBi = D > 0 ? 10 * Math.log10(D) : -Infinity;
       const frac = dbiToFrac(dBi);
-      const px = cx + Math.cos(phi) * frac * R;
+      const px = cx + Math.cos(t) * frac * R;
       // Canvas y flips: +y on canvas is down, so we negate to put +y at top.
-      const py = cy - Math.sin(phi) * frac * R;
+      const py = cy - Math.sin(t) * frac * R;
       if (pi === 0) ctx.moveTo(px, py);
       else ctx.lineTo(px, py);
     }
@@ -704,7 +725,7 @@ function FarFieldChart({ result, size }: { result: SolveResponse | null; size: n
     const peakText = `peak ${peakDbi >= 0 ? "+" : ""}${peakDbi.toFixed(1)} dBi`;
     const tw = ctx.measureText(peakText).width;
     ctx.fillText(peakText, size - tw - 6, 14);
-  }, [result, size]);
+  }, [result, size, cut]);
 
   return <canvas ref={canvasRef} className="farfield" />;
 }
