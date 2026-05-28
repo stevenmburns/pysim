@@ -63,12 +63,13 @@ def _run_solve(
     return cur_arr, tag_arr
 
 
-def solve_inverted_v(req: dict) -> dict:
-    """Inverted V via two PyNEC wires meeting at the apex."""
+def _build_inverted_v(req: dict):
+    """Build the PyNEC context + geometry for the inverted V. Returns the
+    context, feed segment, and derived geometry that callers need for
+    response formatting."""
     angle_deg = float(req.get("angle_deg", 30.0))
     n_per_wire = int(req.get("n_per_wire", 30))
     design_freq_mhz = float(req.get("design_freq_mhz", 14.3))
-    meas_freq_mhz = float(req.get("measurement_freq_mhz", design_freq_mhz))
     halfdriver_factor = float(req.get("halfdriver_factor", 0.962))
     wire_radius = float(req.get("wire_radius", 0.0005))
     ground = bool(req.get("ground", False))
@@ -87,44 +88,38 @@ def solve_inverted_v(req: dict) -> dict:
 
     c = nec.nec_context()
     geo = c.get_geometry()
-    # Wire 1: left arm, runs from left endpoint to apex.
-    geo.wire(
-        1,
-        n_per_wire,
-        left[0],
-        left[1],
-        left[2],
-        apex[0],
-        apex[1],
-        apex[2],
-        wire_radius,
-        1.0,
-        1.0,
-    )
-    # Wire 2: right arm, runs from apex to right endpoint.
-    geo.wire(
-        2,
-        n_per_wire,
-        apex[0],
-        apex[1],
-        apex[2],
-        right[0],
-        right[1],
-        right[2],
-        wire_radius,
-        1.0,
-        1.0,
-    )
+    geo.wire(1, n_per_wire, *left, *apex, wire_radius, 1.0, 1.0)
+    geo.wire(2, n_per_wire, *apex, *right, wire_radius, 1.0, 1.0)
     c.geometry_complete(0)
 
-    # Feed the segment that contains the apex — the last segment of wire 1.
-    # NEC numbers segments 1..N_total in geometry order; feed_seg refers to
-    # the global index within the tagged wire.
-    feed_seg = n_per_wire  # last segment of wire 1 (touches the apex)
+    return {
+        "context": c,
+        "feed_seg": n_per_wire,  # last segment of wire 1 (touches the apex)
+        "n_per_wire": n_per_wire,
+        "left": left,
+        "apex": apex,
+        "right": right,
+        "arm_len_m": arm_len,
+        "wavelength_design": wavelength_design,
+        "design_freq_mhz": design_freq_mhz,
+        "ground": ground,
+        "z_offset": z_offset,
+    }
+
+
+def solve_inverted_v(req: dict) -> dict:
+    """Inverted V via two PyNEC wires meeting at the apex."""
+    meas_freq_mhz = float(
+        req.get("measurement_freq_mhz", req.get("design_freq_mhz", 14.3))
+    )
+    b = _build_inverted_v(req)
+    c = b["context"]
+    n_per_wire = b["n_per_wire"]
+    feed_seg = b["feed_seg"]
 
     t0 = time.perf_counter()
     cur_arr, tag_arr = _run_solve(
-        c, 2 * n_per_wire, feed_seg, meas_freq_mhz, ground=ground
+        c, 2 * n_per_wire, feed_seg, meas_freq_mhz, ground=b["ground"]
     )
     solve_ms = (time.perf_counter() - t0) * 1e3
 
@@ -135,8 +130,8 @@ def solve_inverted_v(req: dict) -> dict:
 
     # Build knot positions and currents, matching pysim's response shape:
     # one continuous wire (left arm reversed + right arm), feed at apex.
-    arm1_knots = np.linspace(left, apex, n_per_wire + 1)
-    arm2_knots = np.linspace(apex, right, n_per_wire + 1)
+    arm1_knots = np.linspace(b["left"], b["apex"], n_per_wire + 1)
+    arm2_knots = np.linspace(b["apex"], b["right"], n_per_wire + 1)
     knots = np.vstack([arm1_knots[:-1], arm2_knots])  # (2N+1, 3)
 
     # Per-wire segment currents.
@@ -162,22 +157,23 @@ def solve_inverted_v(req: dict) -> dict:
         "feed_knot_index": feed_knot_index,
         "z_in_re": float(z_in.real),
         "z_in_im": float(z_in.imag),
-        "design_freq_mhz": design_freq_mhz,
+        "design_freq_mhz": b["design_freq_mhz"],
         "measurement_freq_mhz": meas_freq_mhz,
-        "lambda_design_m": wavelength_design,
-        "arm_len_m": arm_len,
+        "lambda_design_m": b["wavelength_design"],
+        "arm_len_m": b["arm_len_m"],
         "solve_ms": solve_ms,
         "solver": "pynec",
-        "ground": ground,
-        "height_m": z_offset,
+        "ground": b["ground"],
+        "height_m": b["z_offset"],
+        "ground_eps_r": GROUND_DIELECTRIC,
+        "ground_sigma": GROUND_CONDUCTIVITY,
     }
 
 
-def solve_yagi(req: dict) -> dict:
-    """Two-element Yagi (driver + reflector) — driver along x, reflector at -y."""
+def _build_yagi(req: dict):
+    """Build the PyNEC context + geometry for the Yagi."""
     n_per_wire = int(req.get("n_per_wire", 30))
     design_freq_mhz = float(req.get("design_freq_mhz", 14.3))
-    meas_freq_mhz = float(req.get("measurement_freq_mhz", design_freq_mhz))
     driver_factor = float(req.get("driver_length_factor", 0.962))
     refl_factor_abs = float(req.get("reflector_length_factor", 1.01))
     spacing_wavelengths = float(req.get("spacing_wavelengths", 0.15))
@@ -193,7 +189,6 @@ def solve_yagi(req: dict) -> dict:
 
     c = nec.nec_context()
     geo = c.get_geometry()
-    # Driver: along x at y=0, z=z_offset.
     geo.wire(
         1,
         n_per_wire,
@@ -207,7 +202,6 @@ def solve_yagi(req: dict) -> dict:
         1.0,
         1.0,
     )
-    # Reflector: along x at y=-spacing_m, z=z_offset.
     geo.wire(
         2,
         n_per_wire,
@@ -223,12 +217,37 @@ def solve_yagi(req: dict) -> dict:
     )
     c.geometry_complete(0)
 
-    # Feed driver center segment.
-    feed_seg = (n_per_wire + 1) // 2
+    return {
+        "context": c,
+        "feed_seg": (n_per_wire + 1) // 2,  # driver center segment
+        "n_per_wire": n_per_wire,
+        "h_driver": h_driver,
+        "h_refl": h_refl,
+        "spacing_m": spacing_m,
+        "wavelength_design": wavelength_design,
+        "design_freq_mhz": design_freq_mhz,
+        "ground": ground,
+        "z_offset": z_offset,
+    }
+
+
+def solve_yagi(req: dict) -> dict:
+    """Two-element Yagi (driver + reflector) — driver along x, reflector at -y."""
+    meas_freq_mhz = float(
+        req.get("measurement_freq_mhz", req.get("design_freq_mhz", 14.3))
+    )
+    b = _build_yagi(req)
+    c = b["context"]
+    n_per_wire = b["n_per_wire"]
+    feed_seg = b["feed_seg"]
+    h_driver = b["h_driver"]
+    h_refl = b["h_refl"]
+    spacing_m = b["spacing_m"]
+    z_offset = b["z_offset"]
 
     t0 = time.perf_counter()
     cur_arr, tag_arr = _run_solve(
-        c, 2 * n_per_wire, feed_seg, meas_freq_mhz, ground=ground
+        c, 2 * n_per_wire, feed_seg, meas_freq_mhz, ground=b["ground"]
     )
     solve_ms = (time.perf_counter() - t0) * 1e3
 
@@ -282,16 +301,18 @@ def solve_yagi(req: dict) -> dict:
         "feed_knot_index": feed_knot_index,
         "z_in_re": float(z_in.real),
         "z_in_im": float(z_in.imag),
-        "design_freq_mhz": design_freq_mhz,
+        "design_freq_mhz": b["design_freq_mhz"],
         "measurement_freq_mhz": meas_freq_mhz,
-        "lambda_design_m": wavelength_design,
+        "lambda_design_m": b["wavelength_design"],
         "driver_length_m": 2 * h_driver,
         "reflector_length_m": 2 * h_refl,
         "spacing_m": spacing_m,
         "solve_ms": solve_ms,
         "solver": "pynec",
-        "ground": ground,
+        "ground": b["ground"],
         "height_m": z_offset,
+        "ground_eps_r": GROUND_DIELECTRIC,
+        "ground_sigma": GROUND_CONDUCTIVITY,
     }
 
 
@@ -300,6 +321,51 @@ def solve(req: dict) -> dict:
     if geometry == "yagi":
         return solve_yagi(req)
     return solve_inverted_v(req)
+
+
+def pattern(req: dict) -> dict:
+    """NEC's `rp_card`-computed gain pattern over the upper hemisphere.
+
+    Returns a (n_theta × n_phi) gain grid in dBi at θ ∈ [0°, 90°], full φ.
+    With ground off, the lower hemisphere is symmetric to the upper for the
+    flat geometries supported here, but we only ship the upper half — the
+    UI mirrors as needed.
+    """
+    geometry = req.get("geometry", "inverted_v")
+    b = _build_yagi(req) if geometry == "yagi" else _build_inverted_v(req)
+    c = b["context"]
+    feed_seg = b["feed_seg"]
+    n_per_wire = b["n_per_wire"]
+    meas_freq_mhz = float(
+        req.get("measurement_freq_mhz", req.get("design_freq_mhz", 14.3))
+    )
+
+    t0 = time.perf_counter()
+    _run_solve(c, 2 * n_per_wire, feed_seg, meas_freq_mhz, ground=b["ground"])
+
+    # 2°×5° grid: 46 thetas (0..90), 73 phis (0..360 inclusive). At ~3.4k
+    # rays this runs in tens of ms — fine for a debounced overlay request.
+    n_theta = 46
+    n_phi = 73
+    del_theta = 90.0 / (n_theta - 1)
+    del_phi = 360.0 / (n_phi - 1)
+    c.rp_card(0, n_theta, n_phi, 0, 5, 0, 0, 0.0, 0.0, del_theta, del_phi, 0.0, 0.0)
+    gains = [
+        [float(c.get_gain(0, ti, pi)) for pi in range(n_phi)] for ti in range(n_theta)
+    ]
+    pattern_ms = (time.perf_counter() - t0) * 1e3
+
+    return {
+        "available": True,
+        "geometry": geometry,
+        "ground": b["ground"],
+        "height_m": b["z_offset"],
+        "measurement_freq_mhz": meas_freq_mhz,
+        "theta_deg": [ti * del_theta for ti in range(n_theta)],
+        "phi_deg": [pi * del_phi for pi in range(n_phi)],
+        "gain_dbi": gains,
+        "pattern_ms": pattern_ms,
+    }
 
 
 def _sweep_at(req: dict, freq_mhz: float) -> complex:

@@ -21,6 +21,8 @@ type SolveResponse = {
   directivity_norm?: number;
   ground?: boolean;
   height_m?: number;
+  ground_eps_r?: number;
+  ground_sigma?: number;
   // V-specific
   arm_len_m?: number;
   // Yagi-specific
@@ -51,6 +53,13 @@ type SweepData = {
   freqs_mhz: number[];
   z_re: number[];
   z_im: number[];
+};
+
+type PatternData = {
+  theta_deg: number[];
+  phi_deg: number[];
+  gain_dbi: number[][];
+  measurement_freq_mhz: number;
 };
 
 const WS_URL = `ws://${window.location.host}/ws`;
@@ -143,6 +152,9 @@ export function App() {
   const [rttMs, setRttMs] = useState<number | null>(null);
   const [sweep, setSweep] = useState<SweepData | null>(null);
   const [sweepRunning, setSweepRunning] = useState(false);
+  // NEC's rp_card pattern, fetched on a debounce so we don't fire one per
+  // slider tick. Overlaid on the cuts as a comparison line.
+  const [pattern, setPattern] = useState<PatternData | null>(null);
   const [view, setView] = useState<View>("antenna");
   const { ref: slideRef, size: chartSize } = useSlideSize(720);
   const thumbStripRef = useRef<HTMLDivElement>(null);
@@ -162,6 +174,8 @@ export function App() {
 
   const sweepTimerRef = useRef<number | null>(null);
   const sweepAbortRef = useRef<AbortController | null>(null);
+  const patternTimerRef = useRef<number | null>(null);
+  const patternAbortRef = useRef<AbortController | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const inFlightRef = useRef(false);
@@ -232,6 +246,28 @@ export function App() {
     groundEnabled, heightM,
   ]);
 
+  // Debounced NEC pattern fetch. PyNEC only — for pysim there's no rp_card
+  // equivalent. Tracks measurement freq too (unlike the impedance sweep).
+  useEffect(() => {
+    if (patternTimerRef.current) window.clearTimeout(patternTimerRef.current);
+    setPattern(null);
+    if (solver !== "pynec") return;
+    patternTimerRef.current = window.setTimeout(() => {
+      runPattern();
+      patternTimerRef.current = null;
+    }, 500);
+    return () => {
+      if (patternTimerRef.current) window.clearTimeout(patternTimerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    geometry, solver,
+    angle, halfdriverFactor,
+    driverLengthFactor, reflectorLengthFactor, spacingWavelengths,
+    nPerWire, designFreq, measFreq, wireRadius,
+    groundEnabled, heightM,
+  ]);
+
   async function runSweep() {
     sweepAbortRef.current?.abort();
     const controller = new AbortController();
@@ -265,6 +301,32 @@ export function App() {
         sweepAbortRef.current = null;
         setSweepRunning(false);
       }
+    }
+  }
+
+  async function runPattern() {
+    patternAbortRef.current?.abort();
+    const controller = new AbortController();
+    patternAbortRef.current = controller;
+    try {
+      const resp = await fetch("/pattern", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(buildRequest()),
+        signal: controller.signal,
+      });
+      if (!resp.ok) throw new Error(`pattern failed: ${resp.status}`);
+      const data = await resp.json();
+      if (!data.available) {
+        setPattern(null);
+        return;
+      }
+      if (!controller.signal.aborted) setPattern(data as PatternData);
+    } catch (e: unknown) {
+      if (e instanceof DOMException && e.name === "AbortError") return;
+      console.error("pattern error", e);
+    } finally {
+      if (patternAbortRef.current === controller) patternAbortRef.current = null;
     }
   }
 
@@ -610,6 +672,7 @@ export function App() {
                   fill={false}
                   result={result}
                   sweep={sweep}
+                  pattern={pattern}
                   measFreqMhz={measFreq}
                   sweepRunning={sweepRunning}
                 />
@@ -625,6 +688,7 @@ export function App() {
             fill={view === "antenna"}
             result={result}
             sweep={sweep}
+            pattern={pattern}
             measFreqMhz={measFreq}
             sweepRunning={sweepRunning}
           />
@@ -665,6 +729,7 @@ function ViewPanel({
   fill,
   result,
   sweep,
+  pattern,
   measFreqMhz,
   sweepRunning,
 }: {
@@ -673,6 +738,7 @@ function ViewPanel({
   fill: boolean;
   result: SolveResponse | null;
   sweep: SweepData | null;
+  pattern: PatternData | null;
   measFreqMhz: number;
   sweepRunning: boolean;
 }) {
@@ -685,10 +751,10 @@ function ViewPanel({
     );
   }
   if (view === "azimuth") {
-    return <FarFieldChart result={result} size={size} cut="xy" />;
+    return <FarFieldChart result={result} pattern={pattern} size={size} cut="xy" />;
   }
   if (view === "elevation") {
-    return <FarFieldChart result={result} size={size} cut="yz" />;
+    return <FarFieldChart result={result} pattern={pattern} size={size} cut="yz" />;
   }
   return (
     <SmithChart
@@ -707,10 +773,12 @@ type FarFieldCut = "xy" | "yz";
 
 function FarFieldChart({
   result,
+  pattern,
   size,
   cut,
 }: {
   result: SolveResponse | null;
+  pattern: PatternData | null;
   size: number;
   cut: FarFieldCut;
 }) {
@@ -735,6 +803,15 @@ function FarFieldChart({
     const cx = size / 2;
     const cy = size / 2;
     const R = size / 2 - 14;
+
+    const groundOn = !!result?.ground;
+    // When ground is on, the xy cut at z=0 is the horizon — Fresnel grazing
+    // kills the field everywhere there. Tilt the cone up by AZ_ELEV_DEG so
+    // the "azimuth" cut actually shows the pattern lobes.
+    const AZ_ELEV_DEG = 15;
+    const azElev = groundOn && cut === "xy" ? (AZ_ELEV_DEG * Math.PI) / 180 : 0;
+    const azSinT = Math.cos(azElev); // sin(polar θ from +z) = cos(elevation)
+    const azCosT = Math.sin(azElev); // cos(polar θ) = sin(elevation)
 
     // Radial axis: absolute directivity in dBi over a fixed displayable
     // range of +10 (outer edge) to −20 (origin). Labeled ticks are at the
@@ -767,7 +844,9 @@ function FarFieldChart({
     const vertLabel = cut === "xy" ? "y" : "z";
     ctx.fillStyle = "#4a5160";
     ctx.font = "10px ui-monospace, monospace";
-    ctx.fillText(`${cut} plane (dBi)`, 6, 14);
+    const cutLabel =
+      cut === "xy" && groundOn ? `az @ ${AZ_ELEV_DEG}° elev (dBi)` : `${cut} plane (dBi)`;
+    ctx.fillText(cutLabel, 6, 14);
     ctx.fillStyle = "#7b8493";
     ctx.fillText(`+${horizLabel}`, cx + R - 14, cy + 11);
     ctx.fillText(`−${horizLabel}`, cx - R + 2, cy + 11);
@@ -781,9 +860,19 @@ function FarFieldChart({
     // direction compute the moment integral over ALL wires:
     //   M(r̂) = Σ_segments I_mid · (r_{n+1} − r_n) · exp(jk r̂·r_mid)
     // and take |M_perp|² (component perpendicular to r̂).
+    //
+    // With a ground plane, also accumulate the PEC-image moment (segments
+    // mirrored through z=0, horizontal current direction flipped) and apply
+    // Fresnel coefficients per ray to get the reflected wave. Above-horizon
+    // only; rays into the ground contribute nothing.
     const N_DIR = 180;
     const c = 299_792_458;
     const k = (2 * Math.PI * result.measurement_freq_mhz * 1e6) / c;
+    // ε̃ = εr − j·σ/(ωε₀). Use stored constants when ground is on.
+    const omega = 2 * Math.PI * result.measurement_freq_mhz * 1e6;
+    const EPS0 = 8.854187817e-12;
+    const epsRe = result.ground_eps_r ?? 1;
+    const epsIm = -(result.ground_sigma ?? 0) / (omega * EPS0);
 
     // Flatten per-segment quantities across every wire.
     let nSeg = 0;
@@ -823,17 +912,21 @@ function FarFieldChart({
       const t = (2 * Math.PI * pi) / N_DIR;
       const ct = Math.cos(t);
       const st = Math.sin(t);
-      // (u, v) = (x̂, ŷ) for xy cut, (ŷ, ẑ) for yz cut.
-      const rx = cut === "xy" ? ct : 0;
-      const ry = cut === "xy" ? st : ct;
-      const rz = cut === "xy" ? 0 : st;
+      // xy cut: cone at polar angle azCosT (= cos θ_polar) above the xy plane.
+      // yz cut: full great circle through ŷ, ẑ.
+      const rx = cut === "xy" ? azSinT * ct : 0;
+      const ry = cut === "xy" ? azSinT * st : ct;
+      const rz = cut === "xy" ? azCosT : st;
 
-      let mxRe = 0;
-      let mxIm = 0;
-      let myRe = 0;
-      let myIm = 0;
-      let mzRe = 0;
-      let mzIm = 0;
+      // Rays into the ground (rz < 0) carry no far field.
+      if (groundOn && rz < 0) {
+        mag2s[pi] = 0;
+        continue;
+      }
+
+      let mxRe = 0, mxIm = 0, myRe = 0, myIm = 0, mzRe = 0, mzIm = 0;
+      // Image moment accumulators (only used when groundOn).
+      let ixRe = 0, ixIm = 0, iyRe = 0, iyIm = 0, izRe = 0, izIm = 0;
       for (let n = 0; n < nSeg; n++) {
         const phase = k * (rx * midx[n] + ry * midy[n] + rz * midz[n]);
         const cph = Math.cos(phase);
@@ -847,17 +940,99 @@ function FarFieldChart({
         myIm += iim * dy[n];
         mzRe += ire * dz[n];
         mzIm += iim * dz[n];
+
+        if (groundOn) {
+          // Image position: (x, y, -z). Image current dir: (-dx, -dy, +dz).
+          const phaseI = k * (rx * midx[n] + ry * midy[n] - rz * midz[n]);
+          const cphI = Math.cos(phaseI);
+          const sphI = Math.sin(phaseI);
+          const ireI = Ire[n] * cphI - Iim[n] * sphI;
+          const iimI = Ire[n] * sphI + Iim[n] * cphI;
+          ixRe += ireI * -dx[n]; ixIm += iimI * -dx[n];
+          iyRe += ireI * -dy[n]; iyIm += iimI * -dy[n];
+          izRe += ireI *  dz[n]; izIm += iimI *  dz[n];
+        }
       }
-      // M·r̂ uses all three components now.
+      // Direct M_perp = M − (M·r̂) r̂
       const mDotRre = mxRe * rx + myRe * ry + mzRe * rz;
       const mDotRim = mxIm * rx + myIm * ry + mzIm * rz;
-      // M_perp = M − (M·r̂) r̂
-      const pxRe = mxRe - mDotRre * rx;
-      const pxIm = mxIm - mDotRim * rx;
-      const pyRe = myRe - mDotRre * ry;
-      const pyIm = myIm - mDotRim * ry;
-      const pzRe = mzRe - mDotRre * rz;
-      const pzIm = mzIm - mDotRim * rz;
+      let pxRe = mxRe - mDotRre * rx;
+      let pxIm = mxIm - mDotRim * rx;
+      let pyRe = myRe - mDotRre * ry;
+      let pyIm = myIm - mDotRim * ry;
+      let pzRe = mzRe - mDotRre * rz;
+      let pzIm = mzIm - mDotRim * rz;
+
+      if (groundOn) {
+        // Image M_perp.
+        const iDotRre = ixRe * rx + iyRe * ry + izRe * rz;
+        const iDotRim = ixIm * rx + iyIm * ry + izIm * rz;
+        const qxRe = ixRe - iDotRre * rx;
+        const qxIm = ixIm - iDotRim * rx;
+        const qyRe = iyRe - iDotRre * ry;
+        const qyIm = iyIm - iDotRim * ry;
+        const qzRe = izRe - iDotRre * rz;
+        const qzIm = izIm - iDotRim * rz;
+
+        // Polarization basis at r̂. ĥ = ẑ × r̂ / |·|, v̂ = r̂ × ĥ.
+        // Degenerate at the zenith (s≈0); pick arbitrary axes — both pol
+        // coefficients agree there, so the choice doesn't affect the sum.
+        const s = Math.sqrt(rx * rx + ry * ry);
+        let hx: number, hy: number, hz: number;
+        let vx: number, vy: number, vz: number;
+        if (s > 1e-9) {
+          hx = -ry / s; hy = rx / s; hz = 0;
+          vx = -rx * rz / s; vy = -ry * rz / s; vz = s;
+        } else {
+          hx = 1; hy = 0; hz = 0;
+          vx = 0; vy = 1; vz = 0;
+        }
+
+        // Decompose image perp onto (ĥ, v̂) — complex scalars.
+        const qhRe = qxRe * hx + qyRe * hy + qzRe * hz;
+        const qhIm = qxIm * hx + qyIm * hy + qzIm * hz;
+        const qvRe = qxRe * vx + qyRe * vy + qzRe * vz;
+        const qvIm = qxIm * vx + qyIm * vy + qzIm * vz;
+
+        // Fresnel reflection coefficients (complex). cos θᵢ = rz, sin²θᵢ = s².
+        // ε̃ − sin²θᵢ is complex; sqrt of complex follows the principal branch.
+        const cosTi = rz;
+        const sin2Ti = s * s;
+        const aRe = epsRe - sin2Ti;
+        const aIm = epsIm;
+        // Principal-branch √(a + jb)
+        const aMag = Math.hypot(aRe, aIm);
+        const QRe = Math.sqrt(0.5 * (aMag + aRe));
+        const QIm = Math.sign(aIm || 1) * Math.sqrt(Math.max(0, 0.5 * (aMag - aRe)));
+        // ρ_h = (cosTi − Q) / (cosTi + Q)
+        const numHRe = cosTi - QRe, numHIm = -QIm;
+        const denHRe = cosTi + QRe, denHIm = QIm;
+        const denH2 = denHRe * denHRe + denHIm * denHIm;
+        const rhoHRe = (numHRe * denHRe + numHIm * denHIm) / denH2;
+        const rhoHIm = (numHIm * denHRe - numHRe * denHIm) / denH2;
+        // ρ_v = (ε̃·cosTi − Q) / (ε̃·cosTi + Q)
+        const ecRe = epsRe * cosTi, ecIm = epsIm * cosTi;
+        const numVRe = ecRe - QRe, numVIm = ecIm - QIm;
+        const denVRe = ecRe + QRe, denVIm = ecIm + QIm;
+        const denV2 = denVRe * denVRe + denVIm * denVIm;
+        const rhoVRe = (numVRe * denVRe + numVIm * denVIm) / denV2;
+        const rhoVIm = (numVIm * denVRe - numVRe * denVIm) / denV2;
+
+        // Reflected: M_refl = ρ_v · q_v · v̂ − ρ_h · q_h · ĥ.
+        // The (−ρ_h) sign folds the PEC image's pre-applied horizontal flip
+        // back out, so ρ_h=−1 reproduces the PEC reflection exactly.
+        const rvqRe = rhoVRe * qvRe - rhoVIm * qvIm;
+        const rvqIm = rhoVRe * qvIm + rhoVIm * qvRe;
+        const rhqRe = rhoHRe * qhRe - rhoHIm * qhIm;
+        const rhqIm = rhoHRe * qhIm + rhoHIm * qhRe;
+        pxRe += rvqRe * vx - rhqRe * hx;
+        pxIm += rvqIm * vx - rhqIm * hx;
+        pyRe += rvqRe * vy - rhqRe * hy;
+        pyIm += rvqIm * vy - rhqIm * hy;
+        pzRe += rvqRe * vz - rhqRe * hz;
+        pzIm += rvqIm * vz - rhqIm * hz;
+      }
+
       const mag2 =
         pxRe * pxRe + pxIm * pxIm +
         pyRe * pyRe + pyIm * pyIm +
@@ -895,6 +1070,67 @@ function FarFieldChart({
     ctx.lineWidth = 1.5;
     ctx.stroke();
 
+    // NEC exact-pattern overlay (dashed cyan line) when available. Bilinear
+    // interpolation off the (θ, φ) grid; rays below horizon are skipped so
+    // the line breaks at the ground rather than wrapping to the origin.
+    if (pattern) {
+      const nt = pattern.theta_deg.length;
+      const np_ = pattern.phi_deg.length;
+      const dTheta = pattern.theta_deg[1] - pattern.theta_deg[0];
+      const dPhi = pattern.phi_deg[1] - pattern.phi_deg[0];
+      const clip = (g: number) => (g < -100 ? -100 : g);
+
+      ctx.beginPath();
+      let started = false;
+      for (let pi = 0; pi <= N_DIR; pi++) {
+        const t = (2 * Math.PI * pi) / N_DIR;
+        const ct = Math.cos(t);
+        const st = Math.sin(t);
+        const rx = cut === "xy" ? azSinT * ct : 0;
+        const ry = cut === "xy" ? azSinT * st : ct;
+        const rz = cut === "xy" ? azCosT : st;
+        if (rz < -1e-9) { started = false; continue; }
+
+        const thetaDeg = (Math.acos(Math.max(-1, Math.min(1, rz))) * 180) / Math.PI;
+        let phiRad = Math.atan2(ry, rx);
+        if (phiRad < 0) phiRad += 2 * Math.PI;
+        const phiDeg = (phiRad * 180) / Math.PI;
+
+        const tf = Math.max(0, Math.min(nt - 1, thetaDeg / dTheta));
+        const pf = Math.max(0, Math.min(np_ - 1, phiDeg / dPhi));
+        const t0 = Math.floor(tf), t1 = Math.min(nt - 1, t0 + 1);
+        const p0 = Math.floor(pf), p1 = Math.min(np_ - 1, p0 + 1);
+        const ft = tf - t0, fp = pf - p0;
+        const g00 = clip(pattern.gain_dbi[t0][p0]);
+        const g01 = clip(pattern.gain_dbi[t0][p1]);
+        const g10 = clip(pattern.gain_dbi[t1][p0]);
+        const g11 = clip(pattern.gain_dbi[t1][p1]);
+        const dBi =
+          g00 * (1 - ft) * (1 - fp) +
+          g01 * (1 - ft) * fp +
+          g10 * ft * (1 - fp) +
+          g11 * ft * fp;
+
+        const frac = dbiToFrac(dBi);
+        const px = cx + Math.cos(t) * frac * R;
+        const py = cy - Math.sin(t) * frac * R;
+        if (!started) { ctx.moveTo(px, py); started = true; }
+        else ctx.lineTo(px, py);
+      }
+      ctx.strokeStyle = "rgba(110, 220, 255, 0.85)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 3]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Legend swatch + label, bottom-right.
+      ctx.fillStyle = "rgba(110, 220, 255, 0.9)";
+      ctx.font = "10px ui-monospace, monospace";
+      const necText = "NEC rp_card";
+      const necTw = ctx.measureText(necText).width;
+      ctx.fillText(necText, size - necTw - 6, size - 6);
+    }
+
     // Peak dBi annotation (top-right corner).
     const peakDbi = 10 * Math.log10(norm * maxMag2);
     ctx.fillStyle = "#cdd5e0";
@@ -902,7 +1138,7 @@ function FarFieldChart({
     const peakText = `peak ${peakDbi >= 0 ? "+" : ""}${peakDbi.toFixed(1)} dBi`;
     const tw = ctx.measureText(peakText).width;
     ctx.fillText(peakText, size - tw - 6, 14);
-  }, [result, size, cut]);
+  }, [result, pattern, size, cut]);
 
   return <canvas ref={canvasRef} className="farfield" />;
 }

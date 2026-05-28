@@ -44,8 +44,13 @@ def _compute_directivity_norm(out: dict, n_theta: int = 45, n_phi: int = 90) -> 
 
     Multiplying this by the frontend's azimuth-cut |M_perp(π/2, φ)|² yields
     absolute directivity D(φ) (linear); 10·log10(D) is dBi.
+
+    With ground enabled, integrates only the upper hemisphere and adds the
+    Fresnel-reflected contribution from the geometric image so the
+    normalization matches what the JS far-field code displays.
     """
     k = 2 * np.pi * out["measurement_freq_mhz"] * 1e6 / C_LIGHT
+    ground_on = bool(out.get("ground", False))
 
     mids, drs, i_mids = [], [], []
     for w in out["wires"]:
@@ -60,8 +65,14 @@ def _compute_directivity_norm(out: dict, n_theta: int = 45, n_phi: int = 90) -> 
     dr = np.concatenate(drs, axis=0)  # (Nseg, 3)
     i_mid = np.concatenate(i_mids, axis=0)  # (Nseg,)
 
-    # Cell-centered sphere grid: θ in (0, π) at half-cells, φ in [0, 2π).
-    theta = (np.arange(n_theta) + 0.5) * (np.pi / n_theta)
+    # Cell-centered grid. With ground, sample only the upper hemisphere so
+    # the integral is over the half-space the antenna actually radiates into.
+    if ground_on:
+        theta = (np.arange(n_theta) + 0.5) * (np.pi / 2 / n_theta)
+        dtheta = np.pi / 2 / n_theta
+    else:
+        theta = (np.arange(n_theta) + 0.5) * (np.pi / n_theta)
+        dtheta = np.pi / n_theta
     phi = np.arange(n_phi) * (2 * np.pi / n_phi)
     sin_t, cos_t = np.sin(theta), np.cos(theta)
     cos_p, sin_p = np.cos(phi), np.sin(phi)
@@ -77,9 +88,50 @@ def _compute_directivity_norm(out: dict, n_theta: int = 45, n_phi: int = 90) -> 
     M = np.einsum("ijn,nc->ijc", expp, weighted)  # (nθ, nφ, 3)
     m_dot_r = np.sum(M * rhat, axis=-1)
     M_perp = M - m_dot_r[..., None] * rhat
+
+    if ground_on:
+        # PEC-image method, then Fresnel-correct the reflected wave per-ray.
+        # Image current: horizontal components flipped, vertical preserved.
+        # This reproduces PEC reflection when ρ_h=-1, ρ_v=+1, and lets us
+        # apply the actual finite-ground coefficients to that same image.
+        mid_img = mid * np.array([1.0, 1.0, -1.0])
+        dr_img = dr * np.array([-1.0, -1.0, 1.0])
+        weighted_img = i_mid[:, None] * dr_img
+        phase_img = k * np.einsum("ijc,nc->ijn", rhat, mid_img)
+        expp_img = np.exp(1j * phase_img)
+        M_img = np.einsum("ijn,nc->ijc", expp_img, weighted_img)
+        m_img_dot_r = np.sum(M_img * rhat, axis=-1)
+        M_img_perp = M_img - m_img_dot_r[..., None] * rhat
+
+        # Polarization basis at each ray: ĥ = ẑ × r̂ (perp to plane of
+        # incidence), v̂ = r̂ × ĥ (in plane of incidence, perp to r̂).
+        s = np.sqrt(rx * rx + ry * ry)
+        s_safe = np.where(s > 1e-12, s, 1.0)
+        h_hat = np.stack([-ry / s_safe, rx / s_safe, np.zeros_like(rx)], axis=-1)
+        v_hat = np.stack([-rx * rz / s_safe, -ry * rz / s_safe, s], axis=-1)
+
+        M_img_h = np.sum(M_img_perp * h_hat, axis=-1)  # complex (nθ, nφ)
+        M_img_v = np.sum(M_img_perp * v_hat, axis=-1)
+
+        eps0 = 8.854187817e-12
+        omega = 2 * np.pi * out["measurement_freq_mhz"] * 1e6
+        eps_c = out["ground_eps_r"] - 1j * out["ground_sigma"] / (omega * eps0)
+        cos_ti = rz
+        sin2_ti = s * s
+        Q = np.sqrt(eps_c - sin2_ti)
+        rho_h = (cos_ti - Q) / (cos_ti + Q)
+        rho_v = (eps_c * cos_ti - Q) / (eps_c * cos_ti + Q)
+
+        # Reflected: ρ_v on the v-pol component, −ρ_h on the h-pol component
+        # (the minus sign folds the PEC image's pre-applied horizontal flip
+        # back out so ρ_h=−1 recovers the PEC limit exactly).
+        M_refl = (rho_v * M_img_v)[..., None] * v_hat - (rho_h * M_img_h)[
+            ..., None
+        ] * h_hat
+        M_perp = M_perp + M_refl
+
     mag2 = np.sum((M_perp.real**2 + M_perp.imag**2), axis=-1)  # (nθ, nφ)
 
-    dtheta = np.pi / n_theta
     dphi = 2 * np.pi / n_phi
     p_rad = float(np.sum(mag2 * sin_t[:, None]) * dtheta * dphi)
     out["directivity_norm"] = (4 * np.pi / p_rad) if p_rad > 0 else 0.0
@@ -347,6 +399,14 @@ async def sweep_endpoint(req: dict):
     else:
         z_re, z_im = _sweep_inverted_v(req, freqs)
     return {"freqs_mhz": freqs, "z_re": z_re, "z_im": z_im, "solver": "pysim"}
+
+
+@app.post("/pattern")
+async def pattern_endpoint(req: dict):
+    """NEC's rp_card-computed gain pattern. PyNEC-only."""
+    if req.get("solver") != "pynec" or not pynec_backend.HAVE_PYNEC:
+        return {"available": False}
+    return pynec_backend.pattern(req)
 
 
 @app.get("/healthz")
