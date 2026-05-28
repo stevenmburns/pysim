@@ -19,6 +19,8 @@ type SolveResponse = {
   lambda_design_m: number;
   solve_ms: number;
   directivity_norm?: number;
+  ground?: boolean;
+  height_m?: number;
   // V-specific
   arm_len_m?: number;
   // Yagi-specific
@@ -34,6 +36,8 @@ type SolveRequest = {
   design_freq_mhz: number;
   measurement_freq_mhz: number;
   wire_radius: number;
+  ground: boolean;
+  height_m: number;
   // V
   angle_deg?: number;
   halfdriver_factor?: number;
@@ -120,6 +124,9 @@ export function App() {
   const [measFreq, setMeasFreq] = useState(14.3);
   const [linkMeas, setLinkMeas] = useState(true);
   const [wireRadius, setWireRadius] = useState(0.0005);
+  // Ground plane (PyNEC only). Geometry is lifted by heightM when enabled.
+  const [groundEnabled, setGroundEnabled] = useState(false);
+  const [heightM, setHeightM] = useState(7.0);
 
   // When linked, design and measurement freq move together.
   function updateDesignFreq(v: number) {
@@ -162,6 +169,8 @@ export function App() {
   const sendStartRef = useRef(0);
 
   function buildRequest(): SolveRequest {
+    // Ground only takes effect for the PyNEC solver; pysim has no ground model.
+    const groundActive = solver === "pynec" && groundEnabled;
     const base: SolveRequest = {
       geometry,
       solver,
@@ -169,6 +178,8 @@ export function App() {
       design_freq_mhz: designFreq,
       measurement_freq_mhz: measFreq,
       wire_radius: wireRadius,
+      ground: groundActive,
+      height_m: heightM,
     };
     if (geometry === "inverted_v") {
       base.angle_deg = angle;
@@ -194,6 +205,7 @@ export function App() {
     angle, halfdriverFactor,
     driverLengthFactor, reflectorLengthFactor, spacingWavelengths,
     nPerWire, designFreq, measFreq, wireRadius,
+    groundEnabled, heightM,
   ]);
 
   // Debounced sweep across measurement freq. Re-runs whenever any antenna
@@ -217,6 +229,7 @@ export function App() {
     angle, halfdriverFactor,
     driverLengthFactor, reflectorLengthFactor, spacingWavelengths,
     nPerWire, designFreq, wireRadius,
+    groundEnabled, heightM,
   ]);
 
   async function runSweep() {
@@ -455,6 +468,35 @@ export function App() {
             </button>
           </div>
         </div>
+
+        <div className="field">
+          <label className="link-toggle" title={solver === "pynec" ? "" : "Ground model requires PyNEC"}>
+            <input
+              type="checkbox"
+              checked={solver === "pynec" && groundEnabled}
+              disabled={solver !== "pynec"}
+              onChange={(e) => setGroundEnabled(e.target.checked)}
+            />
+            ground plane (εr=10, σ=0.002 S/m)
+          </label>
+        </div>
+
+        {solver === "pynec" && groundEnabled && (
+          <div className="field">
+            <label>
+              <span>height above ground</span>
+              <span>{heightM.toFixed(2)} m</span>
+            </label>
+            <input
+              type="range"
+              min={0.5}
+              max={30}
+              step={0.1}
+              value={heightM}
+              onInput={(e) => setHeightM(Number((e.target as HTMLInputElement).value))}
+            />
+          </div>
+        )}
 
         <div className="field">
           <label>

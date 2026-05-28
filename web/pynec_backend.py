@@ -24,6 +24,10 @@ except ImportError:
 
 C_LIGHT = 299_792_458.0
 
+# Typical "average" earth, matching antenna_designer/sim.py.
+GROUND_DIELECTRIC = 10.0
+GROUND_CONDUCTIVITY = 0.002
+
 
 def _segment_centers_to_knot_currents(
     cur_per_seg: np.ndarray, n_knots: int
@@ -42,8 +46,14 @@ def _segment_centers_to_knot_currents(
     return full
 
 
-def _run_solve(c, n_seg_total: int, feed_seg: int, freq_mhz: float):
-    c.gn_card(-1, 0, 0, 0, 0, 0, 0, 0)  # free space
+def _run_solve(
+    c, n_seg_total: int, feed_seg: int, freq_mhz: float, ground: bool = False
+):
+    if ground:
+        # Sommerfeld-Norton finite ground (ITYPE=2) with average-earth constants.
+        c.gn_card(2, 0, GROUND_DIELECTRIC, GROUND_CONDUCTIVITY, 0, 0, 0, 0)
+    else:
+        c.gn_card(-1, 0, 0, 0, 0, 0, 0, 0)  # free space
     c.ex_card(0, 1, feed_seg, 0, 1.0, 0.0, 0, 0, 0, 0)
     c.fr_card(0, 1, freq_mhz, 0)
     c.xq_card(0)
@@ -61,14 +71,19 @@ def solve_inverted_v(req: dict) -> dict:
     meas_freq_mhz = float(req.get("measurement_freq_mhz", design_freq_mhz))
     halfdriver_factor = float(req.get("halfdriver_factor", 0.962))
     wire_radius = float(req.get("wire_radius", 0.0005))
+    ground = bool(req.get("ground", False))
+    height_m = float(req.get("height_m", 0.0))
 
     wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
     arm_len = halfdriver_factor * wavelength_design / 4.0
     alpha = np.deg2rad(angle_deg)
     cos_a, sin_a = float(np.cos(alpha)), float(np.sin(alpha))
-    left = (-arm_len * cos_a, 0.0, -arm_len * sin_a)
-    apex = (0.0, 0.0, 0.0)
-    right = (arm_len * cos_a, 0.0, -arm_len * sin_a)
+    # When ground is on, lift the entire geometry by height_m so the arms
+    # stay above z=0 (NEC rejects segments at/below the ground plane).
+    z_offset = height_m if ground else 0.0
+    left = (-arm_len * cos_a, 0.0, z_offset - arm_len * sin_a)
+    apex = (0.0, 0.0, z_offset)
+    right = (arm_len * cos_a, 0.0, z_offset - arm_len * sin_a)
 
     c = nec.nec_context()
     geo = c.get_geometry()
@@ -108,7 +123,9 @@ def solve_inverted_v(req: dict) -> dict:
     feed_seg = n_per_wire  # last segment of wire 1 (touches the apex)
 
     t0 = time.perf_counter()
-    cur_arr, tag_arr = _run_solve(c, 2 * n_per_wire, feed_seg, meas_freq_mhz)
+    cur_arr, tag_arr = _run_solve(
+        c, 2 * n_per_wire, feed_seg, meas_freq_mhz, ground=ground
+    )
     solve_ms = (time.perf_counter() - t0) * 1e3
 
     # z_in = 1 / current at the fed segment center.
@@ -151,6 +168,8 @@ def solve_inverted_v(req: dict) -> dict:
         "arm_len_m": arm_len,
         "solve_ms": solve_ms,
         "solver": "pynec",
+        "ground": ground,
+        "height_m": z_offset,
     }
 
 
@@ -163,38 +182,41 @@ def solve_yagi(req: dict) -> dict:
     refl_factor_abs = float(req.get("reflector_length_factor", 1.01))
     spacing_wavelengths = float(req.get("spacing_wavelengths", 0.15))
     wire_radius = float(req.get("wire_radius", 0.0005))
+    ground = bool(req.get("ground", False))
+    height_m = float(req.get("height_m", 0.0))
 
     wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
     h_driver = driver_factor * wavelength_design / 4.0
     h_refl = refl_factor_abs * wavelength_design / 4.0
     spacing_m = spacing_wavelengths * wavelength_design
+    z_offset = height_m if ground else 0.0
 
     c = nec.nec_context()
     geo = c.get_geometry()
-    # Driver: along x at y=0, z=0.
+    # Driver: along x at y=0, z=z_offset.
     geo.wire(
         1,
         n_per_wire,
         -h_driver,
         0.0,
-        0.0,
+        z_offset,
         h_driver,
         0.0,
-        0.0,
+        z_offset,
         wire_radius,
         1.0,
         1.0,
     )
-    # Reflector: along x at y=-spacing_m, z=0.
+    # Reflector: along x at y=-spacing_m, z=z_offset.
     geo.wire(
         2,
         n_per_wire,
         -h_refl,
         -spacing_m,
-        0.0,
+        z_offset,
         h_refl,
         -spacing_m,
-        0.0,
+        z_offset,
         wire_radius,
         1.0,
         1.0,
@@ -205,7 +227,9 @@ def solve_yagi(req: dict) -> dict:
     feed_seg = (n_per_wire + 1) // 2
 
     t0 = time.perf_counter()
-    cur_arr, tag_arr = _run_solve(c, 2 * n_per_wire, feed_seg, meas_freq_mhz)
+    cur_arr, tag_arr = _run_solve(
+        c, 2 * n_per_wire, feed_seg, meas_freq_mhz, ground=ground
+    )
     solve_ms = (time.perf_counter() - t0) * 1e3
 
     driver_idx = np.where(tag_arr == 1)[0]
@@ -215,13 +239,17 @@ def solve_yagi(req: dict) -> dict:
 
     N = n_per_wire
     driver_knots = np.column_stack(
-        [np.linspace(-h_driver, h_driver, N + 1), np.zeros(N + 1), np.zeros(N + 1)]
+        [
+            np.linspace(-h_driver, h_driver, N + 1),
+            np.zeros(N + 1),
+            np.full(N + 1, z_offset),
+        ]
     )
     refl_knots = np.column_stack(
         [
             np.linspace(-h_refl, h_refl, N + 1),
             np.full(N + 1, -spacing_m),
-            np.zeros(N + 1),
+            np.full(N + 1, z_offset),
         ]
     )
     driver_cur = _segment_centers_to_knot_currents(
@@ -262,6 +290,8 @@ def solve_yagi(req: dict) -> dict:
         "spacing_m": spacing_m,
         "solve_ms": solve_ms,
         "solver": "pynec",
+        "ground": ground,
+        "height_m": z_offset,
     }
 
 
