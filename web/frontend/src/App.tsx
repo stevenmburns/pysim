@@ -1,28 +1,44 @@
 import { useEffect, useRef, useState } from "react";
 
-type SolveResponse = {
+type Wire = {
+  label: string;
   knot_positions: [number, number, number][];
   knot_currents_re: number[];
   knot_currents_im: number[];
+};
+
+type SolveResponse = {
+  geometry: "inverted_v" | "yagi";
+  wires: Wire[];
+  feed_wire_index: number;
   feed_knot_index: number;
   z_in_re: number;
   z_in_im: number;
-  angle_deg: number;
-  n_per_arm: number;
   design_freq_mhz: number;
   measurement_freq_mhz: number;
-  halfdriver_factor: number;
-  arm_len_m: number;
+  lambda_design_m: number;
   solve_ms: number;
+  // V-specific
+  arm_len_m?: number;
+  // Yagi-specific
+  driver_length_m?: number;
+  reflector_length_m?: number;
+  spacing_m?: number;
 };
 
 type SolveRequest = {
-  angle_deg: number;
-  n_per_arm: number;
+  geometry: "inverted_v" | "yagi";
+  n_per_wire: number;
   design_freq_mhz: number;
   measurement_freq_mhz: number;
-  halfdriver_factor: number;
   wire_radius: number;
+  // V
+  angle_deg?: number;
+  halfdriver_factor?: number;
+  // Yagi
+  driver_length_factor?: number;
+  reflector_length_factor?: number;
+  spacing_wavelengths?: number;
 };
 
 type SweepData = {
@@ -34,11 +50,18 @@ type SweepData = {
 const WS_URL = `ws://${window.location.host}/ws`;
 
 export function App() {
+  const [geometry, setGeometry] = useState<"inverted_v" | "yagi">("inverted_v");
+  // V controls
   const [angle, setAngle] = useState(30);
-  const [nPerArm, setNPerArm] = useState(30);
+  const [halfdriverFactor, setHalfdriverFactor] = useState(0.962);
+  // Yagi controls
+  const [driverLengthFactor, setDriverLengthFactor] = useState(0.962);
+  const [reflectorLengthFactor, setReflectorLengthFactor] = useState(1.01);
+  const [spacingWavelengths, setSpacingWavelengths] = useState(0.15);
+  // Shared
+  const [nPerWire, setNPerWire] = useState(30);
   const [designFreq, setDesignFreq] = useState(13.625);
   const [measFreq, setMeasFreq] = useState(13.625);
-  const [halfdriverFactor, setHalfdriverFactor] = useState(0.962);
   const [linkMeas, setLinkMeas] = useState(true);
   const [wireRadius, setWireRadius] = useState(0.0005);
 
@@ -66,32 +89,42 @@ export function App() {
   const pendingRef = useRef<SolveRequest | null>(null);
   const sendStartRef = useRef(0);
 
-  // The latest control values, used to send a new request when the prior one
-  // completes (drops intermediate values rather than queuing them all up).
-  const controlsRef = useRef<SolveRequest>({
-    angle_deg: angle,
-    n_per_arm: nPerArm,
-    design_freq_mhz: designFreq,
-    measurement_freq_mhz: measFreq,
-    halfdriver_factor: halfdriverFactor,
-    wire_radius: wireRadius,
-  });
-
-  useEffect(() => {
-    controlsRef.current = {
-      angle_deg: angle,
-      n_per_arm: nPerArm,
+  function buildRequest(): SolveRequest {
+    const base: SolveRequest = {
+      geometry,
+      n_per_wire: nPerWire,
       design_freq_mhz: designFreq,
       measurement_freq_mhz: measFreq,
-      halfdriver_factor: halfdriverFactor,
       wire_radius: wireRadius,
     };
+    if (geometry === "inverted_v") {
+      base.angle_deg = angle;
+      base.halfdriver_factor = halfdriverFactor;
+    } else {
+      base.driver_length_factor = driverLengthFactor;
+      base.reflector_length_factor = reflectorLengthFactor;
+      base.spacing_wavelengths = spacingWavelengths;
+    }
+    return base;
+  }
+
+  // The latest control values, used to send a new request when the prior one
+  // completes (drops intermediate values rather than queuing them all up).
+  const controlsRef = useRef<SolveRequest>(buildRequest());
+
+  useEffect(() => {
+    controlsRef.current = buildRequest();
     requestSolve();
-  }, [angle, nPerArm, designFreq, measFreq, halfdriverFactor, wireRadius]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    geometry,
+    angle, halfdriverFactor,
+    driverLengthFactor, reflectorLengthFactor, spacingWavelengths,
+    nPerWire, designFreq, measFreq, wireRadius,
+  ]);
 
   // Debounced sweep across measurement freq. Re-runs whenever any antenna
-  // parameter changes; measurement-freq slider does NOT trigger a sweep
-  // since the sweep is the locus and the meas-freq marker just walks it.
+  // parameter changes; measurement-freq slider does NOT trigger a sweep.
   useEffect(() => {
     if (sweepTimerRef.current) {
       window.clearTimeout(sweepTimerRef.current);
@@ -99,44 +132,40 @@ export function App() {
     setSweep(null);
     setSweepRunning(false);
     sweepTimerRef.current = window.setTimeout(() => {
-      runSweep(angle, nPerArm, designFreq, halfdriverFactor, wireRadius);
+      runSweep();
       sweepTimerRef.current = null;
     }, 500);
     return () => {
       if (sweepTimerRef.current) window.clearTimeout(sweepTimerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [angle, nPerArm, designFreq, halfdriverFactor, wireRadius]);
+  }, [
+    geometry,
+    angle, halfdriverFactor,
+    driverLengthFactor, reflectorLengthFactor, spacingWavelengths,
+    nPerWire, designFreq, wireRadius,
+  ]);
 
-  async function runSweep(
-    angle_deg: number,
-    n_per_arm: number,
-    design_freq_mhz: number,
-    halfdriver_factor: number,
-    wire_radius: number,
-  ) {
+  async function runSweep() {
     sweepAbortRef.current?.abort();
     const controller = new AbortController();
     sweepAbortRef.current = controller;
 
-    // Sweep ±30% of design freq with 41 points (log spacing keeps both
-    // sides of resonance well-sampled).
+    // Sweep ±30% of design freq with 41 log-spaced points.
     const N = 41;
-    const fLo = Math.max(0.5, design_freq_mhz * 0.7);
-    const fHi = Math.min(60, design_freq_mhz * 1.3);
+    const fLo = Math.max(0.5, designFreq * 0.7);
+    const fHi = Math.min(60, designFreq * 1.3);
     const freqs = Array.from({ length: N }, (_, i) =>
       Math.exp(Math.log(fLo) + (i / (N - 1)) * (Math.log(fHi) - Math.log(fLo))),
     );
 
+    const body = { ...buildRequest(), freqs_mhz: freqs };
     setSweepRunning(true);
     try {
       const resp = await fetch("/sweep", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          angle_deg, n_per_arm, design_freq_mhz, halfdriver_factor, wire_radius,
-          freqs_mhz: freqs,
-        }),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
       if (!resp.ok) throw new Error(`sweep failed: ${resp.status}`);
@@ -197,39 +226,108 @@ export function App() {
   return (
     <div className="app">
       <aside className="sidebar">
-        <h1>inverted V — interactive</h1>
+        <h1>pysim — interactive</h1>
+
+        <div className="geometry-tabs" role="tablist">
+          <button
+            role="tab"
+            aria-selected={geometry === "inverted_v"}
+            className={geometry === "inverted_v" ? "active" : ""}
+            onClick={() => setGeometry("inverted_v")}
+          >
+            inverted V
+          </button>
+          <button
+            role="tab"
+            aria-selected={geometry === "yagi"}
+            className={geometry === "yagi" ? "active" : ""}
+            onClick={() => setGeometry("yagi")}
+          >
+            Yagi (2 elements)
+          </button>
+        </div>
 
         <div className="group-label">antenna</div>
 
-        <div className="field">
-          <label>
-            <span>droop angle</span>
-            <span>{angle.toFixed(1)}°</span>
-          </label>
-          <input
-            type="range"
-            min={0}
-            max={80}
-            step={0.5}
-            value={angle}
-            onInput={(e) => setAngle(Number((e.target as HTMLInputElement).value))}
-          />
-        </div>
+        {geometry === "inverted_v" && (
+          <>
+            <div className="field">
+              <label>
+                <span>droop angle</span>
+                <span>{angle.toFixed(1)}°</span>
+              </label>
+              <input
+                type="range"
+                min={0}
+                max={80}
+                step={0.5}
+                value={angle}
+                onInput={(e) => setAngle(Number((e.target as HTMLInputElement).value))}
+              />
+            </div>
+            <div className="field">
+              <label>
+                <span>halfdriver factor</span>
+                <span>{halfdriverFactor.toFixed(3)}</span>
+              </label>
+              <input
+                type="range"
+                min={0.5}
+                max={1.2}
+                step={0.001}
+                value={halfdriverFactor}
+                onInput={(e) => setHalfdriverFactor(Number((e.target as HTMLInputElement).value))}
+              />
+            </div>
+          </>
+        )}
 
-        <div className="field">
-          <label>
-            <span>halfdriver factor</span>
-            <span>{halfdriverFactor.toFixed(3)}</span>
-          </label>
-          <input
-            type="range"
-            min={0.5}
-            max={1.2}
-            step={0.001}
-            value={halfdriverFactor}
-            onInput={(e) => setHalfdriverFactor(Number((e.target as HTMLInputElement).value))}
-          />
-        </div>
+        {geometry === "yagi" && (
+          <>
+            <div className="field">
+              <label>
+                <span>driver length factor</span>
+                <span>{driverLengthFactor.toFixed(3)}</span>
+              </label>
+              <input
+                type="range"
+                min={0.5}
+                max={1.2}
+                step={0.001}
+                value={driverLengthFactor}
+                onInput={(e) => setDriverLengthFactor(Number((e.target as HTMLInputElement).value))}
+              />
+            </div>
+            <div className="field">
+              <label>
+                <span>reflector length factor</span>
+                <span>{reflectorLengthFactor.toFixed(3)}</span>
+              </label>
+              <input
+                type="range"
+                min={0.5}
+                max={1.2}
+                step={0.001}
+                value={reflectorLengthFactor}
+                onInput={(e) => setReflectorLengthFactor(Number((e.target as HTMLInputElement).value))}
+              />
+            </div>
+            <div className="field">
+              <label>
+                <span>spacing (λ)</span>
+                <span>{spacingWavelengths.toFixed(3)}</span>
+              </label>
+              <input
+                type="range"
+                min={0.05}
+                max={0.5}
+                step={0.001}
+                value={spacingWavelengths}
+                onInput={(e) => setSpacingWavelengths(Number((e.target as HTMLInputElement).value))}
+              />
+            </div>
+          </>
+        )}
 
         <div className="field">
           <label>
@@ -262,16 +360,16 @@ export function App() {
 
         <div className="field">
           <label>
-            <span>segments / arm (N)</span>
-            <span>{nPerArm}</span>
+            <span>segments / wire (N)</span>
+            <span>{nPerWire}</span>
           </label>
           <input
             type="range"
             min={10}
             max={80}
             step={1}
-            value={nPerArm}
-            onInput={(e) => setNPerArm(Number((e.target as HTMLInputElement).value))}
+            value={nPerWire}
+            onInput={(e) => setNPerWire(Number((e.target as HTMLInputElement).value))}
           />
         </div>
 
@@ -310,10 +408,28 @@ export function App() {
               {result ? `${result.z_in_im.toFixed(2)} Ω` : "—"}
             </span>
           </div>
-          <div className="row">
-            <span>arm length</span>
-            <span className="val">{result ? `${result.arm_len_m.toFixed(3)} m` : "—"}</span>
-          </div>
+          {result?.geometry === "inverted_v" && result.arm_len_m != null && (
+            <div className="row">
+              <span>arm length</span>
+              <span className="val">{result.arm_len_m.toFixed(3)} m</span>
+            </div>
+          )}
+          {result?.geometry === "yagi" && (
+            <>
+              <div className="row">
+                <span>driver L</span>
+                <span className="val">{result.driver_length_m?.toFixed(3)} m</span>
+              </div>
+              <div className="row">
+                <span>reflector L</span>
+                <span className="val">{result.reflector_length_m?.toFixed(3)} m</span>
+              </div>
+              <div className="row">
+                <span>spacing</span>
+                <span className="val">{result.spacing_m?.toFixed(3)} m</span>
+              </div>
+            </>
+          )}
           <div className="row">
             <span>|I_feed|</span>
             <span className="val">
@@ -358,8 +474,10 @@ export function App() {
 }
 
 function feedMag(r: SolveResponse): number {
-  const re = r.knot_currents_re[r.feed_knot_index];
-  const im = r.knot_currents_im[r.feed_knot_index];
+  const w = r.wires[r.feed_wire_index];
+  if (!w) return 0;
+  const re = w.knot_currents_re[r.feed_knot_index];
+  const im = w.knot_currents_im[r.feed_knot_index];
   return Math.hypot(re, im);
 }
 
@@ -431,21 +549,16 @@ function FarFieldChart({ result, size }: { result: SolveResponse | null; size: n
     if (!result) return;
 
     // Azimuth cut: r̂ = (cos φ, sin φ, 0) for φ in [0, 2π).
-    // For each direction compute the moment integral
-    //   M(r̂) = Σ I_mid · (r_{n+1} − r_n) · exp(jk r̂·r_mid)
+    // For each direction compute the moment integral over ALL wires:
+    //   M(r̂) = Σ_segments I_mid · (r_{n+1} − r_n) · exp(jk r̂·r_mid)
     // and take |M_perp|² (component perpendicular to r̂).
     const N_PHI = 180;
     const c = 299_792_458;
     const k = (2 * Math.PI * result.measurement_freq_mhz * 1e6) / c;
-    const knots = result.knot_positions;
-    const cre = result.knot_currents_re;
-    const cim = result.knot_currents_im;
 
-    const mags = new Array<number>(N_PHI);
-    let maxMag = 0;
-
-    // Precompute per-segment quantities.
-    const nSeg = knots.length - 1;
+    // Flatten per-segment quantities across every wire.
+    let nSeg = 0;
+    for (const w of result.wires) nSeg += w.knot_positions.length - 1;
     const dx = new Float64Array(nSeg);
     const dy = new Float64Array(nSeg);
     const dz = new Float64Array(nSeg);
@@ -453,18 +566,27 @@ function FarFieldChart({ result, size }: { result: SolveResponse | null; size: n
     const midy = new Float64Array(nSeg);
     const Ire = new Float64Array(nSeg);
     const Iim = new Float64Array(nSeg);
-    for (let n = 0; n < nSeg; n++) {
-      const a = knots[n];
-      const b = knots[n + 1];
-      dx[n] = b[0] - a[0];
-      dy[n] = b[1] - a[1];
-      dz[n] = b[2] - a[2];
-      midx[n] = 0.5 * (a[0] + b[0]);
-      midy[n] = 0.5 * (a[1] + b[1]);
-      // r_mid_z drops out of the phase since r̂_z = 0 in this cut.
-      Ire[n] = 0.5 * (cre[n] + cre[n + 1]);
-      Iim[n] = 0.5 * (cim[n] + cim[n + 1]);
+    let off = 0;
+    for (const w of result.wires) {
+      const knots = w.knot_positions;
+      const cre = w.knot_currents_re;
+      const cim = w.knot_currents_im;
+      for (let n = 0; n < knots.length - 1; n++) {
+        const a = knots[n];
+        const b = knots[n + 1];
+        dx[off] = b[0] - a[0];
+        dy[off] = b[1] - a[1];
+        dz[off] = b[2] - a[2];
+        midx[off] = 0.5 * (a[0] + b[0]);
+        midy[off] = 0.5 * (a[1] + b[1]);
+        Ire[off] = 0.5 * (cre[n] + cre[n + 1]);
+        Iim[off] = 0.5 * (cim[n] + cim[n + 1]);
+        off++;
+      }
     }
+
+    const mags = new Array<number>(N_PHI);
+    let maxMag = 0;
 
     for (let pi = 0; pi < N_PHI; pi++) {
       const phi = (2 * Math.PI * pi) / N_PHI;
@@ -766,7 +888,7 @@ function CurrentCanvas({ result }: { result: SolveResponse | null }) {
       const h = canvas.clientHeight;
       ctx!.clearRect(0, 0, w, h);
 
-      // Draw axes guide (apex at top-center).
+      // Vertical axis guide.
       ctx!.strokeStyle = "#23272f";
       ctx!.lineWidth = 1;
       ctx!.beginPath();
@@ -776,84 +898,111 @@ function CurrentCanvas({ result }: { result: SolveResponse | null }) {
 
       if (!result) return;
 
-      // Project knots from (x, z) onto the canvas. Scale is anchored to the
-      // design wavelength: one wavelength at f_design maps to a constant
-      // fraction of the canvas. So halfdriver_factor visibly stretches the
-      // antenna (it's a multiplier on physical length), droop changes only
-      // shape, and design-freq changes leave the view in wavelengths --
-      // the antenna's "electrical size" is what's drawn.
-      const knots = result.knot_positions;
-      const apex = knots[result.feed_knot_index];
+      // Scale anchored to design wavelength. Worst-case extents (in λ):
+      //   horizontal: hf_max × λ/2 ≈ 0.6 λ  (both V and Yagi)
+      //   vertical:   max(V droop, Yagi spacing) ≈ 0.5 λ
       const C_LIGHT = 299_792_458.0;
       const lambdaDesign = C_LIGHT / (result.design_freq_mhz * 1e6);
       const pad = 50;
-      // Worst-case horizontal extent is hf_max * lambda/2 = 0.6 * lambda (flat).
-      // Worst-case vertical extent is hf_max * lambda/4 ≈ 0.3 * lambda (closed V).
-      // FILL says how much of the usable canvas to fill at those worst cases.
-      const FILL = 0.85;
       const barReserveBottom = 40;
+      const FILL = 0.85;
       const scale = FILL * Math.min(
         (w - 2 * pad) / (0.6 * lambdaDesign),
-        (h - pad - barReserveBottom) / (0.3 * lambdaDesign),
+        (h - pad - barReserveBottom) / (0.5 * lambdaDesign),
       );
 
-      // Center the antenna vertically: place apex above center by half the
-      // current V's vertical extent so the V's midpoint sits at canvas-center.
-      const zs = result.knot_positions.map((p) => p[2]);
-      const vertExtentPx = (Math.max(...zs) - Math.min(...zs)) * scale;
-      const apexY = Math.max(pad + 20, h / 2 - vertExtentPx / 2);
+      // Per-geometry view: V is a side view (xz plane), Yagi is top-down
+      // (xy plane). vertAxis is the world axis that maps to canvas-y.
+      const vertAxis = result.geometry === "yagi" ? 1 : 2;
+      let xMin = Infinity, xMax = -Infinity;
+      let vMin = Infinity, vMax = -Infinity;
+      for (const wire of result.wires) {
+        for (const p of wire.knot_positions) {
+          if (p[0] < xMin) xMin = p[0];
+          if (p[0] > xMax) xMax = p[0];
+          if (p[vertAxis] < vMin) vMin = p[vertAxis];
+          if (p[vertAxis] > vMax) vMax = p[vertAxis];
+        }
+      }
+      const xC = (xMin + xMax) / 2;
+      const vC = (vMin + vMax) / 2;
+      const cx = w / 2;
+      const cy = h / 2;
+      const project = (p: [number, number, number]) => ({
+        x: cx + (p[0] - xC) * scale,
+        y: cy + (vC - p[vertAxis]) * scale, // higher vert value = higher on screen
+      });
 
-      const project = (p: [number, number, number]) => {
-        const cx = w / 2;
-        return {
-          x: cx + (p[0] - apex[0]) * scale,
-          y: apexY + (apex[2] - p[2]) * scale, // larger droop hangs further down
-        };
-      };
-
-      // Current magnitude per knot.
-      const re = result.knot_currents_re;
-      const im = result.knot_currents_im;
-      const mags = re.map((r, i) => Math.hypot(r, im[i]));
-      const magMax = Math.max(...mags, 1e-30);
-
-      // Wire trace.
-      ctx!.lineCap = "round";
-      ctx!.lineJoin = "round";
-      for (let i = 0; i < knots.length - 1; i++) {
-        const a = project(knots[i]);
-        const b = project(knots[i + 1]);
-        const m = 0.5 * (mags[i] + mags[i + 1]) / magMax;
-        ctx!.strokeStyle = currentColor(m);
-        ctx!.lineWidth = 2 + 6 * m;
-        ctx!.beginPath();
-        ctx!.moveTo(a.x, a.y);
-        ctx!.lineTo(b.x, b.y);
-        ctx!.stroke();
+      // Global current magnitude so the per-wire colors share a scale.
+      let magMaxGlobal = 1e-30;
+      const perWireMags: number[][] = [];
+      for (const wire of result.wires) {
+        const m = wire.knot_currents_re.map((r, i) =>
+          Math.hypot(r, wire.knot_currents_im[i]),
+        );
+        perWireMags.push(m);
+        for (const v of m) if (v > magMaxGlobal) magMaxGlobal = v;
       }
 
-      // Feed marker.
-      const feed = project(knots[result.feed_knot_index]);
-      ctx!.fillStyle = "#ffd166";
-      ctx!.beginPath();
-      ctx!.arc(feed.x, feed.y, 5, 0, Math.PI * 2);
-      ctx!.fill();
-      ctx!.fillStyle = "#ffd166";
-      ctx!.font = "12px ui-monospace, monospace";
-      ctx!.fillText("feed", feed.x + 8, feed.y - 8);
+      ctx!.lineCap = "round";
+      ctx!.lineJoin = "round";
 
-      // Current magnitude curve along the wire, drawn as a "skyline" offset
-      // perpendicular to the wire. Each arm gets its own stroke: the
-      // perpendicular direction flips at the apex, so a single continuous
-      // envelope would bow-tie across the feed.
-      ctx!.strokeStyle = "rgba(118, 208, 255, 0.7)";
-      ctx!.lineWidth = 1.5;
+      // One wire at a time: wire stroke + envelope.
       const envScale = 60;
-      const feedIdx = result.feed_knot_index;
-      drawArmEnvelope(ctx!, knots, mags, magMax, project, 0, feedIdx, envScale);
-      drawArmEnvelope(ctx!, knots, mags, magMax, project, feedIdx, knots.length - 1, envScale);
+      const feedWireIdx = result.feed_wire_index;
+      for (let wi = 0; wi < result.wires.length; wi++) {
+        const wire = result.wires[wi];
+        const knots = wire.knot_positions;
+        const mags = perWireMags[wi];
 
-      // Scale bar: a λ/4 reference (= arm length at perfect resonance).
+        for (let i = 0; i < knots.length - 1; i++) {
+          const a = project(knots[i]);
+          const b = project(knots[i + 1]);
+          const m = (0.5 * (mags[i] + mags[i + 1])) / magMaxGlobal;
+          ctx!.strokeStyle = currentColor(m);
+          ctx!.lineWidth = 2 + 6 * m;
+          ctx!.beginPath();
+          ctx!.moveTo(a.x, a.y);
+          ctx!.lineTo(b.x, b.y);
+          ctx!.stroke();
+        }
+
+        // Envelope: if this is the feed wire (and the feed isn't at an end),
+        // split at the feed knot so a V's per-arm tangent flip is respected.
+        // Otherwise draw one continuous envelope.
+        ctx!.strokeStyle = "rgba(118, 208, 255, 0.7)";
+        ctx!.lineWidth = 1.5;
+        const lastIdx = knots.length - 1;
+        const feedIdx = result.feed_knot_index;
+        if (wi === feedWireIdx && feedIdx > 0 && feedIdx < lastIdx) {
+          drawArmEnvelope(ctx!, knots, mags, magMaxGlobal, project, 0, feedIdx, envScale);
+          drawArmEnvelope(ctx!, knots, mags, magMaxGlobal, project, feedIdx, lastIdx, envScale);
+        } else {
+          drawArmEnvelope(ctx!, knots, mags, magMaxGlobal, project, 0, lastIdx, envScale);
+        }
+
+        // Wire label near the leftmost knot for multi-wire geometries.
+        if (result.wires.length > 1) {
+          const lp = project(knots[0]);
+          ctx!.fillStyle = "#7b8493";
+          ctx!.font = "11px ui-monospace, monospace";
+          ctx!.fillText(wire.label, lp.x - 8 - ctx!.measureText(wire.label).width, lp.y + 3);
+        }
+      }
+
+      // Feed marker on the feed wire.
+      const feedWire = result.wires[feedWireIdx];
+      if (feedWire) {
+        const feed = project(feedWire.knot_positions[result.feed_knot_index]);
+        ctx!.fillStyle = "#ffd166";
+        ctx!.beginPath();
+        ctx!.arc(feed.x, feed.y, 5, 0, Math.PI * 2);
+        ctx!.fill();
+        ctx!.font = "12px ui-monospace, monospace";
+        ctx!.fillText("feed", feed.x + 8, feed.y - 8);
+      }
+
+      // λ/4 scale bar.
       const barLenPx = (lambdaDesign / 4) * scale;
       const barX0 = pad;
       const barY = h - 24;

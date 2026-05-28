@@ -37,6 +37,35 @@ html, body, #root {
   letter-spacing: 0.02em;
 }
 
+.geometry-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.geometry-tabs button {
+  flex: 1;
+  background: #0f1218;
+  color: var(--muted);
+  border: 1px solid #2a313d;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.geometry-tabs button:hover {
+  color: var(--fg);
+  border-color: #3a4150;
+}
+
+.geometry-tabs button.active {
+  background: #1d2330;
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 .group-label {
   font-size: 11px;
   letter-spacing: 0.12em;
