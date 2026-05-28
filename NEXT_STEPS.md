@@ -23,6 +23,7 @@ The legacy `_legacy.py`, the spline experiments (`spline.py`, `bspline.py`, `aug
 - **PR #8** — adds azimuth-plane (xy) far-field polar plot in the top-left of the stage, computed client-side from the segment currents already in the WebSocket response. Shows the figure-8 → fatter-peanut transition as droop closes the V.
 - **PR #9** — 2-element Yagi (driver + reflector) added to the interactive UI: geometry tab switcher, per-Yagi controls (driver length factor, reflector length factor, spacing in λ), top-down xy canvas view so the beam axis lives in the far-field cut plane. F/B asymmetry now visible on the azimuth plot.
 - **PR #10** — solver perf: dropped `BentTriangularPySim` default `n_qp_off=8 → 4` (free 2× on V, sub-0.02 Ω X error). Added `compute_impedance_swept(k_array)` to both triangular solvers; static kernel + R distances reused across the sweep, only `exp(-jk·R)` and einsum reductions carry a k axis. `/sweep` is ~2× faster, V `/sweep` is ~7× faster overall once combined with the `n_qp_off` change. New `scripts/profile_triangular.py` for future profiling.
+- **PR #11** — first C++ accelerator for the triangular solvers: `seg_seg_quad_batch_3d` in `_accelerators.cpp` handles both V's off-edge and Yagi's cross-wire batched quadrature (distinguished by `a²` regularization). OpenMP `parallel for collapse(2)` over `(i, j)` pairs; per-pair `R[q, r]` table is built once and reused across the k axis. The cross-edge/cross-wire block drops from ~190 ms → 4 ms at N=80 (~47×); full V solve goes 250 → 55 ms (~4.6×); V `/sweep` at N=80 goes 3.1 s → 1.7 s (~1.8×). Output verified to ~1e-19 vs numpy. New bottleneck: `_seg_seg_reg_all_batch` (same-edge regularized, still pure numpy).
 
 ## What's left
 
@@ -42,21 +43,21 @@ Ordered by what I'd actually do next, not by what's most ambitious.
 
 5. **Magnetic-frill or finite-gap feed model** — current code uses a true delta-gap (`v[m_center] = 1.0`). A finite-gap or magnetic-frill source is more physical and will give different (more accurate) reactance for short antennas. Affects the source-vector construction only; the matrix is unchanged. **Promoted from medium- to high-priority by the item 3 investigation**: the convergence cap of `TriangularPySim` at ~O(1/N^1.2) is set by the delta-gap source, not by the basis function — the basis is already paying for higher-order accuracy that the source model is wasting.
 
-6. **C++ accelerator for the triangular moment integrals** — updated by PR #10's profiling. The dominant cost is now clearly the cross-edge / cross-wire Gauss-Legendre quadrature (`_seg_seg_offedge_quad_batch`, `_seg_seg_cross_quad_batch`, and the same-edge `_seg_seg_reg_all_batch`). At N=80 these are ~80% of total solve time; the einsum reduction and the `exp(-jk·R)` evaluation both run single-threaded inside numpy.
+6. **C++ accelerator: remaining work after PR #11.** Phase 1 (off-edge + cross-wire) landed; the cross-edge/cross-wire block is now ~4 ms at N=80, basically free. Three remaining wins, ranked by current Amdahl share:
 
-   Three layers of available speedup, none of which numpy currently provides:
-   - **OpenMP parallelism** over the outer `(i, j)` segment-pair indices — embarrassingly parallel; ~4–6× on 8 cores.
-   - **Vectorized `cexp(-jkR)`** via SLEEF or Intel SVML — libm's complex exp is the inner-loop bottleneck; vectorized versions are 2–4× faster on bulk inputs.
-   - **Cache-friendly memory layout** for the 5D `G` tensor — contiguous over the innermost quadrature axis, then over k. NumPy's stride pattern is fine but not tuned.
+   - **6a. Port `_seg_seg_reg_all_batch` (same-edge regularized) to C++.** This is now the dominant cost: ~33 ms of a 55 ms V solve at N=80 (60%). Kernel shape is similar to `seg_seg_quad_batch_3d` but with a 1D arc-length geometry (all quadrature points on a shared line) and the kernel is `(exp(-jkR) - 1) / (4πR)` instead of `exp(-jkR) / (4πR)`. The R values are k-independent and can be tabulated for all `(q_i, q_j)` pairs once. OpenMP parallelizes over the (i, j) basis pairs the same way. Estimated 1.5–2× further on full solve (or higher for sweep where the R table is amortized across k).
 
-   Realistic combined gain: 4–10× over current numpy on solver compute. The natural API target is the *batched* form added by PR #10: each kernel function takes `k_array` and produces `(n_k, N, N)` output, so the C++ side gets a tight loop with all the parallelism already exposed at the outer axis. The existing pulse-basis `psi_fusion_trapezoid` accelerator (`src/pysim/_accelerators.cpp`) is the pybind11 build template to mirror.
+   - **6b. Vectorized `cexp(-jkR)` via SLEEF or Intel SVML.** The C++ kernel currently calls `std::cos`/`std::sin` from libm one element at a time. Replacing with vectorized AVX2/AVX-512 sincos (4 or 8 elements per instruction) is realistically another 2–3× on the kernel itself. Adds a build dependency. Probably defer until 6a is done — both wins compound.
 
-   Order of attack (cheapest gain first):
-   - Start with `_seg_seg_offedge_quad_batch` — it's the biggest line item for V and the cleanest function shape.
-   - Then `_seg_seg_cross_quad_batch` (Yagi cross-wire) — same kernel structure, smaller relative impact.
-   - Then `_seg_seg_reg_all_batch` — same-edge regularized; has a slightly more complex layout (segment-pair points share quadrature points along the wire) but the same OpenMP + cexp story.
+   - **6c. OpenMP scaling at higher N.** At N=80 the per-`(i, j)` work is small enough that OpenMP scheduling overhead dominates beyond ~4 threads (best at T=2–4 in measurements). At N=160+ this should self-correct since work per thread grows quadratically; revisit once we have an actual workload at that scale.
 
-   When this lands, the Python paths should remain as the reference / fallback (CI without compiled extensions); use the same `engine="python" | "accelerated"` switch pattern as the original `PySim`.
+   The natural API target remains the *batched* form: each kernel function takes `k_array` and produces `(n_k, N, N)` output. The Python paths should remain as the reference / fallback for platforms without OpenMP. Existing pulse-basis `psi_fusion_trapezoid` is the pybind11 build template.
+
+   **Beyond the kernels**, two adjacent perf items that may matter once 6a lands:
+
+   - **6d. Batched LU solve.** `compute_impedance_swept` calls `np.linalg.solve(Z, v)` on a `(n_k, M, M)` matrix — already batched, but at N=160 the cubic solve dominates (~45 ms per k at N=160 single, scales O(N³)). Look at whether a per-thread LU factorize-then-solve loop (instead of numpy's stacked LAPACK call) beats it for our (n_k=41, M~160-320) size class.
+
+   - **6e. Matrix assembly.** The einsum / fancy-indexing block that combines J tensors into Z is ~14 ms at N=80 in the new profile. Likely fine as numpy code; only worth touching if it becomes >30% of total after 6a.
 
 ### Validation
 
