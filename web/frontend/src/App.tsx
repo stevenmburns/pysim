@@ -548,13 +548,19 @@ function FarFieldChart({ result, size }: { result: SolveResponse | null; size: n
     const cy = size / 2;
     const R = size / 2 - 14;
 
-    // Concentric grid (linear |E| normalized).
+    // Radial axis: dB relative to per-frame peak (peak = 0 dB at r = R,
+    // floor = −DB_RANGE at r = 0). Rings at every 10 dB.
+    const DB_RANGE = 30;
     ctx.strokeStyle = "#2a313d";
     ctx.lineWidth = 0.6;
-    for (const f of [0.25, 0.5, 0.75, 1.0]) {
+    ctx.fillStyle = "#4a5160";
+    ctx.font = "9px ui-monospace, monospace";
+    for (let db = -DB_RANGE + 10; db <= 0; db += 10) {
+      const f = (DB_RANGE + db) / DB_RANGE;
       ctx.beginPath();
       ctx.arc(cx, cy, R * f, 0, 2 * Math.PI);
       ctx.stroke();
+      ctx.fillText(`${db}`, cx + 2, cy - R * f - 1);
     }
     ctx.beginPath();
     ctx.moveTo(cx - R, cy);
@@ -567,7 +573,7 @@ function FarFieldChart({ result, size }: { result: SolveResponse | null; size: n
     // the right arm tip lies), +y up (broadside to the wire).
     ctx.fillStyle = "#4a5160";
     ctx.font = "10px ui-monospace, monospace";
-    ctx.fillText("xy plane", 6, 14);
+    ctx.fillText("xy plane (dB)", 6, 14);
     ctx.fillStyle = "#7b8493";
     ctx.fillText("+x", cx + R - 14, cy + 11);
     ctx.fillText("−x", cx - R + 2, cy + 11);
@@ -662,11 +668,14 @@ function FarFieldChart({ result, size }: { result: SolveResponse | null; size: n
 
     if (maxMag <= 0) return;
 
-    // Draw pattern as filled polar curve.
+    // Draw pattern as filled polar curve on the dB radial axis.
+    // 20*log10(|M_perp| / max) maps [−DB_RANGE, 0] → [0, R]; below floor clamps to 0.
     ctx.beginPath();
     for (let pi = 0; pi <= N_PHI; pi++) {
       const phi = (2 * Math.PI * pi) / N_PHI;
-      const norm = mags[pi % N_PHI] / maxMag;
+      const ratio = mags[pi % N_PHI] / maxMag;
+      const db = ratio > 0 ? 20 * Math.log10(ratio) : -Infinity;
+      const norm = Math.max(0, (DB_RANGE + db) / DB_RANGE);
       const px = cx + Math.cos(phi) * norm * R;
       // Canvas y flips: +y on canvas is down, so we negate to put +y at top.
       const py = cy - Math.sin(phi) * norm * R;
