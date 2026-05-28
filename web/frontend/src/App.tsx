@@ -968,30 +968,29 @@ function SmithChart({
     ctx.fillText("+jX", cx + R - 24, cy - R + 14);
     ctx.fillText("−jX", cx + R - 24, cy + R - 4);
 
-    // Sweep locus: continuous curve through Γ-plane samples.
+    // Sweep locus: blue points at each Γ-plane sample (no connecting line —
+    // sparse samples make a piecewise polyline read as artificial kinks).
     if (sweep && sweep.freqs_mhz.length > 1) {
       ctx.save();
       ctx.beginPath();
       ctx.arc(cx, cy, R, 0, 2 * Math.PI);
       ctx.clip();
-      ctx.strokeStyle = "rgba(118, 208, 255, 0.75)";
-      ctx.lineWidth = 1.6;
-      ctx.beginPath();
+      ctx.fillStyle = "rgba(118, 208, 255, 0.85)";
       let nearestIdx = 0;
       let nearestDelta = Infinity;
       for (let i = 0; i < sweep.freqs_mhz.length; i++) {
         const g = reflectionCoefficient(sweep.z_re[i], sweep.z_im[i], z0);
         const px = cx + g.gRe * R;
         const py = cy - g.gIm * R;
-        if (i === 0) ctx.moveTo(px, py);
-        else ctx.lineTo(px, py);
+        ctx.beginPath();
+        ctx.arc(px, py, 1.5, 0, 2 * Math.PI);
+        ctx.fill();
         const d = Math.abs(sweep.freqs_mhz[i] - measFreqMhz);
         if (d < nearestDelta) {
           nearestDelta = d;
           nearestIdx = i;
         }
       }
-      ctx.stroke();
       ctx.restore();
 
       // Endpoint markers (low-freq filled, high-freq hollow).
