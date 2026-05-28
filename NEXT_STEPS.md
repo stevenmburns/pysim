@@ -21,6 +21,8 @@ The legacy `_legacy.py`, the spline experiments (`spline.py`, `bspline.py`, `aug
 - **PR #5** — `TriangularYagiPySim`: multi-wire triangular Galerkin solver (driver + reflector). Same-wire blocks reuse the analytic static-kernel extraction; cross-wire blocks use direct Gauss-Legendre quadrature on the full kernel. `scripts/compare_yagi_nec.py` updated to show both triangular solvers side-by-side. Matches NEC to ~0.1 Ω on R and X at N=160; resolves the "does the Yagi reactance converge to NEC?" question — it does.
 - **PR #7** — Interactive inverted-V web UI (FastAPI + Vite/React/TS, under `web/`). WebSocket-driven live solve at sliders for droop angle, halfdriver factor, design freq, measurement freq, N. Smith chart overlay with a debounced ±30% sweep across measurement freq. Canvas shows the wire with current-magnitude color + per-arm `|I|` envelope, scaled by design wavelength with a λ/4 reference bar. No changes to the solver.
 - **PR #8** — adds azimuth-plane (xy) far-field polar plot in the top-left of the stage, computed client-side from the segment currents already in the WebSocket response. Shows the figure-8 → fatter-peanut transition as droop closes the V.
+- **PR #9** — 2-element Yagi (driver + reflector) added to the interactive UI: geometry tab switcher, per-Yagi controls (driver length factor, reflector length factor, spacing in λ), top-down xy canvas view so the beam axis lives in the far-field cut plane. F/B asymmetry now visible on the azimuth plot.
+- **PR #10** — solver perf: dropped `BentTriangularPySim` default `n_qp_off=8 → 4` (free 2× on V, sub-0.02 Ω X error). Added `compute_impedance_swept(k_array)` to both triangular solvers; static kernel + R distances reused across the sweep, only `exp(-jk·R)` and einsum reductions carry a k axis. `/sweep` is ~2× faster, V `/sweep` is ~7× faster overall once combined with the `n_qp_off` change. New `scripts/profile_triangular.py` for future profiling.
 
 ## What's left
 
@@ -40,7 +42,21 @@ Ordered by what I'd actually do next, not by what's most ambitious.
 
 5. **Magnetic-frill or finite-gap feed model** — current code uses a true delta-gap (`v[m_center] = 1.0`). A finite-gap or magnetic-frill source is more physical and will give different (more accurate) reactance for short antennas. Affects the source-vector construction only; the matrix is unchanged. **Promoted from medium- to high-priority by the item 3 investigation**: the convergence cap of `TriangularPySim` at ~O(1/N^1.2) is set by the delta-gap source, not by the basis function — the basis is already paying for higher-order accuracy that the source model is wasting.
 
-6. **C++ accelerator for `TriangularPySim`** — currently Python-only. The hot loops are the moment-integral assembly (`_seg_seg_static_all` and `_seg_seg_reg_all`). For practical N (up to a few hundred), Python is already fast (N=160 in 60 ms). C++ would matter only at N > 1000. Probably not worth doing yet.
+6. **C++ accelerator for the triangular moment integrals** — updated by PR #10's profiling. The dominant cost is now clearly the cross-edge / cross-wire Gauss-Legendre quadrature (`_seg_seg_offedge_quad_batch`, `_seg_seg_cross_quad_batch`, and the same-edge `_seg_seg_reg_all_batch`). At N=80 these are ~80% of total solve time; the einsum reduction and the `exp(-jk·R)` evaluation both run single-threaded inside numpy.
+
+   Three layers of available speedup, none of which numpy currently provides:
+   - **OpenMP parallelism** over the outer `(i, j)` segment-pair indices — embarrassingly parallel; ~4–6× on 8 cores.
+   - **Vectorized `cexp(-jkR)`** via SLEEF or Intel SVML — libm's complex exp is the inner-loop bottleneck; vectorized versions are 2–4× faster on bulk inputs.
+   - **Cache-friendly memory layout** for the 5D `G` tensor — contiguous over the innermost quadrature axis, then over k. NumPy's stride pattern is fine but not tuned.
+
+   Realistic combined gain: 4–10× over current numpy on solver compute. The natural API target is the *batched* form added by PR #10: each kernel function takes `k_array` and produces `(n_k, N, N)` output, so the C++ side gets a tight loop with all the parallelism already exposed at the outer axis. The existing pulse-basis `psi_fusion_trapezoid` accelerator (`src/pysim/_accelerators.cpp`) is the pybind11 build template to mirror.
+
+   Order of attack (cheapest gain first):
+   - Start with `_seg_seg_offedge_quad_batch` — it's the biggest line item for V and the cleanest function shape.
+   - Then `_seg_seg_cross_quad_batch` (Yagi cross-wire) — same kernel structure, smaller relative impact.
+   - Then `_seg_seg_reg_all_batch` — same-edge regularized; has a slightly more complex layout (segment-pair points share quadrature points along the wire) but the same OpenMP + cexp story.
+
+   When this lands, the Python paths should remain as the reference / fallback (CI without compiled extensions); use the same `engine="python" | "accelerated"` switch pattern as the original `PySim`.
 
 ### Validation
 
