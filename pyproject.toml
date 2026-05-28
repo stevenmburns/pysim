@@ -32,6 +32,9 @@ markers = [
     "slow: tests that take more than a couple seconds (deselect with -m 'not slow')",
     "plot: tests that produce plots for visual inspection (deselect with -m 'not plot')",
 ]
+# Put the project root on sys.path so `web` (which lives next to `tests/`,
+# not under src/) is importable from the pynec-backend tests.
+pythonpath = ["."]
 
 [tool.ruff]
 # Vendored upstream source (PyNEC + necpp) — never lint.
