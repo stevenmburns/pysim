@@ -235,17 +235,23 @@ def _solve_yagi(req: dict) -> dict:
     # Spacing in wavelengths of the design freq.
     spacing_wavelengths = float(req.get("spacing_wavelengths", 0.15))
     wire_radius = float(req.get("wire_radius", 0.0005))
+    n_directors = int(req.get("n_directors", 0))
+    dir_spacing_wl = float(req.get("director_spacing_wavelengths", 0.2))
+    dir_size_factor = float(req.get("director_size_factor", 0.95))
 
     wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
     wavelength_meas = C_LIGHT / (meas_freq_mhz * 1e6)
     h_driver = driver_factor * wavelength_design / 4.0
     h_refl = refl_factor_abs * wavelength_design / 4.0
     spacing_m = spacing_wavelengths * wavelength_design
+    dir_spacing_m = dir_spacing_wl * wavelength_design
+    h_dir = dir_size_factor * h_driver
 
-    # TriangularYagiPySim parameters: reflector_factor is reflector_half / driver_half;
-    # spacing_factor is spacing / driver_half.
+    # TriangularYagiPySim parameters: factors are relative to the driver's
+    # halflength. Director spacing is between consecutive elements.
     refl_factor_rel = h_refl / h_driver
     spacing_factor_rel = spacing_m / h_driver
+    dir_spacing_factor_rel = dir_spacing_m / h_driver
 
     sim = TriangularYagiPySim(
         wavelength=wavelength_meas,
@@ -253,6 +259,9 @@ def _solve_yagi(req: dict) -> dict:
         nsegs=n_per_wire,
         reflector_factor=refl_factor_rel,
         spacing_factor=spacing_factor_rel,
+        n_directors=n_directors,
+        director_spacing_factor=dir_spacing_factor_rel,
+        director_size_factor=dir_size_factor,
     )
     sim.wire_radius = wire_radius
     # Decouple geometry from measurement wavelength: the solver computes
@@ -266,25 +275,33 @@ def _solve_yagi(req: dict) -> dict:
     solve_ms = (time.perf_counter() - t0) * 1e3
 
     # Canonical layout: wires along x, spacing along y, all in the xy plane.
+    # TriangularYagiPySim's internal +x maps to canonical +y (and vice versa),
+    # so directors at internal +x become +y in the response.
     N = n_per_wire
-    driver_knots = np.column_stack(
-        [
-            np.linspace(-h_driver, h_driver, N + 1),
-            np.zeros(N + 1),
-            np.zeros(N + 1),
-        ]
-    )
-    refl_knots = np.column_stack(
-        [
-            np.linspace(-h_refl, h_refl, N + 1),
-            np.full(N + 1, -spacing_m),
-            np.zeros(N + 1),
-        ]
-    )
-
     nb = N - 1
-    driver_coeffs = coeffs[:nb]
-    refl_coeffs = coeffs[nb:]
+
+    def _knots_at(y_pos: float, half_len: float) -> np.ndarray:
+        return np.column_stack(
+            [
+                np.linspace(-half_len, half_len, N + 1),
+                np.full(N + 1, y_pos),
+                np.zeros(N + 1),
+            ]
+        )
+
+    wires = [
+        _wire_record(_knots_at(0.0, h_driver), coeffs[:nb], "driver"),
+        _wire_record(_knots_at(-spacing_m, h_refl), coeffs[nb : 2 * nb], "reflector"),
+    ]
+    for i in range(n_directors):
+        sl = slice((2 + i) * nb, (3 + i) * nb)
+        wires.append(
+            _wire_record(
+                _knots_at((i + 1) * dir_spacing_m, h_dir),
+                coeffs[sl],
+                f"director {i + 1}" if n_directors > 1 else "director",
+            )
+        )
 
     # Feed: TriangularYagiPySim picks the interior knot of the driver closest
     # to L_driver/2 — that's the middle interior knot, at full-list index N//2
@@ -295,10 +312,7 @@ def _solve_yagi(req: dict) -> dict:
 
     return {
         "geometry": "yagi",
-        "wires": [
-            _wire_record(driver_knots, driver_coeffs, "driver"),
-            _wire_record(refl_knots, refl_coeffs, "reflector"),
-        ],
+        "wires": wires,
         "feed_wire_index": 0,
         "feed_knot_index": feed_knot_index,
         "z_in_re": float(z_in.real),
@@ -309,6 +323,9 @@ def _solve_yagi(req: dict) -> dict:
         "driver_length_m": 2 * h_driver,
         "reflector_length_m": 2 * h_refl,
         "spacing_m": spacing_m,
+        "n_directors": n_directors,
+        "director_length_m": 2 * h_dir if n_directors > 0 else None,
+        "director_spacing_m": dir_spacing_m if n_directors > 0 else None,
         "solve_ms": solve_ms,
     }
 
@@ -361,6 +378,9 @@ def _sweep_yagi(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[fl
     refl_factor_abs = float(req.get("reflector_length_factor", 1.01))
     spacing_wavelengths = float(req.get("spacing_wavelengths", 0.15))
     wire_radius = float(req.get("wire_radius", 0.0005))
+    n_directors = int(req.get("n_directors", 0))
+    dir_spacing_wl = float(req.get("director_spacing_wavelengths", 0.2))
+    dir_size_factor = float(req.get("director_size_factor", 0.95))
 
     wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
     h_driver = driver_factor * wavelength_design / 4.0
@@ -368,6 +388,7 @@ def _sweep_yagi(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[fl
     spacing_m = spacing_wavelengths * wavelength_design
     refl_factor_rel = h_refl / h_driver
     spacing_factor_rel = spacing_m / h_driver
+    dir_spacing_factor_rel = (dir_spacing_wl * wavelength_design) / h_driver
 
     sim = TriangularYagiPySim(
         wavelength=wavelength_design,
@@ -375,6 +396,9 @@ def _sweep_yagi(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[fl
         nsegs=n_per_wire,
         reflector_factor=refl_factor_rel,
         spacing_factor=spacing_factor_rel,
+        n_directors=n_directors,
+        director_spacing_factor=dir_spacing_factor_rel,
+        director_size_factor=dir_size_factor,
     )
     sim.wire_radius = wire_radius
     sim.halfdriver = h_driver
