@@ -291,10 +291,11 @@ def test_bent_triangular_collinear_polyline(nsegs):
     L = 2 * 0.962 * 22 / 4
     polyline = np.array([[0.0, 0.0, 0.0], [0.0, L / 2, 0.0], [0.0, L, 0.0]])
     z_straight, _ = TriangularPySim(nsegs=nsegs).compute_impedance()
+    # Use n_qp_off=8 here so the artificial cross-edge quadrature at the fake
+    # corner has the same precision as the analytic same-wire path.
     z_bent, _ = BentTriangularPySim(
-        polyline=polyline, n_per_edge=nsegs // 2, nsegs=nsegs
+        polyline=polyline, n_per_edge=nsegs // 2, nsegs=nsegs, n_qp_off=8,
     ).compute_impedance()
-    # Loose tolerance: quadrature error at the shared corner is O(1/n_qp_off).
     assert abs(z_bent - z_straight) < 0.2
 
 

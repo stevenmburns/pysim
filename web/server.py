@@ -215,20 +215,75 @@ def solve(req: dict) -> dict:
     return _solve_inverted_v(req)
 
 
+def _sweep_inverted_v(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[float]]:
+    """Batched sweep using BentTriangularPySim.compute_impedance_swept."""
+    angle_deg = float(req.get("angle_deg", 30.0))
+    n_per_wire = int(req.get("n_per_wire", 30))
+    design_freq_mhz = float(req.get("design_freq_mhz", 13.625))
+    halfdriver_factor = float(req.get("halfdriver_factor", 0.962))
+    wire_radius = float(req.get("wire_radius", 0.0005))
+
+    wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
+    arm_len = halfdriver_factor * wavelength_design / 4.0
+
+    # Use design wavelength for the sim construction; geometry is set via
+    # polyline override so it's independent of the sim's wavelength field.
+    sim = BentTriangularPySim(
+        wavelength=wavelength_design,
+        halfdriver_factor=halfdriver_factor,
+        nsegs=n_per_wire,
+    )
+    sim.wire_radius = wire_radius
+    sim.polyline = _inverted_v_polyline(arm_len, angle_deg)
+    sim.n_per_edge = [n_per_wire, n_per_wire]
+
+    k_array = np.array([2 * np.pi * f * 1e6 / C_LIGHT for f in freqs_mhz])
+    z_array = sim.compute_impedance_swept(k_array)
+    return z_array.real.tolist(), z_array.imag.tolist()
+
+
+def _sweep_yagi(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[float]]:
+    """Batched sweep using TriangularYagiPySim.compute_impedance_swept."""
+    n_per_wire = int(req.get("n_per_wire", 30))
+    design_freq_mhz = float(req.get("design_freq_mhz", 13.625))
+    driver_factor = float(req.get("driver_length_factor", 0.962))
+    refl_factor_abs = float(req.get("reflector_length_factor", 1.01))
+    spacing_wavelengths = float(req.get("spacing_wavelengths", 0.15))
+    wire_radius = float(req.get("wire_radius", 0.0005))
+
+    wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
+    h_driver = driver_factor * wavelength_design / 4.0
+    h_refl = refl_factor_abs * wavelength_design / 4.0
+    spacing_m = spacing_wavelengths * wavelength_design
+    refl_factor_rel = h_refl / h_driver
+    spacing_factor_rel = spacing_m / h_driver
+
+    sim = TriangularYagiPySim(
+        wavelength=wavelength_design,
+        halfdriver_factor=driver_factor,
+        nsegs=n_per_wire,
+        reflector_factor=refl_factor_rel,
+        spacing_factor=spacing_factor_rel,
+    )
+    sim.wire_radius = wire_radius
+    sim.halfdriver = h_driver
+
+    k_array = np.array([2 * np.pi * f * 1e6 / C_LIGHT for f in freqs_mhz])
+    z_array = sim.compute_impedance_swept(k_array)
+    return z_array.real.tolist(), z_array.imag.tolist()
+
+
 @app.post("/sweep")
 async def sweep_endpoint(req: dict):
     """Run a measurement-freq sweep across freqs_mhz for a fixed antenna."""
     freqs = [float(f) for f in req.get("freqs_mhz", [])]
     if not freqs:
         return {"freqs_mhz": [], "z_re": [], "z_im": []}
-    z_re: list[float] = []
-    z_im: list[float] = []
-    for f in freqs:
-        sub_req = dict(req)
-        sub_req["measurement_freq_mhz"] = f
-        result = solve(sub_req)
-        z_re.append(result["z_in_re"])
-        z_im.append(result["z_in_im"])
+    geometry = req.get("geometry", "inverted_v")
+    if geometry == "yagi":
+        z_re, z_im = _sweep_yagi(req, freqs)
+    else:
+        z_re, z_im = _sweep_inverted_v(req, freqs)
     return {"freqs_mhz": freqs, "z_re": z_re, "z_im": z_im}
 
 

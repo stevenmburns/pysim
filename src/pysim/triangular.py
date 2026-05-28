@@ -111,7 +111,24 @@ def _seg_seg_reg_all(seg_endpoints, a, k, n_qp):
 
     Returns (J00, J10, J01, J11) each of shape (N, N), complex.
     """
+    J00, J10, J01, J11 = _seg_seg_reg_all_batch(
+        seg_endpoints, a, np.array([k]), n_qp,
+    )
+    return J00[0], J10[0], J01[0], J11[0]
+
+
+def _seg_seg_reg_all_batch(seg_endpoints, a, k_array, n_qp):
+    """Batched version of _seg_seg_reg_all.
+
+    k_array: 1D array of measurement wavenumbers.
+    Returns (J00, J10, J01, J11) each of shape (n_k, N, N), complex.
+
+    The point-pair distances R are k-independent and computed once; only
+    exp(-jk·R) varies over k, which amortizes per-k overhead and keeps R
+    in cache across the k-axis reduction.
+    """
     N = len(seg_endpoints) - 1
+    n_k = len(k_array)
     gl_xi, gl_w = np.polynomial.legendre.leggauss(n_qp)
     sl = seg_endpoints[:-1]
     sr = seg_endpoints[1:]
@@ -119,24 +136,25 @@ def _seg_seg_reg_all(seg_endpoints, a, k, n_qp):
     mid = 0.5 * (sr + sl)
     s_q = (mid[:, None] + half[:, None] * gl_xi[None, :]).ravel()
     w_q = (half[:, None] * gl_w[None, :]).ravel()
-
-    # Local coordinates u = s - sl_i for each quadrature point's owning segment
     seg_idx = np.repeat(np.arange(N), n_qp)
     u_q = s_q - sl[seg_idx]
 
     diffs = s_q[:, None] - s_q[None, :]
     R = np.sqrt(diffs * diffs + a * a)
-    G_reg = (np.exp(-1j * k * R) - 1.0) / (4 * np.pi * R)
+    G_reg = (np.exp(-1j * k_array[:, None, None] * R[None, ...]) - 1.0) / (
+        4 * np.pi * R[None, ...]
+    )
 
     w_block = w_q.reshape(N, n_qp)
     u_block = u_q.reshape(N, n_qp)
-    G_block = G_reg.reshape(N, n_qp, N, n_qp)
+    G_block = G_reg.reshape(n_k, N, n_qp, N, n_qp)
 
-    # Einsum each weighted moment.
-    J00 = np.einsum("iq,iqjr,jr->ij", w_block, G_block, w_block)
-    J10 = np.einsum("iq,iq,iqjr,jr->ij", w_block, u_block, G_block, w_block)
-    J01 = np.einsum("iq,iqjr,jr,jr->ij", w_block, G_block, w_block, u_block)
-    J11 = np.einsum("iq,iq,iqjr,jr,jr->ij", w_block, u_block, G_block, w_block, u_block)
+    J00 = np.einsum("iq,kiqjr,jr->kij", w_block, G_block, w_block)
+    J10 = np.einsum("iq,iq,kiqjr,jr->kij", w_block, u_block, G_block, w_block)
+    J01 = np.einsum("iq,kiqjr,jr,jr->kij", w_block, G_block, w_block, u_block)
+    J11 = np.einsum(
+        "iq,iq,kiqjr,jr,jr->kij", w_block, u_block, G_block, w_block, u_block,
+    )
     return J00, J10, J01, J11
 
 

@@ -21,7 +21,11 @@ import numpy as np
 import scipy.linalg
 
 from .abstract import AbstractPySim
-from .triangular import _seg_seg_static_all, _seg_seg_reg_all
+from .triangular import (
+    _seg_seg_static_all,
+    _seg_seg_reg_all,
+    _seg_seg_reg_all_batch,
+)
 
 
 def _seg_seg_offedge_quad(seg_l_i, seg_r_i, seg_l_j, seg_r_j, a, k, n_qp):
@@ -35,6 +39,17 @@ def _seg_seg_offedge_quad(seg_l_i, seg_r_i, seg_l_j, seg_r_j, a, k, n_qp):
     seg_l, seg_r: (N, 3) arrays of 3D endpoints.
     Returns (J00, J10, J01, J11), each (N_i, N_j) complex; u_i, u_j are arc
     lengths into each segment from its left endpoint.
+    """
+    J00, J10, J01, J11 = _seg_seg_offedge_quad_batch(
+        seg_l_i, seg_r_i, seg_l_j, seg_r_j, a, np.array([k]), n_qp,
+    )
+    return J00[0], J10[0], J01[0], J11[0]
+
+
+def _seg_seg_offedge_quad_batch(seg_l_i, seg_r_i, seg_l_j, seg_r_j, a, k_array, n_qp):
+    """Batched version of _seg_seg_offedge_quad over a vector of k values.
+
+    Returns (J00, J10, J01, J11) each of shape (n_k, N_i, N_j).
     """
     gl_xi, gl_w = np.polynomial.legendre.leggauss(n_qp)
     t_qp = 0.5 * (gl_xi + 1.0)
@@ -55,12 +70,14 @@ def _seg_seg_offedge_quad(seg_l_i, seg_r_i, seg_l_j, seg_r_j, a, k, n_qp):
 
     diff = pos_i[:, :, None, None, :] - pos_j[None, None, :, :, :]
     R = np.sqrt((diff * diff).sum(-1) + a * a)
-    G = np.exp(-1j * k * R) / (4 * np.pi * R)
+    G = np.exp(-1j * k_array[:, None, None, None, None] * R[None, ...]) / (
+        4 * np.pi * R[None, ...]
+    )
 
-    J00 = np.einsum("iq,iqjr,jr->ij", w_i, G, w_j)
-    J10 = np.einsum("iq,iq,iqjr,jr->ij", w_i, u_i, G, w_j)
-    J01 = np.einsum("iq,iqjr,jr,jr->ij", w_i, G, w_j, u_j)
-    J11 = np.einsum("iq,iq,iqjr,jr,jr->ij", w_i, u_i, G, w_j, u_j)
+    J00 = np.einsum("iq,kiqjr,jr->kij", w_i, G, w_j)
+    J10 = np.einsum("iq,iq,kiqjr,jr->kij", w_i, u_i, G, w_j)
+    J01 = np.einsum("iq,kiqjr,jr,jr->kij", w_i, G, w_j, u_j)
+    J11 = np.einsum("iq,iq,kiqjr,jr,jr->kij", w_i, u_i, G, w_j, u_j)
     return J00, J10, J01, J11
 
 
@@ -83,7 +100,7 @@ class BentTriangularPySim(AbstractPySim):
     """
 
     def __init__(self, *, polyline=None, n_per_edge=None, feed_arclength=None,
-                 n_qp_reg=4, n_qp_off=8, **kwargs):
+                 n_qp_reg=4, n_qp_off=4, **kwargs):
         super().__init__(**kwargs)
         if polyline is None:
             L = 2 * self.halfdriver
@@ -255,3 +272,108 @@ class BentTriangularPySim(AbstractPySim):
         coeffs = scipy.linalg.solve(Z, v)
         driver_impedance = 1.0 / coeffs[m_center]
         return driver_impedance, coeffs
+
+    def compute_impedance_swept(self, k_array):
+        """Driver impedance over a batch of wavenumbers, sharing all
+        k-independent work (geometry, static kernel, h/tangent setup).
+
+        k_array: 1D array-like of wavenumbers (rad/m).
+        Returns z_in of shape (n_k,) complex.
+        """
+        a = self.wire_radius
+        k_array = np.asarray(k_array, dtype=float)
+        n_k = len(k_array)
+        omega_array = k_array * self.c
+
+        geom = self._build_geometry()
+        N = geom["n_total"]
+        seg_l = geom["seg_l"]
+        seg_r = geom["seg_r"]
+        tangents = geom["tangents"]
+        h_per_seg = geom["h_per_seg"]
+        edge_offsets = geom["edge_offsets"]
+        edge_arc_edges = geom["edge_arc_edges"]
+        global_arc_at_knot = geom["global_arc_at_knot"]
+        n_edges = len(edge_offsets) - 1
+
+        J00 = np.zeros((n_k, N, N), dtype=np.complex128)
+        J10 = np.zeros_like(J00)
+        J01 = np.zeros_like(J00)
+        J11 = np.zeros_like(J00)
+
+        for i_e in range(n_edges):
+            for j_e in range(n_edges):
+                sli = slice(edge_offsets[i_e], edge_offsets[i_e + 1])
+                slj = slice(edge_offsets[j_e], edge_offsets[j_e + 1])
+                if i_e == j_e:
+                    A00, A10, A01, A11 = _seg_seg_static_all(edge_arc_edges[i_e], a)
+                    R00, R10, R01, R11 = _seg_seg_reg_all_batch(
+                        edge_arc_edges[i_e], a, k_array, self.n_qp_reg,
+                    )
+                    J00[:, sli, sli] = A00[None, :, :] + R00
+                    J10[:, sli, sli] = A10[None, :, :] + R10
+                    J01[:, sli, sli] = A01[None, :, :] + R01
+                    J11[:, sli, sli] = A11[None, :, :] + R11
+                else:
+                    C00, C10, C01, C11 = _seg_seg_offedge_quad_batch(
+                        seg_l[sli], seg_r[sli],
+                        seg_l[slj], seg_r[slj],
+                        a, k_array, self.n_qp_off,
+                    )
+                    J00[:, sli, slj] = C00
+                    J10[:, sli, slj] = C10
+                    J01[:, sli, slj] = C01
+                    J11[:, sli, slj] = C11
+
+        n_basis = N - 1
+        left_seg = np.arange(n_basis)
+        right_seg = np.arange(1, N)
+        hl_m = h_per_seg[left_seg][:, None]
+        hl_n = h_per_seg[left_seg][None, :]
+        hr_m = h_per_seg[right_seg][:, None]
+        hr_n = h_per_seg[right_seg][None, :]
+
+        # Batched 2-axis fancy indexing into the (n_k, N, N) J tensors.
+        ll = (slice(None), left_seg[:, None], left_seg[None, :])
+        lr = (slice(None), left_seg[:, None], right_seg[None, :])
+        rl = (slice(None), right_seg[:, None], left_seg[None, :])
+        rr = (slice(None), right_seg[:, None], right_seg[None, :])
+
+        S = (
+            J00[ll] / (hl_m * hl_n)
+            - J00[lr] / (hl_m * hr_n)
+            - J00[rl] / (hr_m * hl_n)
+            + J00[rr] / (hr_m * hr_n)
+        )
+        Z_Phi = S / (1j * omega_array[:, None, None] * self.eps)
+
+        td_all = tangents @ tangents.T
+        td_ll = td_all[np.ix_(left_seg, left_seg)][None, ...]
+        td_lr = td_all[np.ix_(left_seg, right_seg)][None, ...]
+        td_rl = td_all[np.ix_(right_seg, left_seg)][None, ...]
+        td_rr = td_all[np.ix_(right_seg, right_seg)][None, ...]
+
+        I_A = (
+            td_ll * (J11[ll] / (hl_m * hl_n))
+            + td_lr * (J10[lr] / hl_m - J11[lr] / (hl_m * hr_n))
+            + td_rl * (J01[rl] / hl_n - J11[rl] / (hr_m * hl_n))
+            + td_rr * (
+                J00[rr]
+                - J10[rr] / hr_m
+                - J01[rr] / hr_n
+                + J11[rr] / (hr_m * hr_n)
+            )
+        )
+        Z_A = 1j * omega_array[:, None, None] * self.mu * I_A
+
+        Z = Z_A + Z_Phi  # (n_k, n_basis, n_basis)
+
+        total_arc = global_arc_at_knot[-1]
+        feed_arc = self.feed_arclength if self.feed_arclength is not None else total_arc / 2.0
+        interior_arc = global_arc_at_knot[1:-1]
+        m_center = int(np.argmin(np.abs(interior_arc - feed_arc)))
+
+        v = np.zeros(n_basis, dtype=np.complex128)
+        v[m_center] = 1.0
+        coeffs = np.linalg.solve(Z, v)  # (n_k, n_basis)
+        return 1.0 / coeffs[:, m_center]
