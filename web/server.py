@@ -10,6 +10,7 @@ currents; the feed lives on one of the wires.
 
 Run: uvicorn web.server:app --reload
 """
+
 from __future__ import annotations
 
 import json
@@ -36,9 +37,7 @@ app.add_middleware(
 C_LIGHT = 299_792_458.0  # m/s, matches AbstractPySim's eps*mu derivation to ~1e-9
 
 
-def _wire_record(
-    knots: np.ndarray, coeffs: np.ndarray, label: str
-) -> dict:
+def _wire_record(knots: np.ndarray, coeffs: np.ndarray, label: str) -> dict:
     """Pad interior-knot coefficients with zero endpoints (open-wire BC) and
     package one wire's record for the JSON response.
     """
@@ -70,7 +69,7 @@ def _inverted_v_polyline(arm_len: float, angle_deg: float) -> np.ndarray:
 def _solve_inverted_v(req: dict) -> dict:
     angle_deg = float(req.get("angle_deg", 30.0))
     n_per_wire = int(req.get("n_per_wire", 30))
-    design_freq_mhz = float(req.get("design_freq_mhz", 13.625))
+    design_freq_mhz = float(req.get("design_freq_mhz", 14.3))
     meas_freq_mhz = float(req.get("measurement_freq_mhz", design_freq_mhz))
     halfdriver_factor = float(req.get("halfdriver_factor", 0.962))
     wire_radius = float(req.get("wire_radius", 0.0005))
@@ -93,10 +92,12 @@ def _solve_inverted_v(req: dict) -> dict:
     z_in, coeffs = sim.compute_impedance()
     solve_ms = (time.perf_counter() - t0) * 1e3
 
-    knots = np.vstack([
-        np.linspace(polyline[0], polyline[1], n_per_wire + 1)[:-1],
-        np.linspace(polyline[1], polyline[2], n_per_wire + 1),
-    ])
+    knots = np.vstack(
+        [
+            np.linspace(polyline[0], polyline[1], n_per_wire + 1)[:-1],
+            np.linspace(polyline[1], polyline[2], n_per_wire + 1),
+        ]
+    )
     feed_knot_index = n_per_wire  # apex (midpoint of polyline)
 
     return {
@@ -127,7 +128,7 @@ def _solve_yagi(req: dict) -> dict:
     geometry is transposed to match.
     """
     n_per_wire = int(req.get("n_per_wire", 30))
-    design_freq_mhz = float(req.get("design_freq_mhz", 13.625))
+    design_freq_mhz = float(req.get("design_freq_mhz", 14.3))
     meas_freq_mhz = float(req.get("measurement_freq_mhz", design_freq_mhz))
     driver_factor = float(req.get("driver_length_factor", 0.962))
     refl_factor_abs = float(req.get("reflector_length_factor", 1.01))
@@ -166,16 +167,20 @@ def _solve_yagi(req: dict) -> dict:
 
     # Canonical layout: wires along x, spacing along y, all in the xy plane.
     N = n_per_wire
-    driver_knots = np.column_stack([
-        np.linspace(-h_driver, h_driver, N + 1),
-        np.zeros(N + 1),
-        np.zeros(N + 1),
-    ])
-    refl_knots = np.column_stack([
-        np.linspace(-h_refl, h_refl, N + 1),
-        np.full(N + 1, -spacing_m),
-        np.zeros(N + 1),
-    ])
+    driver_knots = np.column_stack(
+        [
+            np.linspace(-h_driver, h_driver, N + 1),
+            np.zeros(N + 1),
+            np.zeros(N + 1),
+        ]
+    )
+    refl_knots = np.column_stack(
+        [
+            np.linspace(-h_refl, h_refl, N + 1),
+            np.full(N + 1, -spacing_m),
+            np.zeros(N + 1),
+        ]
+    )
 
     nb = N - 1
     driver_coeffs = coeffs[:nb]
@@ -215,11 +220,13 @@ def solve(req: dict) -> dict:
     return _solve_inverted_v(req)
 
 
-def _sweep_inverted_v(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[float]]:
+def _sweep_inverted_v(
+    req: dict, freqs_mhz: list[float]
+) -> tuple[list[float], list[float]]:
     """Batched sweep using BentTriangularPySim.compute_impedance_swept."""
     angle_deg = float(req.get("angle_deg", 30.0))
     n_per_wire = int(req.get("n_per_wire", 30))
-    design_freq_mhz = float(req.get("design_freq_mhz", 13.625))
+    design_freq_mhz = float(req.get("design_freq_mhz", 14.3))
     halfdriver_factor = float(req.get("halfdriver_factor", 0.962))
     wire_radius = float(req.get("wire_radius", 0.0005))
 
@@ -245,7 +252,7 @@ def _sweep_inverted_v(req: dict, freqs_mhz: list[float]) -> tuple[list[float], l
 def _sweep_yagi(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[float]]:
     """Batched sweep using TriangularYagiPySim.compute_impedance_swept."""
     n_per_wire = int(req.get("n_per_wire", 30))
-    design_freq_mhz = float(req.get("design_freq_mhz", 13.625))
+    design_freq_mhz = float(req.get("design_freq_mhz", 14.3))
     driver_factor = float(req.get("driver_length_factor", 0.962))
     refl_factor_abs = float(req.get("reflector_length_factor", 1.01))
     spacing_wavelengths = float(req.get("spacing_wavelengths", 0.15))

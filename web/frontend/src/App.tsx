@@ -60,8 +60,8 @@ export function App() {
   const [spacingWavelengths, setSpacingWavelengths] = useState(0.15);
   // Shared
   const [nPerWire, setNPerWire] = useState(30);
-  const [designFreq, setDesignFreq] = useState(13.625);
-  const [measFreq, setMeasFreq] = useState(13.625);
+  const [designFreq, setDesignFreq] = useState(14.3);
+  const [measFreq, setMeasFreq] = useState(14.3);
   const [linkMeas, setLinkMeas] = useState(true);
   const [wireRadius, setWireRadius] = useState(0.0005);
 
@@ -151,10 +151,10 @@ export function App() {
     const controller = new AbortController();
     sweepAbortRef.current = controller;
 
-    // Sweep ±30% of design freq with 41 log-spaced points.
+    // Sweep 0.8x to 1.25x of design freq with 41 log-spaced points.
     const N = 41;
-    const fLo = Math.max(0.5, designFreq * 0.7);
-    const fHi = Math.min(60, designFreq * 1.3);
+    const fLo = Math.max(0.5, designFreq * 0.8);
+    const fHi = Math.min(60, designFreq * 1.25);
     const freqs = Array.from({ length: N }, (_, i) =>
       Math.exp(Math.log(fLo) + (i / (N - 1)) * (Math.log(fHi) - Math.log(fLo))),
     );
@@ -336,8 +336,8 @@ export function App() {
           </label>
           <input
             type="range"
-            min={1}
-            max={30}
+            min={11.44}
+            max={17.875}
             step={0.005}
             value={designFreq}
             onInput={(e) => updateDesignFreq(Number((e.target as HTMLInputElement).value))}
@@ -380,8 +380,8 @@ export function App() {
           </label>
           <input
             type="range"
-            min={1}
-            max={30}
+            min={Math.max(0.5, designFreq * 0.8)}
+            max={Math.min(60, designFreq * 1.25)}
             step={0.005}
             value={measFreq}
             disabled={linkMeas}
