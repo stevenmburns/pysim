@@ -1109,10 +1109,17 @@ function CurrentCanvas({ result }: { result: SolveResponse | null }) {
       // Scale anchored to design wavelength. Worst-case extents (in λ):
       //   horizontal: hf_max × λ/2 ≈ 0.6 λ  (both V and Yagi)
       //   vertical:   max(V droop, Yagi spacing) ≈ 0.5 λ
+      //
+      // `s` proportionally shrinks every fixed pixel constant (padding,
+      // strokes, envelope amplitude, label sizes) so the rendering looks
+      // the same at thumbnail and main sizes. Floor keeps thumbnails
+      // legible; cap prevents very-large canvases from over-inflating.
+      const refSize = 600;
+      const s = Math.max(0.3, Math.min(1.4, Math.min(w, h) / refSize));
       const C_LIGHT = 299_792_458.0;
       const lambdaDesign = C_LIGHT / (result.design_freq_mhz * 1e6);
-      const pad = 50;
-      const barReserveBottom = 40;
+      const pad = 50 * s;
+      const barReserveBottom = 40 * s;
       const FILL = 0.85;
       const scale = FILL * Math.min(
         (w - 2 * pad) / (0.6 * lambdaDesign),
@@ -1156,7 +1163,9 @@ function CurrentCanvas({ result }: { result: SolveResponse | null }) {
       ctx!.lineJoin = "round";
 
       // One wire at a time: wire stroke + envelope.
-      const envScale = 60;
+      const envScale = 60 * s;
+      const labelFontPx = Math.max(8, Math.round(11 * s));
+      const feedFontPx = Math.max(8, Math.round(12 * s));
       const feedWireIdx = result.feed_wire_index;
       for (let wi = 0; wi < result.wires.length; wi++) {
         const wire = result.wires[wi];
@@ -1168,7 +1177,7 @@ function CurrentCanvas({ result }: { result: SolveResponse | null }) {
           const b = project(knots[i + 1]);
           const m = (0.5 * (mags[i] + mags[i + 1])) / magMaxGlobal;
           ctx!.strokeStyle = currentColor(m);
-          ctx!.lineWidth = 2 + 6 * m;
+          ctx!.lineWidth = (2 + 6 * m) * s;
           ctx!.beginPath();
           ctx!.moveTo(a.x, a.y);
           ctx!.lineTo(b.x, b.y);
@@ -1179,7 +1188,7 @@ function CurrentCanvas({ result }: { result: SolveResponse | null }) {
         // split at the feed knot so a V's per-arm tangent flip is respected.
         // Otherwise draw one continuous envelope.
         ctx!.strokeStyle = "rgba(118, 208, 255, 0.7)";
-        ctx!.lineWidth = 1.5;
+        ctx!.lineWidth = 1.5 * s;
         const lastIdx = knots.length - 1;
         const feedIdx = result.feed_knot_index;
         if (wi === feedWireIdx && feedIdx > 0 && feedIdx < lastIdx) {
@@ -1193,8 +1202,8 @@ function CurrentCanvas({ result }: { result: SolveResponse | null }) {
         if (result.wires.length > 1) {
           const lp = project(knots[0]);
           ctx!.fillStyle = "#7b8493";
-          ctx!.font = "11px ui-monospace, monospace";
-          ctx!.fillText(wire.label, lp.x - 8 - ctx!.measureText(wire.label).width, lp.y + 3);
+          ctx!.font = `${labelFontPx}px ui-monospace, monospace`;
+          ctx!.fillText(wire.label, lp.x - 8 * s - ctx!.measureText(wire.label).width, lp.y + 3 * s);
         }
       }
 
@@ -1204,31 +1213,31 @@ function CurrentCanvas({ result }: { result: SolveResponse | null }) {
         const feed = project(feedWire.knot_positions[result.feed_knot_index]);
         ctx!.fillStyle = "#ffd166";
         ctx!.beginPath();
-        ctx!.arc(feed.x, feed.y, 5, 0, Math.PI * 2);
+        ctx!.arc(feed.x, feed.y, 5 * s, 0, Math.PI * 2);
         ctx!.fill();
-        ctx!.font = "12px ui-monospace, monospace";
-        ctx!.fillText("feed", feed.x + 8, feed.y - 8);
+        ctx!.font = `${feedFontPx}px ui-monospace, monospace`;
+        ctx!.fillText("feed", feed.x + 8 * s, feed.y - 8 * s);
       }
 
       // λ/4 scale bar, centered horizontally under the antenna.
       const barLenPx = (lambdaDesign / 4) * scale;
       const barX0 = (w - barLenPx) / 2;
-      const barY = h - 24;
+      const barY = h - 24 * s;
       ctx!.strokeStyle = "#7b8493";
       ctx!.lineWidth = 1;
       ctx!.beginPath();
       ctx!.moveTo(barX0, barY);
       ctx!.lineTo(barX0 + barLenPx, barY);
-      ctx!.moveTo(barX0, barY - 4);
-      ctx!.lineTo(barX0, barY + 4);
-      ctx!.moveTo(barX0 + barLenPx, barY - 4);
-      ctx!.lineTo(barX0 + barLenPx, barY + 4);
+      ctx!.moveTo(barX0, barY - 4 * s);
+      ctx!.lineTo(barX0, barY + 4 * s);
+      ctx!.moveTo(barX0 + barLenPx, barY - 4 * s);
+      ctx!.lineTo(barX0 + barLenPx, barY + 4 * s);
       ctx!.stroke();
       ctx!.fillStyle = "#9aa3b2";
-      ctx!.font = "11px ui-monospace, monospace";
+      ctx!.font = `${labelFontPx}px ui-monospace, monospace`;
       const barLabel = `λ/4 = ${(lambdaDesign / 4).toFixed(2)} m`;
       const labelW = ctx!.measureText(barLabel).width;
-      ctx!.fillText(barLabel, (w - labelW) / 2, barY - 8);
+      ctx!.fillText(barLabel, (w - labelW) / 2, barY - 8 * s);
     }
 
     onResize();
