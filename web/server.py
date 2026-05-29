@@ -13,16 +13,34 @@ Run: uvicorn web.server:app --reload
 
 from __future__ import annotations
 
-# Pin BLAS/OpenMP to a single thread BEFORE numpy/scipy import. The interactive
-# workload is many small solves (≤ 250×250 dense complex matrices), where
-# thread orchestration costs dwarf the per-call work — and the pysim Yagi
-# C++ accelerator already parallelizes internally, so OpenBLAS threads on top
-# of that just thrash the cache. Empirically: 2-director live solve went from
-# 220 ms (8 threads) to 67 ms (1 thread) on an 8-core box.
+# Configure BLAS/OpenMP thread counts BEFORE numpy/scipy/PyNEC import — each
+# library snapshots the env at its own import time and ignores later changes.
+#
+# OPENBLAS_NUM_THREADS=1: numpy/scipy bring their own OpenBLAS thread pool
+#   that sits idle most of the request lifetime but contends with PyNEC's
+#   MKL/OpenBLAS-LAPACKE pool for cores. vtune confirmed this was costing
+#   ~8% wall time at NP=4 on the gather-scatter fill.
+#
+# OMP_NUM_THREADS / MKL_NUM_THREADS: with the gather-scatter matrix fill
+#   (see PR #21) the per-source parallel-for inside cmset() and MKL/OpenBLAS'
+#   zgetrf both want available cores. Default to all logical cores; an
+#   operator can override via the env if they want to share with other
+#   workloads on the same host.
+#
+# Older comment explaining why we used to pin everything to 1: the interactive
+# workload is many small solves (≤ 250×250 dense complex matrices), and on
+# the pre-gather-scatter code path thread orchestration costs dwarfed the
+# per-call work — a 2-director live solve went from 220 ms (8 threads) to
+# 67 ms (1 thread) on an 8-core box. That regression is no longer reproducible
+# with the current build: matrix fill itself parallelizes, the OMP team is
+# spawned once per cmset(), and OpenBLAS contention is removed by the
+# OPENBLAS_NUM_THREADS=1 pin above.
 import os
 
-for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ.setdefault(_var, "1")
+_NPROC = str(os.cpu_count() or 1)
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", _NPROC)
+os.environ.setdefault("MKL_NUM_THREADS", _NPROC)
 
 # ruff: noqa: E402 — imports below must follow the env-var setup above so
 # OpenBLAS picks up the thread count at its own import time.
