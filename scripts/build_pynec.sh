@@ -4,9 +4,11 @@
 # local project venv at .venv/.
 #
 # Tool deps (autoconf/automake/libtoolize/m4): system packages, on Ubuntu:
-#     sudo apt install autoconf automake libtool m4
-# SWIG and numpy come from the local venv. Fortran is NOT required; necpp
-# is configured with --without-lapack so the build is C++ only.
+#     sudo apt install autoconf automake libtool m4 libatlas-base-dev
+# SWIG and numpy come from the local venv. libatlas-base-dev provides
+# clapack.h, libcblas, libatlas — necpp uses these to accelerate the
+# matrix solve (clapack_zgetrf) instead of the hand-rolled Gauss
+# elimination. ~3x speedup on a 100-director Yagi.
 #
 # After this script: `from PyNEC import nec_context` should work in .venv.
 #
@@ -32,9 +34,15 @@ fi
 
 cd "$ROOT/python-necpp/necpp_src"
 # Generate configure (idempotent — skip if config.h already exists).
+# Configure with LAPACK enabled. necpp's autoconf checks for clapack_zgetrf
+# via the ATLAS-style symbol, so we point at the multiarch include/lib
+# dirs where libatlas-base-dev installs them on Debian/Ubuntu.
 if [ ! -f config.h ]; then
     make -f Makefile.git
-    ./configure --without-lapack
+    MULTIARCH=$(gcc -print-multiarch 2>/dev/null || echo x86_64-linux-gnu)
+    CPPFLAGS="-I/usr/include/${MULTIARCH}" \
+        LDFLAGS="-L/usr/lib/${MULTIARCH}" \
+        ./configure --with-lapack
 fi
 
 cd "$ROOT/python-necpp/PyNEC"

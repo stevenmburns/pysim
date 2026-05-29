@@ -45,7 +45,9 @@ jobs:
           python-version: '3.12'
           cache: pip
       - name: Install build-time system deps for necpp
-        run: sudo apt-get update -qq && sudo apt-get install -y autoconf automake libtool m4
+        # libatlas-base-dev provides clapack.h + libcblas/libatlas so
+        # necpp can be configured with --with-lapack (see scripts/build_pynec.sh).
+        run: sudo apt-get update -qq && sudo apt-get install -y autoconf automake libtool m4 libatlas-base-dev
       - name: Create venv and install python deps
         run: |
           python -m venv .venv
