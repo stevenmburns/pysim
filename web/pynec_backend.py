@@ -53,10 +53,18 @@ def _run_solve(
     freq_mhz: float,
     ground: bool = False,
     feed_tag: int = 1,
+    ground_fast: bool = False,
 ):
     if ground:
-        # Sommerfeld-Norton finite ground (ITYPE=2) with average-earth constants.
-        c.gn_card(2, 0, GROUND_DIELECTRIC, GROUND_CONDUCTIVITY, 0, 0, 0, 0)
+        # ITYPE=2: Sommerfeld-Norton, full kernel integration — accurate for
+        # antennas a fraction of a wavelength above ground, ~100x slower per
+        # solve than free space.
+        # ITYPE=0: reflection-coefficient approximation — applies a Fresnel
+        # reflection on the image current rather than evaluating Sommerfeld
+        # integrals. Cheap (~10x faster than ITYPE=2) and accurate enough
+        # away from grazing angles; degrades for very low antennas.
+        itype = 0 if ground_fast else 2
+        c.gn_card(itype, 0, GROUND_DIELECTRIC, GROUND_CONDUCTIVITY, 0, 0, 0, 0)
     else:
         c.gn_card(-1, 0, 0, 0, 0, 0, 0, 0)  # free space
     c.ex_card(0, feed_tag, feed_seg, 0, 1.0, 0.0, 0, 0, 0, 0)
@@ -78,6 +86,7 @@ def _build_inverted_v(req: dict):
     halfdriver_factor = float(req.get("halfdriver_factor", 0.962))
     wire_radius = float(req.get("wire_radius", 0.0005))
     ground = bool(req.get("ground", False))
+    ground_fast = bool(req.get("ground_fast", False))
     height_m = float(req.get("height_m", 0.0))
 
     wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
@@ -108,6 +117,7 @@ def _build_inverted_v(req: dict):
         "wavelength_design": wavelength_design,
         "design_freq_mhz": design_freq_mhz,
         "ground": ground,
+        "ground_fast": ground_fast,
         "z_offset": z_offset,
     }
 
@@ -124,7 +134,12 @@ def solve_inverted_v(req: dict) -> dict:
 
     t0 = time.perf_counter()
     cur_arr, tag_arr = _run_solve(
-        c, 2 * n_per_wire, feed_seg, meas_freq_mhz, ground=b["ground"]
+        c,
+        2 * n_per_wire,
+        feed_seg,
+        meas_freq_mhz,
+        ground=b["ground"],
+        ground_fast=b["ground_fast"],
     )
     solve_ms = (time.perf_counter() - t0) * 1e3
 
@@ -169,6 +184,7 @@ def solve_inverted_v(req: dict) -> dict:
         "solve_ms": solve_ms,
         "solver": "pynec",
         "ground": b["ground"],
+        "ground_fast": b["ground_fast"],
         "height_m": b["z_offset"],
         "ground_eps_r": GROUND_DIELECTRIC,
         "ground_sigma": GROUND_CONDUCTIVITY,
@@ -185,6 +201,7 @@ def _build_yagi(req: dict):
     spacing_wavelengths = float(req.get("spacing_wavelengths", 0.15))
     wire_radius = float(req.get("wire_radius", 0.0005))
     ground = bool(req.get("ground", False))
+    ground_fast = bool(req.get("ground_fast", False))
     height_m = float(req.get("height_m", 0.0))
     n_directors = int(req.get("n_directors", 0))
     # Uniform director spacing (between consecutive elements) in wavelengths.
@@ -260,6 +277,7 @@ def _build_yagi(req: dict):
         "wavelength_design": wavelength_design,
         "design_freq_mhz": design_freq_mhz,
         "ground": ground,
+        "ground_fast": ground_fast,
         "z_offset": z_offset,
     }
 
@@ -285,7 +303,12 @@ def solve_yagi(req: dict) -> dict:
 
     t0 = time.perf_counter()
     cur_arr, tag_arr = _run_solve(
-        c, n_wires_total * n_per_wire, feed_seg, meas_freq_mhz, ground=b["ground"]
+        c,
+        n_wires_total * n_per_wire,
+        feed_seg,
+        meas_freq_mhz,
+        ground=b["ground"],
+        ground_fast=b["ground_fast"],
     )
     solve_ms = (time.perf_counter() - t0) * 1e3
 
@@ -350,6 +373,7 @@ def solve_yagi(req: dict) -> dict:
         "solve_ms": solve_ms,
         "solver": "pynec",
         "ground": b["ground"],
+        "ground_fast": b["ground_fast"],
         "height_m": z_offset,
         "ground_eps_r": GROUND_DIELECTRIC,
         "ground_sigma": GROUND_CONDUCTIVITY,
@@ -375,6 +399,7 @@ def _build_moxon(req: dict):
     t0_factor = float(req.get("t0_factor", 0.4078))
     wire_radius = float(req.get("wire_radius", 0.0005))
     ground = bool(req.get("ground", False))
+    ground_fast = bool(req.get("ground_fast", False))
     height_m = float(req.get("height_m", 0.0))
 
     wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
@@ -450,6 +475,7 @@ def _build_moxon(req: dict):
         "tipspacer_m": tipspacer,
         "t0_m": t0,
         "ground": ground,
+        "ground_fast": ground_fast,
         "z_offset": z_offset,
     }
 
@@ -479,6 +505,7 @@ def solve_moxon(req: dict) -> dict:
         meas_freq_mhz,
         ground=b["ground"],
         feed_tag=b["feed_tag"],
+        ground_fast=b["ground_fast"],
     )
     solve_ms = (time.perf_counter() - t0_clock) * 1e3
 
@@ -539,6 +566,7 @@ def solve_moxon(req: dict) -> dict:
         "solve_ms": solve_ms,
         "solver": "pynec",
         "ground": b["ground"],
+        "ground_fast": b["ground_fast"],
         "height_m": b["z_offset"],
         "ground_eps_r": GROUND_DIELECTRIC,
         "ground_sigma": GROUND_CONDUCTIVITY,
@@ -585,6 +613,7 @@ def pattern(req: dict) -> dict:
         meas_freq_mhz,
         ground=b["ground"],
         feed_tag=feed_tag,
+        ground_fast=b["ground_fast"],
     )
 
     # 2°×5° grid: 46 thetas (0..90), 73 phis (0..360 inclusive). At ~3.4k
@@ -603,6 +632,7 @@ def pattern(req: dict) -> dict:
         "available": True,
         "geometry": geometry,
         "ground": b["ground"],
+        "ground_fast": b["ground_fast"],
         "height_m": b["z_offset"],
         "measurement_freq_mhz": meas_freq_mhz,
         "theta_deg": [ti * del_theta for ti in range(n_theta)],

@@ -45,6 +45,7 @@ type SolveRequest = {
   measurement_freq_mhz: number;
   wire_radius: number;
   ground: boolean;
+  ground_fast: boolean;
   height_m: number;
   // V
   angle_deg?: number;
@@ -175,6 +176,7 @@ export function App() {
   const [wireRadius, setWireRadius] = useState(0.0005);
   // Ground plane (PyNEC only). Geometry is lifted by heightM when enabled.
   const [groundEnabled, setGroundEnabled] = useState(false);
+  const [groundFast, setGroundFast] = useState(false);
   const [heightM, setHeightM] = useState(7.0);
   // Far-field cut angles. The azimuth plot slices the pattern at elevation
   // `azElevDeg`; the elevation plot slices the vertical plane at azimuth
@@ -245,6 +247,7 @@ export function App() {
       measurement_freq_mhz: measFreq,
       wire_radius: wireRadius,
       ground: groundActive,
+      ground_fast: groundActive && groundFast,
       height_m: heightM,
     };
     if (geometry === "inverted_v") {
@@ -291,7 +294,7 @@ export function App() {
     nDirectors, directorSpacingWavelengths, directorSizeFactor,
     moxonHalfdriverFactor, moxonAspectRatio, moxonTipspacerFactor, moxonT0Factor,
     nPerWire, designFreq, measFreq, wireRadius,
-    groundEnabled, heightM,
+    groundEnabled, groundFast, heightM,
   ]);
 
   // Debounced sweep across measurement freq. Re-runs whenever any antenna
@@ -317,7 +320,7 @@ export function App() {
     nDirectors, directorSpacingWavelengths, directorSizeFactor,
     moxonHalfdriverFactor, moxonAspectRatio, moxonTipspacerFactor, moxonT0Factor,
     nPerWire, designFreq, wireRadius,
-    groundEnabled, heightM,
+    groundEnabled, groundFast, heightM,
   ]);
 
   // Debounced NEC pattern fetch. PyNEC only — for pysim there's no rp_card
@@ -341,7 +344,7 @@ export function App() {
     nDirectors, directorSpacingWavelengths, directorSizeFactor,
     moxonHalfdriverFactor, moxonAspectRatio, moxonTipspacerFactor, moxonT0Factor,
     nPerWire, designFreq, measFreq, wireRadius,
-    groundEnabled, heightM,
+    groundEnabled, groundFast, heightM,
   ]);
 
   async function runSweep() {
@@ -349,11 +352,12 @@ export function App() {
     const controller = new AbortController();
     sweepAbortRef.current = controller;
 
-    // Sweep 0.8x to 1.25x of design freq, log-spaced. Ground mode is ~100x
-    // slower per point (Sommerfeld-Norton solve), so halve the resolution to
-    // keep total sweep time near free-space cost.
+    // Sweep 0.8x to 1.25x of design freq, log-spaced. Sommerfeld-Norton ground
+    // is ~100x slower per point, so halve the resolution there to keep total
+    // sweep time near free-space cost. Fast (reflection-coefficient) ground
+    // is only ~10x slower per point — full resolution stays interactive.
     const groundActive = solver === "pynec" && groundEnabled;
-    const N = groundActive ? 21 : 41;
+    const N = groundActive && !groundFast ? 21 : 41;
     const fLo = Math.max(0.5, designFreq * 0.8);
     const fHi = Math.min(60, designFreq * 1.25);
     const freqs = Array.from({ length: N }, (_, i) =>
@@ -785,6 +789,19 @@ export function App() {
             />
             ground plane (εr=10, σ=0.002 S/m)
           </label>
+          {solver === "pynec" && groundEnabled && (
+            <label
+              className="link-toggle"
+              title="Reflection-coefficient approximation (NEC ITYPE=0). ~10x faster per solve than Sommerfeld-Norton; degrades for very-low antennas near the horizon."
+            >
+              <input
+                type="checkbox"
+                checked={groundFast}
+                onChange={(e) => setGroundFast(e.target.checked)}
+              />
+              fast ground (reflection coefficient)
+            </label>
+          )}
         </div>
 
         {solver === "pynec" && groundEnabled && (
