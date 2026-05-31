@@ -23,8 +23,11 @@ from __future__ import annotations
 #
 # OMP_NUM_THREADS / MKL_NUM_THREADS: with the gather-scatter matrix fill
 #   (see PR #21) the per-source parallel-for inside cmset() and MKL/OpenBLAS'
-#   zgetrf both want available cores. Default to all logical cores; an
-#   operator can override via the env if they want to share with other
+#   zgetrf both want available cores. Default to the physical-core count
+#   (not logical / HT count) — see _physical_cpu_count(); the FP-vector-
+#   saturated quadrature inner loops gain nothing from HT siblings and
+#   actually slow down ~15% from execution-unit contention on KBL-class
+#   chips. An operator can override via the env to share with other
 #   workloads on the same host.
 #
 # Older comment explaining why we used to pin everything to 1: the interactive
@@ -37,7 +40,43 @@ from __future__ import annotations
 # OPENBLAS_NUM_THREADS=1 pin above.
 import os
 
-_NPROC = str(os.cpu_count() or 1)
+
+def _physical_cpu_count() -> int:
+    """Number of physical cores (not logical / HT siblings).
+
+    Our quadrature kernels are FP-vector-saturated (libmvec AVX2 sin/cos
+    inner loops, no spare FU bandwidth), so two HT siblings on one physical
+    core contend for execution units rather than overlap. Ad-hoc bench on
+    KBL-R 4C/8T showed 4-thread runs ~15% faster than 8-thread runs of the
+    swept-ground hot path. Pin to physical-core count to skip that loss.
+    """
+    try:
+        cores = set()
+        phys, coreid = None, None
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                key, _, val = line.partition(":")
+                key = key.strip()
+                val = val.strip()
+                if key == "physical id":
+                    phys = val
+                elif key == "core id":
+                    coreid = val
+                elif not line.strip() and phys is not None and coreid is not None:
+                    cores.add((phys, coreid))
+                    phys, coreid = None, None
+        if phys is not None and coreid is not None:
+            cores.add((phys, coreid))
+        if cores:
+            return len(cores)
+    except OSError:
+        pass
+    # Fallback: assume 2 HT siblings per core on x86. Wrong on chips without
+    # HT, but in that case the caller can override via the env var.
+    return max(1, (os.cpu_count() or 1) // 2)
+
+
+_NPROC = str(_physical_cpu_count())
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", _NPROC)
 os.environ.setdefault("MKL_NUM_THREADS", _NPROC)
