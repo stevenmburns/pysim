@@ -323,6 +323,23 @@ export function App() {
     }
   }
 
+  // Measurement-band quick selector: jumps measFreq to the band centre and
+  // auto-unlinks from design so the antenna geometry isn't retuned.
+  function selectMeasBand(next: Band) {
+    if (linkMeas) setLinkMeas(false);
+    setMeasFreq(BAND_BY_ID[next].default);
+  }
+
+  // Which band (if any) currently contains the measurement freq — drives
+  // the active-tab highlight on the meas-band selector. Falls outside any
+  // band → no tab highlighted.
+  function bandContaining(f: number): Band | null {
+    for (const b of BANDS) {
+      if (f >= b.min && f <= b.max) return b.id;
+    }
+    return null;
+  }
+
   // The latest control values, used to send a new request when the prior one
   // completes (drops intermediate values rather than queuing them all up).
   const controlsRef = useRef<SolveRequest>(buildRequest());
@@ -344,7 +361,10 @@ export function App() {
   ]);
 
   // Debounced sweep across measurement freq. Re-runs whenever any antenna
-  // parameter changes; measurement-freq slider does NOT trigger a sweep.
+  // parameter changes. Single-band geometries sweep around designFreq, so
+  // moving the measFreq slider doesn't re-sweep (the existing data already
+  // covers the new slider position). Fan dipole sweeps around measFreq,
+  // so measFreq is part of the deps there to re-anchor.
   useEffect(() => {
     if (sweepTimerRef.current) {
       window.clearTimeout(sweepTimerRef.current);
@@ -369,6 +389,7 @@ export function App() {
     fanNBands, fanBandLengths, fanSlope, fanConeRadius,
     nPerWire, designFreq, wireRadius,
     groundEnabled, groundFast, heightM,
+    geometry === "fan_dipole" ? measFreq : null,
   ]);
 
   // Debounced NEC pattern fetch. PyNEC only — for pysim there's no rp_card
@@ -402,14 +423,19 @@ export function App() {
     const controller = new AbortController();
     sweepAbortRef.current = controller;
 
-    // Sweep 0.8x to 1.25x of design freq, log-spaced. Sommerfeld-Norton ground
-    // is ~100x slower per point, so halve the resolution there to keep total
-    // sweep time near free-space cost. Fast (reflection-coefficient) ground
-    // and pysim PEC ground are cheap enough for full resolution.
+    // Sweep 0.8x to 1.25x of the anchor freq, log-spaced. Sommerfeld-Norton
+    // ground is ~100x slower per point, so halve the resolution there to keep
+    // total sweep time near free-space cost. Fast (reflection-coefficient)
+    // ground and pysim PEC ground are cheap enough for full resolution.
+    //
+    // Anchor: single-band geometries sweep around designFreq; fan_dipole is
+    // multi-band, so we sweep around measFreq instead — that's where the
+    // user is currently probing.
     const slowGround = solver === "pynec" && groundEnabled && !groundFast;
     const N = slowGround ? 21 : 41;
-    const fLo = Math.max(0.5, designFreq * 0.8);
-    const fHi = Math.min(60, designFreq * 1.25);
+    const sweepAnchor = geometry === "fan_dipole" ? measFreq : designFreq;
+    const fLo = Math.max(0.5, sweepAnchor * 0.8);
+    const fHi = Math.min(60, sweepAnchor * 1.25);
     const freqs = Array.from({ length: N }, (_, i) =>
       Math.exp(Math.log(fLo) + (i / (N - 1)) * (Math.log(fHi) - Math.log(fLo))),
     );
@@ -1033,10 +1059,36 @@ export function App() {
             <span>measurement freq</span>
             <span>{measFreq.toFixed(3)} MHz</span>
           </label>
+          {/* Fan dipole is multi-band, so the slider has to span all five
+              bands rather than ±25% of a single design freq. */}
+          <div className="geometry-tabs band-tabs" role="tablist">
+            {BANDS.map((b) => {
+              const active = bandContaining(measFreq) === b.id;
+              return (
+                <button
+                  key={b.id}
+                  role="tab"
+                  aria-selected={active}
+                  className={active ? "active" : ""}
+                  onClick={() => selectMeasBand(b.id)}
+                >
+                  {b.id}
+                </button>
+              );
+            })}
+          </div>
           <input
             type="range"
-            min={Math.max(0.5, designFreq * 0.8)}
-            max={Math.min(60, designFreq * 1.25)}
+            min={
+              geometry === "fan_dipole"
+                ? BANDS[0].min - 0.5
+                : Math.max(0.5, designFreq * 0.8)
+            }
+            max={
+              geometry === "fan_dipole"
+                ? BANDS[BANDS.length - 1].max + 0.5
+                : Math.min(60, designFreq * 1.25)
+            }
             step={0.005}
             value={measFreq}
             disabled={linkMeas}
