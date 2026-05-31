@@ -366,6 +366,12 @@ export function App() {
   // covers the new slider position). Fan dipole sweeps around measFreq,
   // so measFreq is part of the deps there to re-anchor.
   useEffect(() => {
+    // Cancel any in-flight sweep fetch immediately. Without this the
+    // previous sweep keeps streaming for hundreds of ms (PyNEC ground at
+    // 100 ms/point × 41 points = ~4 s) and starves the live /ws solve of
+    // CPU — the user moves a slider but the next impedance update is
+    // delayed behind the now-stale sweep finishing.
+    sweepAbortRef.current?.abort();
     if (sweepTimerRef.current) {
       window.clearTimeout(sweepTimerRef.current);
     }
