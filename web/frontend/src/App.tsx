@@ -8,7 +8,7 @@ type Wire = {
 };
 
 type SolveResponse = {
-  geometry: "inverted_v" | "yagi" | "moxon";
+  geometry: "inverted_v" | "yagi" | "moxon" | "hexbeam";
   wires: Wire[];
   feed_wire_index: number;
   feed_knot_index: number;
@@ -35,10 +35,13 @@ type SolveResponse = {
   tipspacer_m?: number;
   t0_m?: number;
   halfdriver_m?: number;
+  // Hexbeam-specific
+  radius_m?: number;
+  t1_m?: number;
 };
 
 type SolveRequest = {
-  geometry: "inverted_v" | "yagi" | "moxon";
+  geometry: "inverted_v" | "yagi" | "moxon" | "hexbeam";
   solver: "pysim" | "pynec";
   n_per_wire: number;
   design_freq_mhz: number;
@@ -57,7 +60,7 @@ type SolveRequest = {
   n_directors?: number;
   director_spacing_wavelengths?: number;
   director_size_factor?: number;
-  // Moxon
+  // Moxon (+ hexbeam: hexbeam reuses tipspacer_factor and t0_factor too)
   aspect_ratio?: number;
   tipspacer_factor?: number;
   t0_factor?: number;
@@ -148,9 +151,9 @@ function useThumbColumnSize(
 }
 
 export function App() {
-  const [geometry, setGeometry] = useState<"inverted_v" | "yagi" | "moxon">(
-    "inverted_v",
-  );
+  const [geometry, setGeometry] = useState<
+    "inverted_v" | "yagi" | "moxon" | "hexbeam"
+  >("inverted_v");
   // V controls
   const [angle, setAngle] = useState(30);
   const [halfdriverFactor, setHalfdriverFactor] = useState(0.962);
@@ -166,6 +169,12 @@ export function App() {
   const [moxonAspectRatio, setMoxonAspectRatio] = useState(0.3646);
   const [moxonTipspacerFactor, setMoxonTipspacerFactor] = useState(0.0773);
   const [moxonT0Factor, setMoxonT0Factor] = useState(0.4078);
+  // Hexbeam controls (matching antenna_designer's canonical 28.47 MHz design).
+  // halfdriver_factor is >1 here because the hexagonal driver path is longer
+  // than a straight λ/4 driver of the same resonance.
+  const [hexbeamHalfdriverFactor, setHexbeamHalfdriverFactor] = useState(1.071);
+  const [hexbeamTipspacerFactor, setHexbeamTipspacerFactor] = useState(0.1312);
+  const [hexbeamT0Factor, setHexbeamT0Factor] = useState(0.1243);
   // Shared
   const [solver, setSolver] = useState<"pysim" | "pynec">("pysim");
   const [nPerWire, setNPerWire] = useState(30);
@@ -183,9 +192,9 @@ export function App() {
   // bearing `elevAzDeg` (0° = +x). Defaults give the conventional views.
   const [azElevDeg, setAzElevDeg] = useState(15);
   // Default elevation-cut azimuth tracks each geometry's beam direction so
-  // the vertical plane actually contains the main lobe. Yagi and moxon both
-  // beam +x (azimuth 0°); the inverted V is broadside to its ±x wire and
-  // peaks along ±y (azimuth 90°).
+  // the vertical plane actually contains the main lobe. Yagi, moxon, and
+  // hexbeam all beam +x (azimuth 0°); the inverted V is broadside to its
+  // ±x wire and peaks along ±y (azimuth 90°).
   const [elevAzDeg, setElevAzDeg] = useState(0);
   useEffect(() => {
     setElevAzDeg(geometry === "inverted_v" ? 90 : 0);
@@ -260,11 +269,15 @@ export function App() {
       base.n_directors = nDirectors;
       base.director_spacing_wavelengths = directorSpacingWavelengths;
       base.director_size_factor = directorSizeFactor;
-    } else {
+    } else if (geometry === "moxon") {
       base.halfdriver_factor = moxonHalfdriverFactor;
       base.aspect_ratio = moxonAspectRatio;
       base.tipspacer_factor = moxonTipspacerFactor;
       base.t0_factor = moxonT0Factor;
+    } else {
+      base.halfdriver_factor = hexbeamHalfdriverFactor;
+      base.tipspacer_factor = hexbeamTipspacerFactor;
+      base.t0_factor = hexbeamT0Factor;
     }
     return base;
   }
@@ -293,6 +306,7 @@ export function App() {
     driverLengthFactor, reflectorLengthFactor, spacingWavelengths,
     nDirectors, directorSpacingWavelengths, directorSizeFactor,
     moxonHalfdriverFactor, moxonAspectRatio, moxonTipspacerFactor, moxonT0Factor,
+    hexbeamHalfdriverFactor, hexbeamTipspacerFactor, hexbeamT0Factor,
     nPerWire, designFreq, measFreq, wireRadius,
     groundEnabled, groundFast, heightM,
   ]);
@@ -319,6 +333,7 @@ export function App() {
     driverLengthFactor, reflectorLengthFactor, spacingWavelengths,
     nDirectors, directorSpacingWavelengths, directorSizeFactor,
     moxonHalfdriverFactor, moxonAspectRatio, moxonTipspacerFactor, moxonT0Factor,
+    hexbeamHalfdriverFactor, hexbeamTipspacerFactor, hexbeamT0Factor,
     nPerWire, designFreq, wireRadius,
     groundEnabled, groundFast, heightM,
   ]);
@@ -343,6 +358,7 @@ export function App() {
     driverLengthFactor, reflectorLengthFactor, spacingWavelengths,
     nDirectors, directorSpacingWavelengths, directorSizeFactor,
     moxonHalfdriverFactor, moxonAspectRatio, moxonTipspacerFactor, moxonT0Factor,
+    hexbeamHalfdriverFactor, hexbeamTipspacerFactor, hexbeamT0Factor,
     nPerWire, designFreq, measFreq, wireRadius,
     groundEnabled, groundFast, heightM,
   ]);
@@ -520,6 +536,14 @@ export function App() {
             onClick={() => setGeometry("moxon")}
           >
             Moxon
+          </button>
+          <button
+            role="tab"
+            aria-selected={geometry === "hexbeam"}
+            className={geometry === "hexbeam" ? "active" : ""}
+            onClick={() => setGeometry("hexbeam")}
+          >
+            Hexbeam
           </button>
         </div>
 
@@ -707,6 +731,53 @@ export function App() {
                 step={0.001}
                 value={moxonT0Factor}
                 onInput={(e) => setMoxonT0Factor(Number((e.target as HTMLInputElement).value))}
+              />
+            </div>
+          </>
+        )}
+
+        {geometry === "hexbeam" && (
+          <>
+            <div className="field">
+              <label>
+                <span>halfdriver factor</span>
+                <span>{hexbeamHalfdriverFactor.toFixed(3)}</span>
+              </label>
+              <input
+                type="range"
+                min={0.9}
+                max={1.25}
+                step={0.001}
+                value={hexbeamHalfdriverFactor}
+                onInput={(e) => setHexbeamHalfdriverFactor(Number((e.target as HTMLInputElement).value))}
+              />
+            </div>
+            <div className="field">
+              <label>
+                <span>tip spacer factor</span>
+                <span>{hexbeamTipspacerFactor.toFixed(4)}</span>
+              </label>
+              <input
+                type="range"
+                min={0.04}
+                max={0.25}
+                step={0.0005}
+                value={hexbeamTipspacerFactor}
+                onInput={(e) => setHexbeamTipspacerFactor(Number((e.target as HTMLInputElement).value))}
+              />
+            </div>
+            <div className="field">
+              <label>
+                <span>t0 factor (tip length / radius)</span>
+                <span>{hexbeamT0Factor.toFixed(3)}</span>
+              </label>
+              <input
+                type="range"
+                min={0.04}
+                max={0.30}
+                step={0.001}
+                value={hexbeamT0Factor}
+                onInput={(e) => setHexbeamT0Factor(Number((e.target as HTMLInputElement).value))}
               />
             </div>
           </>
@@ -942,6 +1013,26 @@ export function App() {
               <div className="row">
                 <span>tip length t0</span>
                 <span className="val">{result.t0_m?.toFixed(3)} m</span>
+              </div>
+            </>
+          )}
+          {result?.geometry === "hexbeam" && (
+            <>
+              <div className="row">
+                <span>radius</span>
+                <span className="val">{result.radius_m?.toFixed(3)} m</span>
+              </div>
+              <div className="row">
+                <span>tip length t0</span>
+                <span className="val">{result.t0_m?.toFixed(3)} m</span>
+              </div>
+              <div className="row">
+                <span>driver tip t1</span>
+                <span className="val">{result.t1_m?.toFixed(3)} m</span>
+              </div>
+              <div className="row">
+                <span>tip spacer</span>
+                <span className="val">{result.tipspacer_m?.toFixed(3)} m</span>
               </div>
             </>
           )}
