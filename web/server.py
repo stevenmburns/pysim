@@ -253,13 +253,15 @@ def _solve_yagi(req: dict) -> dict:
     """Two-element Yagi (driver + reflector).
 
     Canonical layout for the UI:
-        wire direction: +x
-        spacing axis:   +y (driver at y=0, reflector at y=-spacing)
-        beam direction: +y (away from reflector)
+        boom / spacing axis: +x (driver at x=0, reflector at x=-spacing,
+                                  directors at x = +i·dir_spacing)
+        element direction:   +y (each element runs from -half_len to +half_len
+                                  along y)
+        beam direction:      +x (away from reflector)
         z = 0 everywhere
-    The xy plane therefore contains the beam, so the far-field azimuth cut
-    actually shows the front-to-back ratio. Internal TriangularYagiPySim
-    geometry is transposed to match.
+    This matches the internal TriangularYagiPySim geometry exactly, so the
+    response wires pass through unchanged. Aligns the Yagi convention with
+    moxon and hexbeam (also +x beam).
     """
     n_per_wire = int(req.get("n_per_wire", 30))
     design_freq_mhz = float(req.get("design_freq_mhz", 14.3))
@@ -308,17 +310,16 @@ def _solve_yagi(req: dict) -> dict:
     z_in, coeffs = sim.compute_impedance()
     solve_ms = (time.perf_counter() - t0) * 1e3
 
-    # Canonical layout: wires along x, spacing along y, all in the xy plane.
-    # TriangularYagiPySim's internal +x maps to canonical +y (and vice versa),
-    # so directors at internal +x become +y in the response.
+    # Canonical layout: elements along y, spacing along x — same as
+    # TriangularYagiPySim's internal geometry, so no transpose is needed.
     N = n_per_wire
     nb = N - 1
 
-    def _knots_at(y_pos: float, half_len: float) -> np.ndarray:
+    def _knots_at(x_pos: float, half_len: float) -> np.ndarray:
         return np.column_stack(
             [
+                np.full(N + 1, x_pos),
                 np.linspace(-half_len, half_len, N + 1),
-                np.full(N + 1, y_pos),
                 np.zeros(N + 1),
             ]
         )

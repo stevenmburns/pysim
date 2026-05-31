@@ -219,16 +219,17 @@ def _build_yagi(req: dict):
 
     c = nec.nec_context()
     geo = c.get_geometry()
-    # Driver (tag 1) at y=0, reflector (tag 2) at y=-spacing, directors
-    # (tags 3..) at y = +i·dir_spacing toward the beam direction.
+    # Elements run along y. Driver (tag 1) at x=0, reflector (tag 2) at
+    # x=-spacing, directors (tags 3..) at x = +i·dir_spacing toward the
+    # beam direction (+x).
     geo.wire(
         1,
         n_per_wire,
+        0.0,
         -h_driver,
-        0.0,
         z_offset,
-        h_driver,
         0.0,
+        h_driver,
         z_offset,
         wire_radius,
         1.0,
@@ -237,26 +238,26 @@ def _build_yagi(req: dict):
     geo.wire(
         2,
         n_per_wire,
+        -spacing_m,
         -h_refl,
-        -spacing_m,
         z_offset,
-        h_refl,
         -spacing_m,
+        h_refl,
         z_offset,
         wire_radius,
         1.0,
         1.0,
     )
     for i in range(n_directors):
-        y = (i + 1) * dir_spacing_m
+        x = (i + 1) * dir_spacing_m
         geo.wire(
             3 + i,
             n_per_wire,
+            x,
             -h_dir,
-            y,
             z_offset,
+            x,
             h_dir,
-            y,
             z_offset,
             wire_radius,
             1.0,
@@ -283,8 +284,9 @@ def _build_yagi(req: dict):
 
 
 def solve_yagi(req: dict) -> dict:
-    """Yagi (driver + reflector + n_directors) — driver along x, reflector at
-    -y, directors at increasing +y."""
+    """Yagi (driver + reflector + n_directors) — elements along y, boom
+    along x. Driver at x=0, reflector at x=-spacing, directors at
+    increasing +x. Beam direction +x."""
     meas_freq_mhz = float(
         req.get("measurement_freq_mhz", req.get("design_freq_mhz", 14.3))
     )
@@ -318,11 +320,11 @@ def solve_yagi(req: dict) -> dict:
 
     N = n_per_wire
 
-    def _wire_record(y_pos: float, half_len: float, tag: int, label: str) -> dict:
+    def _wire_record(x_pos: float, half_len: float, tag: int, label: str) -> dict:
         knots = np.column_stack(
             [
+                np.full(N + 1, x_pos),
                 np.linspace(-half_len, half_len, N + 1),
-                np.full(N + 1, y_pos),
                 np.full(N + 1, z_offset),
             ]
         )
