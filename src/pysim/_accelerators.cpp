@@ -10,6 +10,19 @@
 
 namespace py = pybind11;
 
+// Ubuntu/glibc <cmath> headers don't carry `omp declare simd` markers for the
+// libmvec routines, so GCC's auto-vectorizer can't substitute the vectorized
+// `_ZGVdN4v_sin` / `_ZGVdN4v_cos` (AVX2, 4 doubles) inside an `omp simd` loop
+// without these explicit declarations. The std::cos / std::sin overloads in
+// <cmath> still resolve to these underlying extern-C symbols, so the rest of
+// the file's calls pick up the simd-vectorized form for free once the linker
+// has libmvec available (-lmvec in setup.py).
+#pragma omp declare simd notinbranch simdlen(4)
+extern "C" double cos(double);
+
+#pragma omp declare simd notinbranch simdlen(4)
+extern "C" double sin(double);
+
 // Batched cross-segment Gauss-Legendre quadrature in 3D.
 //
 // For each k in k_array, and each (i, j) segment pair, compute:
@@ -109,8 +122,18 @@ seg_seg_quad_batch_3d(
     #pragma omp parallel for collapse(2) schedule(static)
     for (size_t i = 0; i < N_i; i++) {
         for (size_t j = 0; j < N_j; j++) {
-            // Per-(i, j) R table — n_qp^2 doubles, lives on thread stack.
-            double R[64];  // n_qp up to ~8 in practice (n_qp^2 = 64 max)
+            // n_qp <= 8 in practice, so n_qp^2 <= 64. Stack-allocated, aligned
+            // for 32-byte AVX2 loads. The hot loop is the sincos at line ~Y
+            // below; the explicit per-(qr) array layout lets `#pragma omp simd`
+            // batch the sincos calls into the libmvec vectorized form
+            // (_ZGVdN4v_sin / _ZGVdN4v_cos) instead of N_pairs individual calls.
+            alignas(32) double R[64];
+            alignas(32) double inv_R_4pi[64];
+            alignas(32) double phases[64];
+            alignas(32) double cos_phases[64];
+            alignas(32) double sin_phases[64];
+            alignas(32) double wi_arr[64], wj_arr[64], ui_arr[64], uj_arr[64];
+
             const double *pi = &pos_i[i * n_qp * 3];
             const double *pj = &pos_j[j * n_qp * 3];
             for (size_t q = 0; q < n_qp; q++) {
@@ -127,32 +150,77 @@ seg_seg_quad_batch_3d(
 
             double Li = len_i[i];
             double Lj = len_j[j];
+            size_t n_pairs = n_qp * n_qp;
+
+            // k-independent precompute -- weights, u-coords, and 1/(4πR).
+            for (size_t q = 0; q < n_qp; q++) {
+                double wi = glw(q) * Li;
+                double ui = glt(q) * Li;
+                for (size_t r = 0; r < n_qp; r++) {
+                    size_t qr = q*n_qp + r;
+                    wi_arr[qr] = wi;
+                    wj_arr[qr] = glw(r) * Lj;
+                    ui_arr[qr] = ui;
+                    uj_arr[qr] = glt(r) * Lj;
+                }
+            }
+            #pragma omp simd
+            for (size_t qr = 0; qr < n_pairs; qr++) {
+                inv_R_4pi[qr] = inv_4pi / R[qr];
+            }
 
             for (size_t kk = 0; kk < n_k; kk++) {
                 double k = ka(kk);
-                std::complex<double> s00(0, 0), s10(0, 0), s01(0, 0), s11(0, 0);
-                for (size_t q = 0; q < n_qp; q++) {
-                    double wi = glw(q) * Li;
-                    double ui = glt(q) * Li;
-                    for (size_t r = 0; r < n_qp; r++) {
-                        double wj = glw(r) * Lj;
-                        double uj = glt(r) * Lj;
-                        double Rv = R[q*n_qp + r];
-                        // G = exp(-j*k*R) / (4*pi*R)
-                        double phase = -k * Rv;
-                        std::complex<double> G(std::cos(phase), std::sin(phase));
-                        G *= inv_4pi / Rv;
-                        std::complex<double> wG = (wi * wj) * G;
-                        s00 += wG;
-                        s10 += ui * wG;
-                        s01 += uj * wG;
-                        s11 += (ui * uj) * wG;
-                    }
+
+                // Stage 1: phase = -k * R, fully vectorizable.
+                #pragma omp simd
+                for (size_t qr = 0; qr < n_pairs; qr++) {
+                    phases[qr] = -k * R[qr];
                 }
-                j00(kk, i, j) = s00;
-                j10(kk, i, j) = s10;
-                j01(kk, i, j) = s01;
-                j11(kk, i, j) = s11;
+
+                // Stage 2: vectorized cos and sin via libmvec. Split into two
+                // loops on purpose — if cos/sin appear in the same loop body
+                // on the same input, GCC fuses them into a single scalar
+                // `sincos` call (smart for serial code), but libmvec has no
+                // vector `sincos`, only `_ZGVdN4v_cos` and `_ZGVdN4v_sin`.
+                // Splitting keeps them as independent vectorizable calls.
+                #pragma omp simd
+                for (size_t qr = 0; qr < n_pairs; qr++) {
+                    cos_phases[qr] = std::cos(phases[qr]);
+                }
+                #pragma omp simd
+                for (size_t qr = 0; qr < n_pairs; qr++) {
+                    sin_phases[qr] = std::sin(phases[qr]);
+                }
+
+                // Stage 3: scalar reductions of the 4 J integrals. The compiler
+                // vectorizes the per-component accumulation across qr.
+                double s00_re = 0.0, s00_im = 0.0;
+                double s10_re = 0.0, s10_im = 0.0;
+                double s01_re = 0.0, s01_im = 0.0;
+                double s11_re = 0.0, s11_im = 0.0;
+                #pragma omp simd reduction(+:s00_re,s00_im,s10_re,s10_im,s01_re,s01_im,s11_re,s11_im)
+                for (size_t qr = 0; qr < n_pairs; qr++) {
+                    double iR = inv_R_4pi[qr];
+                    double G_re = cos_phases[qr] * iR;
+                    double G_im = sin_phases[qr] * iR;
+                    double wij  = wi_arr[qr] * wj_arr[qr];
+                    double wG_re = wij * G_re;
+                    double wG_im = wij * G_im;
+                    s00_re += wG_re;
+                    s00_im += wG_im;
+                    s10_re += ui_arr[qr] * wG_re;
+                    s10_im += ui_arr[qr] * wG_im;
+                    s01_re += uj_arr[qr] * wG_re;
+                    s01_im += uj_arr[qr] * wG_im;
+                    double uij = ui_arr[qr] * uj_arr[qr];
+                    s11_re += uij * wG_re;
+                    s11_im += uij * wG_im;
+                }
+                j00(kk, i, j) = std::complex<double>(s00_re, s00_im);
+                j10(kk, i, j) = std::complex<double>(s10_re, s10_im);
+                j01(kk, i, j) = std::complex<double>(s01_re, s01_im);
+                j11(kk, i, j) = std::complex<double>(s11_re, s11_im);
             }
         }
     }
@@ -235,7 +303,16 @@ seg_seg_reg_quad_batch_1d(
     #pragma omp parallel for collapse(2) schedule(static)
     for (size_t i = 0; i < N; i++) {
         for (size_t j = 0; j < N; j++) {
-            double R[64];
+            // Same split-loop layout as seg_seg_quad_batch_3d: the per-(qr)
+            // arrays let `#pragma omp simd` substitute libmvec's
+            // _ZGVdN4v_cos / _ZGVdN4v_sin for the inner sincos calls.
+            alignas(32) double R[64];
+            alignas(32) double inv_R_4pi[64];
+            alignas(32) double phases[64];
+            alignas(32) double cos_phases[64];
+            alignas(32) double sin_phases[64];
+            alignas(32) double wi_arr[64], wj_arr[64], ui_arr[64], uj_arr[64];
+
             double Li = Lvec[i];
             double Lj = Lvec[j];
             const double *pi_q = &pos[i * n_qp];
@@ -248,34 +325,66 @@ seg_seg_reg_quad_batch_1d(
                 }
             }
 
+            size_t n_pairs = n_qp * n_qp;
+            for (size_t q = 0; q < n_qp; q++) {
+                double wi = glw(q) * Li;
+                double ui = glt(q) * Li;
+                for (size_t r = 0; r < n_qp; r++) {
+                    size_t qr = q * n_qp + r;
+                    wi_arr[qr] = wi;
+                    wj_arr[qr] = glw(r) * Lj;
+                    ui_arr[qr] = ui;
+                    uj_arr[qr] = glt(r) * Lj;
+                }
+            }
+            #pragma omp simd
+            for (size_t qr = 0; qr < n_pairs; qr++) {
+                inv_R_4pi[qr] = inv_4pi / R[qr];
+            }
+
             for (size_t kk = 0; kk < n_k; kk++) {
                 double k = ka(kk);
-                std::complex<double> s00(0, 0), s10(0, 0), s01(0, 0), s11(0, 0);
-                for (size_t q = 0; q < n_qp; q++) {
-                    double wi = glw(q) * Li;
-                    double ui = glt(q) * Li;
-                    for (size_t r = 0; r < n_qp; r++) {
-                        double wj = glw(r) * Lj;
-                        double uj = glt(r) * Lj;
-                        double Rv = R[q * n_qp + r];
-                        // exp(-j k R) - 1 = (cos(kR) - 1) - j sin(kR)
-                        //   = (cos(-kR) - 1) + j sin(-kR)
-                        double phase = -k * Rv;
-                        double cm1   = std::cos(phase) - 1.0;
-                        double sp    = std::sin(phase);
-                        std::complex<double> Greg(cm1, sp);
-                        Greg *= inv_4pi / Rv;
-                        std::complex<double> wG = (wi * wj) * Greg;
-                        s00 += wG;
-                        s10 += ui * wG;
-                        s01 += uj * wG;
-                        s11 += (ui * uj) * wG;
-                    }
+
+                #pragma omp simd
+                for (size_t qr = 0; qr < n_pairs; qr++) {
+                    phases[qr] = -k * R[qr];
                 }
-                j00(kk, i, j) = s00;
-                j10(kk, i, j) = s10;
-                j01(kk, i, j) = s01;
-                j11(kk, i, j) = s11;
+                #pragma omp simd
+                for (size_t qr = 0; qr < n_pairs; qr++) {
+                    cos_phases[qr] = std::cos(phases[qr]);
+                }
+                #pragma omp simd
+                for (size_t qr = 0; qr < n_pairs; qr++) {
+                    sin_phases[qr] = std::sin(phases[qr]);
+                }
+
+                // exp(-j k R) - 1 = (cos(-kR) - 1) + j sin(-kR)
+                double s00_re = 0.0, s00_im = 0.0;
+                double s10_re = 0.0, s10_im = 0.0;
+                double s01_re = 0.0, s01_im = 0.0;
+                double s11_re = 0.0, s11_im = 0.0;
+                #pragma omp simd reduction(+:s00_re,s00_im,s10_re,s10_im,s01_re,s01_im,s11_re,s11_im)
+                for (size_t qr = 0; qr < n_pairs; qr++) {
+                    double iR = inv_R_4pi[qr];
+                    double Greg_re = (cos_phases[qr] - 1.0) * iR;
+                    double Greg_im = sin_phases[qr] * iR;
+                    double wij = wi_arr[qr] * wj_arr[qr];
+                    double wG_re = wij * Greg_re;
+                    double wG_im = wij * Greg_im;
+                    s00_re += wG_re;
+                    s00_im += wG_im;
+                    s10_re += ui_arr[qr] * wG_re;
+                    s10_im += ui_arr[qr] * wG_im;
+                    s01_re += uj_arr[qr] * wG_re;
+                    s01_im += uj_arr[qr] * wG_im;
+                    double uij = ui_arr[qr] * uj_arr[qr];
+                    s11_re += uij * wG_re;
+                    s11_im += uij * wG_im;
+                }
+                j00(kk, i, j) = std::complex<double>(s00_re, s00_im);
+                j10(kk, i, j) = std::complex<double>(s10_re, s10_im);
+                j01(kk, i, j) = std::complex<double>(s01_re, s01_im);
+                j11(kk, i, j) = std::complex<double>(s11_re, s11_im);
             }
         }
     }
