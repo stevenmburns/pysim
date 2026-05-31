@@ -448,3 +448,61 @@ def test_bent_multi_moxon_smoke():
     # for a slightly different free-space target than ours).
     assert 40.0 < z.real < 110.0
     assert -30.0 < z.imag < 40.0
+
+
+def test_bent_multi_hexbeam_smoke():
+    # Single-band hexbeam at 28.47 MHz with the antenna_designer default
+    # factors (halfdriver=2.82m, tipspacer=0.1312, t0=0.1243). Hexbeams
+    # are tuned for ~50 Ω.
+    import math
+
+    C_LIGHT = 299_792_458.0
+    freq_mhz = 28.47
+    wavelength = C_LIGHT / (freq_mhz * 1e6)
+    halfdriver = 2.82
+    tipspacer_factor = 0.1312
+    t0_factor = 0.1243
+    radius = halfdriver / (2 - t0_factor - tipspacer_factor)
+    tipspacer = radius * tipspacer_factor
+    t0 = radius * t0_factor
+    t1 = radius - tipspacer - t0
+    eps = 0.05
+    cos30 = math.sqrt(3) / 2
+    sin30 = 0.5
+
+    def rx(p):
+        return (-p[0], p[1], p[2])
+
+    def ry(p):
+        return (p[0], -p[1], p[2])
+
+    A = (radius * cos30, radius * sin30, 0.0)
+    B = (A[0] - t1 * cos30, A[1] + t1 * sin30, 0.0)
+    D = (0.0, radius, 0.0)
+    Cc = (D[0] + t0 * cos30, D[1] - t0 * sin30, 0.0)
+    E = rx(A)
+    F = ry(E)
+    G = ry(D)
+    H = ry(Cc)
+    I_ = ry(B)
+    J = ry(A)
+    S = (eps * cos30, eps * sin30, 0.0)
+    T = ry(S)
+
+    driver = np.array([I_, J, T, S, A, B], dtype=float)
+    reflector = np.array([Cc, D, E, F, G, H], dtype=float)
+
+    sim = BentMultiPySim(
+        wires=[driver, reflector],
+        n_per_edge_per_wire=[[15, 21, 1, 21, 15], [3, 21, 21, 21, 3]],
+        feed_wire_index=0,
+        nsegs=40,
+        wavelength=wavelength,
+        halfdriver_factor=1.071,
+    )
+    z, c = sim.compute_impedance()
+    assert np.isfinite(z.real) and np.isfinite(z.imag)
+    assert np.isfinite(c).all()
+    # Hexbeam at the canonical free-space design point lands near 50+j20.
+    assert 30.0 < z.real < 75.0
+    assert -10.0 < z.imag < 45.0

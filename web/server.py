@@ -446,7 +446,7 @@ def _moxon_polylines(
     }
 
 
-def _moxon_knots(polyline: np.ndarray, npe_list: list[int]) -> np.ndarray:
+def _polyline_knots(polyline: np.ndarray, npe_list: list[int]) -> np.ndarray:
     """Concatenated per-edge knot positions, with shared corners deduped."""
     parts = []
     for i, n_e in enumerate(npe_list):
@@ -493,8 +493,8 @@ def _solve_moxon(req: dict) -> dict:
     z_in, coeffs = sim.compute_impedance()
     solve_ms = (time.perf_counter() - t0_clock) * 1e3
 
-    driver_knots = _moxon_knots(geom["driver"], geom["npe_driver"])
-    refl_knots = _moxon_knots(geom["reflector"], geom["npe_reflector"])
+    driver_knots = _polyline_knots(geom["driver"], geom["npe_driver"])
+    refl_knots = _polyline_knots(geom["reflector"], geom["npe_reflector"])
     nb_d = sum(geom["npe_driver"]) - 1
     nb_r = sum(geom["npe_reflector"]) - 1
 
@@ -529,6 +529,158 @@ def _solve_moxon(req: dict) -> dict:
     }
 
 
+_HEXBEAM_FEED_GAP = 0.05  # meters; half-gap (eps) between feed knots T and S
+
+
+def _hexbeam_polylines(
+    halfdriver: float,
+    tipspacer_factor: float,
+    t0_factor: float,
+    n_per_long_edge: int,
+    z_offset: float = 0.0,
+) -> dict:
+    """Build hexbeam driver + reflector polylines + per-edge segment counts.
+
+    Hexagon has 6 shoulders at 30°, 90°, 150°, 210°, 270°, 330° from +x.
+    Driver lives on the +x side: polyline II -> J -> T -> S -> A -> B
+    (5 edges, 6 anchors). II/B are the bottom/top driver tips that point
+    inward from the right shoulders J/A; T/S bracket the feed midway
+    between J and A along the radius from the origin.
+    Reflector wraps the -x side: polyline C -> D -> E -> F -> G -> H
+    (5 edges, 6 anchors), with C/H pointing inward from the top/bottom
+    apices D/G.
+
+    All four "long" hexagon spokes are length `radius`; the t0/t1 tip
+    pieces are shorter. Segment counts scale with edge length so segment
+    density is roughly uniform; the feed gap gets 1 segment.
+
+    By construction the driver's total arc length is 2 * halfdriver, so
+    the feed sits at arc = halfdriver — equivalently the midpoint of
+    the T-S edge.
+    """
+    radius = halfdriver / (2 - t0_factor - tipspacer_factor)
+    tipspacer = radius * tipspacer_factor
+    t0 = radius * t0_factor
+    t1 = radius - tipspacer - t0
+    eps_feed = _HEXBEAM_FEED_GAP
+    cos30 = float(np.sqrt(3) / 2)
+    sin30 = 0.5
+
+    def rx(p):
+        return (-p[0], p[1], p[2])
+
+    def ry(p):
+        return (p[0], -p[1], p[2])
+
+    A = (radius * cos30, radius * sin30, z_offset)
+    B = (A[0] - t1 * cos30, A[1] + t1 * sin30, z_offset)
+    D = (0.0, radius, z_offset)
+    C = (D[0] + t0 * cos30, D[1] - t0 * sin30, z_offset)
+    E = rx(A)
+    F = ry(E)
+    G = ry(D)
+    H = ry(C)
+    I_ = ry(B)
+    J = ry(A)
+    S = (eps_feed * cos30, eps_feed * sin30, z_offset)
+    T = ry(S)
+
+    driver = np.array([I_, J, T, S, A, B], dtype=float)
+    reflector = np.array([C, D, E, F, G, H], dtype=float)
+
+    def npe(anchors: np.ndarray) -> list[int]:
+        out = []
+        for i in range(anchors.shape[0] - 1):
+            edge_len = float(np.linalg.norm(anchors[i + 1] - anchors[i]))
+            if edge_len < 2 * eps_feed * 1.01:
+                out.append(1)
+            else:
+                out.append(max(2, int(round(n_per_long_edge * edge_len / radius))))
+        return out
+
+    return {
+        "driver": driver,
+        "reflector": reflector,
+        "npe_driver": npe(driver),
+        "npe_reflector": npe(reflector),
+        "feed_arclength": halfdriver,
+        "radius_m": radius,
+        "t0_m": t0,
+        "t1_m": t1,
+        "tipspacer_m": tipspacer,
+    }
+
+
+def _solve_hexbeam(req: dict) -> dict:
+    """Single-band hexbeam (driver + reflector, hexagonal layout)."""
+    n_per_wire = int(req.get("n_per_wire", 21))
+    design_freq_mhz = float(req.get("design_freq_mhz", 28.47))
+    meas_freq_mhz = float(req.get("measurement_freq_mhz", design_freq_mhz))
+    halfdriver_factor = float(req.get("halfdriver_factor", 1.071))
+    tipspacer_factor = float(req.get("tipspacer_factor", 0.1312))
+    t0_factor = float(req.get("t0_factor", 0.1243))
+    wire_radius = float(req.get("wire_radius", 0.0005))
+
+    wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
+    wavelength_meas = C_LIGHT / (meas_freq_mhz * 1e6)
+    halfdriver = halfdriver_factor * wavelength_design / 4.0
+
+    geom = _hexbeam_polylines(
+        halfdriver,
+        tipspacer_factor,
+        t0_factor,
+        n_per_wire,
+    )
+
+    sim = BentMultiPySim(
+        wires=[geom["driver"], geom["reflector"]],
+        n_per_edge_per_wire=[geom["npe_driver"], geom["npe_reflector"]],
+        feed_wire_index=0,
+        feed_arclength=geom["feed_arclength"],
+        wavelength=wavelength_meas,
+        halfdriver_factor=halfdriver_factor,
+        nsegs=n_per_wire,
+    )
+    sim.wire_radius = wire_radius
+
+    t0_clock = time.perf_counter()
+    z_in, coeffs = sim.compute_impedance()
+    solve_ms = (time.perf_counter() - t0_clock) * 1e3
+
+    driver_knots = _polyline_knots(geom["driver"], geom["npe_driver"])
+    refl_knots = _polyline_knots(geom["reflector"], geom["npe_reflector"])
+    nb_d = sum(geom["npe_driver"]) - 1
+    nb_r = sum(geom["npe_reflector"]) - 1
+
+    arc_at_knot = np.concatenate(
+        [[0.0], np.cumsum(np.linalg.norm(np.diff(driver_knots, axis=0), axis=1))]
+    )
+    interior_arc = arc_at_knot[1:-1]
+    feed_basis_local = int(np.argmin(np.abs(interior_arc - geom["feed_arclength"])))
+    feed_knot_index = feed_basis_local + 1
+
+    return {
+        "geometry": "hexbeam",
+        "wires": [
+            _wire_record(driver_knots, coeffs[:nb_d], "driver"),
+            _wire_record(refl_knots, coeffs[nb_d : nb_d + nb_r], "reflector"),
+        ],
+        "feed_wire_index": 0,
+        "feed_knot_index": feed_knot_index,
+        "z_in_re": float(z_in.real),
+        "z_in_im": float(z_in.imag),
+        "design_freq_mhz": design_freq_mhz,
+        "measurement_freq_mhz": meas_freq_mhz,
+        "lambda_design_m": wavelength_design,
+        "halfdriver_m": halfdriver,
+        "radius_m": geom["radius_m"],
+        "t0_m": geom["t0_m"],
+        "t1_m": geom["t1_m"],
+        "tipspacer_m": geom["tipspacer_m"],
+        "solve_ms": solve_ms,
+    }
+
+
 def solve(req: dict) -> dict:
     if req.get("solver") == "pynec" and pynec_backend.HAVE_PYNEC:
         out = pynec_backend.solve(req)
@@ -538,6 +690,8 @@ def solve(req: dict) -> dict:
             out = _solve_yagi(req)
         elif geometry == "moxon":
             out = _solve_moxon(req)
+        elif geometry == "hexbeam":
+            out = _solve_hexbeam(req)
         else:
             out = _solve_inverted_v(req)
         out["solver"] = "pysim"
@@ -648,6 +802,42 @@ def _sweep_moxon(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[f
     return z_array.real.tolist(), z_array.imag.tolist()
 
 
+def _sweep_hexbeam(
+    req: dict, freqs_mhz: list[float]
+) -> tuple[list[float], list[float]]:
+    """Batched sweep using BentMultiPySim.compute_impedance_swept."""
+    n_per_wire = int(req.get("n_per_wire", 21))
+    design_freq_mhz = float(req.get("design_freq_mhz", 28.47))
+    halfdriver_factor = float(req.get("halfdriver_factor", 1.071))
+    tipspacer_factor = float(req.get("tipspacer_factor", 0.1312))
+    t0_factor = float(req.get("t0_factor", 0.1243))
+    wire_radius = float(req.get("wire_radius", 0.0005))
+
+    wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
+    halfdriver = halfdriver_factor * wavelength_design / 4.0
+
+    geom = _hexbeam_polylines(
+        halfdriver,
+        tipspacer_factor,
+        t0_factor,
+        n_per_wire,
+    )
+    sim = BentMultiPySim(
+        wires=[geom["driver"], geom["reflector"]],
+        n_per_edge_per_wire=[geom["npe_driver"], geom["npe_reflector"]],
+        feed_wire_index=0,
+        feed_arclength=geom["feed_arclength"],
+        wavelength=wavelength_design,
+        halfdriver_factor=halfdriver_factor,
+        nsegs=n_per_wire,
+    )
+    sim.wire_radius = wire_radius
+
+    k_array = np.array([2 * np.pi * f * 1e6 / C_LIGHT for f in freqs_mhz])
+    z_array = sim.compute_impedance_swept(k_array)
+    return z_array.real.tolist(), z_array.imag.tolist()
+
+
 @app.post("/sweep")
 async def sweep_endpoint(req: dict, request: Request):
     """Stream sweep points as NDJSON, one (freq, Z) per line.
@@ -694,6 +884,8 @@ async def sweep_endpoint(req: dict, request: Request):
                 z_re, z_im = await run_in_threadpool(_sweep_yagi, req, freqs)
             elif geometry == "moxon":
                 z_re, z_im = await run_in_threadpool(_sweep_moxon, req, freqs)
+            elif geometry == "hexbeam":
+                z_re, z_im = await run_in_threadpool(_sweep_hexbeam, req, freqs)
             else:
                 z_re, z_im = await run_in_threadpool(_sweep_inverted_v, req, freqs)
             for i, f in enumerate(freqs):
