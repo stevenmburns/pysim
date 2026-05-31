@@ -242,8 +242,10 @@ export function App() {
   const sendStartRef = useRef(0);
 
   function buildRequest(): SolveRequest {
-    // Ground only takes effect for the PyNEC solver; pysim has no ground model.
-    const groundActive = solver === "pynec" && groundEnabled;
+    // Both solvers support ground now: PyNEC uses Sommerfeld-Norton (or the
+    // fast reflection-coefficient approximation) with εr=10, σ=0.002; pysim
+    // uses the PEC image method.
+    const groundActive = groundEnabled;
     const base: SolveRequest = {
       geometry,
       solver,
@@ -367,9 +369,9 @@ export function App() {
     // Sweep 0.8x to 1.25x of design freq, log-spaced. Sommerfeld-Norton ground
     // is ~100x slower per point, so halve the resolution there to keep total
     // sweep time near free-space cost. Fast (reflection-coefficient) ground
-    // is only ~10x slower per point — full resolution stays interactive.
-    const groundActive = solver === "pynec" && groundEnabled;
-    const N = groundActive && !groundFast ? 21 : 41;
+    // and pysim PEC ground are cheap enough for full resolution.
+    const slowGround = solver === "pynec" && groundEnabled && !groundFast;
+    const N = slowGround ? 21 : 41;
     const fLo = Math.max(0.5, designFreq * 0.8);
     const fHi = Math.min(60, designFreq * 1.25);
     const freqs = Array.from({ length: N }, (_, i) =>
@@ -847,14 +849,23 @@ export function App() {
         </div>
 
         <div className="field">
-          <label className="link-toggle" title={solver === "pynec" ? "" : "Ground model requires PyNEC"}>
+          <label
+            className="link-toggle"
+            title={
+              solver === "pynec"
+                ? "Sommerfeld-Norton ground (εr=10, σ=0.002 S/m)"
+                : "PEC image-method ground (perfect electric conductor)"
+            }
+          >
             <input
               type="checkbox"
-              checked={solver === "pynec" && groundEnabled}
-              disabled={solver !== "pynec"}
+              checked={groundEnabled}
               onChange={(e) => setGroundEnabled(e.target.checked)}
             />
-            ground plane (εr=10, σ=0.002 S/m)
+            ground plane{" "}
+            {solver === "pynec"
+              ? "(εr=10, σ=0.002 S/m)"
+              : "(PEC, perfect conductor)"}
           </label>
           {solver === "pynec" && groundEnabled && (
             <label
@@ -871,7 +882,7 @@ export function App() {
           )}
         </div>
 
-        {solver === "pynec" && groundEnabled && (
+        {groundEnabled && (
           <div className="field">
             <label>
               <span>height above ground</span>

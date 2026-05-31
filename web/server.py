@@ -191,22 +191,25 @@ def _yagi_polylines(
     n_directors: int,
     dir_spacing_m: float,
     h_dir: float,
+    z_offset: float = 0.0,
 ) -> list[np.ndarray]:
     """Driver + reflector + n_directors directors, all y-directed straight
     wires expressed as 2-anchor polylines for TriangularPySim.
     """
     polylines = [
-        np.array([(0.0, -h_driver, 0.0), (0.0, h_driver, 0.0)]),
-        np.array([(-spacing_m, -h_refl, 0.0), (-spacing_m, h_refl, 0.0)]),
+        np.array([(0.0, -h_driver, z_offset), (0.0, h_driver, z_offset)]),
+        np.array([(-spacing_m, -h_refl, z_offset), (-spacing_m, h_refl, z_offset)]),
     ]
     for i in range(n_directors):
         x = (i + 1) * dir_spacing_m
-        polylines.append(np.array([(x, -h_dir, 0.0), (x, h_dir, 0.0)]))
+        polylines.append(np.array([(x, -h_dir, z_offset), (x, h_dir, z_offset)]))
     return polylines
 
 
-def _inverted_v_polyline(arm_len: float, angle_deg: float) -> np.ndarray:
-    """Inverted-V with apex at the origin and arms drooping in the yz plane.
+def _inverted_v_polyline(
+    arm_len: float, angle_deg: float, z_offset: float = 0.0
+) -> np.ndarray:
+    """Inverted-V with apex at z = z_offset and arms drooping in the yz plane.
 
     Arms run along ±y so the broadside null axis is ±x — matching the
     Yagi/moxon/hexbeam convention where the main lobe peaks at azimuth 0°
@@ -215,10 +218,29 @@ def _inverted_v_polyline(arm_len: float, angle_deg: float) -> np.ndarray:
     """
     alpha = np.deg2rad(angle_deg)
     cos_a, sin_a = float(np.cos(alpha)), float(np.sin(alpha))
-    left = np.array([0.0, -arm_len * cos_a, -arm_len * sin_a])
-    apex = np.array([0.0, 0.0, 0.0])
-    right = np.array([0.0, arm_len * cos_a, -arm_len * sin_a])
+    left = np.array([0.0, -arm_len * cos_a, z_offset - arm_len * sin_a])
+    apex = np.array([0.0, 0.0, z_offset])
+    right = np.array([0.0, arm_len * cos_a, z_offset - arm_len * sin_a])
     return np.vstack([left, apex, right])
+
+
+# Pysim PEC ground: pass these to the response so the frontend's Fresnel
+# far-field code treats the surface as a perfect electric conductor
+# (ρ_h → −1, ρ_v → +1 in the eps_r → ∞ limit).
+_PEC_GROUND_EPS_R = 1.0e10
+_PEC_GROUND_SIGMA = 0.0
+
+
+def _read_ground(req: dict) -> tuple[bool, float, float]:
+    """Common request parsing: returns (ground_on, height_m, z_offset).
+
+    height_m is the antenna height above ground when ground_on=True; z_offset
+    is what each geometry helper adds to its native (z=0) coordinates.
+    """
+    ground_on = bool(req.get("ground", False))
+    height_m = float(req.get("height_m", 0.0))
+    z_offset = height_m if ground_on else 0.0
+    return ground_on, height_m, z_offset
 
 
 def _solve_inverted_v(req: dict) -> dict:
@@ -228,12 +250,13 @@ def _solve_inverted_v(req: dict) -> dict:
     meas_freq_mhz = float(req.get("measurement_freq_mhz", design_freq_mhz))
     halfdriver_factor = float(req.get("halfdriver_factor", 0.962))
     wire_radius = float(req.get("wire_radius", 0.0005))
+    ground_on, height_m, z_offset = _read_ground(req)
 
     wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
     wavelength_meas = C_LIGHT / (meas_freq_mhz * 1e6)
     arm_len = halfdriver_factor * wavelength_design / 4.0
 
-    polyline = _inverted_v_polyline(arm_len, angle_deg)
+    polyline = _inverted_v_polyline(arm_len, angle_deg, z_offset=z_offset)
     sim = TriangularPySim(
         wires=[polyline],
         n_per_edge_per_wire=[[n_per_wire, n_per_wire]],
@@ -241,6 +264,7 @@ def _solve_inverted_v(req: dict) -> dict:
         wavelength=wavelength_meas,
         halfdriver_factor=halfdriver_factor,
         nsegs=n_per_wire,
+        ground_z=0.0 if ground_on else None,
     )
     sim.wire_radius = wire_radius
 
@@ -263,6 +287,10 @@ def _solve_inverted_v(req: dict) -> dict:
         "lambda_design_m": wavelength_design,
         "arm_len_m": arm_len,
         "solve_ms": solve_ms,
+        "ground": ground_on,
+        "height_m": z_offset,
+        "ground_eps_r": _PEC_GROUND_EPS_R,
+        "ground_sigma": _PEC_GROUND_SIGMA,
     }
 
 
@@ -290,6 +318,7 @@ def _solve_yagi(req: dict) -> dict:
     n_directors = int(req.get("n_directors", 0))
     dir_spacing_wl = float(req.get("director_spacing_wavelengths", 0.2))
     dir_size_factor = float(req.get("director_size_factor", 0.95))
+    ground_on, height_m, z_offset = _read_ground(req)
 
     wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
     wavelength_meas = C_LIGHT / (meas_freq_mhz * 1e6)
@@ -300,7 +329,13 @@ def _solve_yagi(req: dict) -> dict:
     h_dir = dir_size_factor * h_driver
 
     wires_polylines = _yagi_polylines(
-        h_driver, h_refl, spacing_m, n_directors, dir_spacing_m, h_dir
+        h_driver,
+        h_refl,
+        spacing_m,
+        n_directors,
+        dir_spacing_m,
+        h_dir,
+        z_offset=z_offset,
     )
 
     sim = TriangularPySim(
@@ -310,6 +345,7 @@ def _solve_yagi(req: dict) -> dict:
         wavelength=wavelength_meas,
         halfdriver_factor=driver_factor,
         nsegs=n_per_wire,
+        ground_z=0.0 if ground_on else None,
     )
     sim.wire_radius = wire_radius
 
@@ -325,7 +361,7 @@ def _solve_yagi(req: dict) -> dict:
             [
                 np.full(N + 1, x_pos),
                 np.linspace(-half_len, half_len, N + 1),
-                np.zeros(N + 1),
+                np.full(N + 1, z_offset),
             ]
         )
 
@@ -366,6 +402,10 @@ def _solve_yagi(req: dict) -> dict:
         "director_length_m": 2 * h_dir if n_directors > 0 else None,
         "director_spacing_m": dir_spacing_m if n_directors > 0 else None,
         "solve_ms": solve_ms,
+        "ground": ground_on,
+        "height_m": z_offset,
+        "ground_eps_r": _PEC_GROUND_EPS_R,
+        "ground_sigma": _PEC_GROUND_SIGMA,
     }
 
 
@@ -469,6 +509,7 @@ def _solve_moxon(req: dict) -> dict:
     tipspacer_factor = float(req.get("tipspacer_factor", 0.0773))
     t0_factor = float(req.get("t0_factor", 0.4078))
     wire_radius = float(req.get("wire_radius", 0.0005))
+    ground_on, height_m, z_offset = _read_ground(req)
 
     wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
     wavelength_meas = C_LIGHT / (meas_freq_mhz * 1e6)
@@ -480,6 +521,7 @@ def _solve_moxon(req: dict) -> dict:
         tipspacer_factor,
         t0_factor,
         n_per_wire,
+        z_offset=z_offset,
     )
 
     sim = TriangularPySim(
@@ -490,6 +532,7 @@ def _solve_moxon(req: dict) -> dict:
         wavelength=wavelength_meas,
         halfdriver_factor=halfdriver_factor,
         nsegs=n_per_wire,
+        ground_z=0.0 if ground_on else None,
     )
     sim.wire_radius = wire_radius
 
@@ -530,6 +573,10 @@ def _solve_moxon(req: dict) -> dict:
         "tipspacer_m": geom["tipspacer_m"],
         "t0_m": geom["t0_m"],
         "solve_ms": solve_ms,
+        "ground": ground_on,
+        "height_m": z_offset,
+        "ground_eps_r": _PEC_GROUND_EPS_R,
+        "ground_sigma": _PEC_GROUND_SIGMA,
     }
 
 
@@ -624,6 +671,7 @@ def _solve_hexbeam(req: dict) -> dict:
     tipspacer_factor = float(req.get("tipspacer_factor", 0.1312))
     t0_factor = float(req.get("t0_factor", 0.1243))
     wire_radius = float(req.get("wire_radius", 0.0005))
+    ground_on, height_m, z_offset = _read_ground(req)
 
     wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
     wavelength_meas = C_LIGHT / (meas_freq_mhz * 1e6)
@@ -634,6 +682,7 @@ def _solve_hexbeam(req: dict) -> dict:
         tipspacer_factor,
         t0_factor,
         n_per_wire,
+        z_offset=z_offset,
     )
 
     sim = TriangularPySim(
@@ -644,6 +693,7 @@ def _solve_hexbeam(req: dict) -> dict:
         wavelength=wavelength_meas,
         halfdriver_factor=halfdriver_factor,
         nsegs=n_per_wire,
+        ground_z=0.0 if ground_on else None,
     )
     sim.wire_radius = wire_radius
 
@@ -682,6 +732,10 @@ def _solve_hexbeam(req: dict) -> dict:
         "t1_m": geom["t1_m"],
         "tipspacer_m": geom["tipspacer_m"],
         "solve_ms": solve_ms,
+        "ground": ground_on,
+        "height_m": z_offset,
+        "ground_eps_r": _PEC_GROUND_EPS_R,
+        "ground_sigma": _PEC_GROUND_SIGMA,
     }
 
 
@@ -712,17 +766,19 @@ def _sweep_inverted_v(
     design_freq_mhz = float(req.get("design_freq_mhz", 14.3))
     halfdriver_factor = float(req.get("halfdriver_factor", 0.962))
     wire_radius = float(req.get("wire_radius", 0.0005))
+    ground_on, _, z_offset = _read_ground(req)
 
     wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
     arm_len = halfdriver_factor * wavelength_design / 4.0
 
     sim = TriangularPySim(
-        wires=[_inverted_v_polyline(arm_len, angle_deg)],
+        wires=[_inverted_v_polyline(arm_len, angle_deg, z_offset=z_offset)],
         n_per_edge_per_wire=[[n_per_wire, n_per_wire]],
         feed_wire_index=0,
         wavelength=wavelength_design,
         halfdriver_factor=halfdriver_factor,
         nsegs=n_per_wire,
+        ground_z=0.0 if ground_on else None,
     )
     sim.wire_radius = wire_radius
 
@@ -742,6 +798,7 @@ def _sweep_yagi(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[fl
     n_directors = int(req.get("n_directors", 0))
     dir_spacing_wl = float(req.get("director_spacing_wavelengths", 0.2))
     dir_size_factor = float(req.get("director_size_factor", 0.95))
+    ground_on, _, z_offset = _read_ground(req)
 
     wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
     h_driver = driver_factor * wavelength_design / 4.0
@@ -751,7 +808,13 @@ def _sweep_yagi(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[fl
     h_dir = dir_size_factor * h_driver
 
     wires_polylines = _yagi_polylines(
-        h_driver, h_refl, spacing_m, n_directors, dir_spacing_m, h_dir
+        h_driver,
+        h_refl,
+        spacing_m,
+        n_directors,
+        dir_spacing_m,
+        h_dir,
+        z_offset=z_offset,
     )
     sim = TriangularPySim(
         wires=wires_polylines,
@@ -760,6 +823,7 @@ def _sweep_yagi(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[fl
         wavelength=wavelength_design,
         halfdriver_factor=driver_factor,
         nsegs=n_per_wire,
+        ground_z=0.0 if ground_on else None,
     )
     sim.wire_radius = wire_radius
 
@@ -777,6 +841,7 @@ def _sweep_moxon(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[f
     tipspacer_factor = float(req.get("tipspacer_factor", 0.0773))
     t0_factor = float(req.get("t0_factor", 0.4078))
     wire_radius = float(req.get("wire_radius", 0.0005))
+    ground_on, _, z_offset = _read_ground(req)
 
     wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
     halfdriver = halfdriver_factor * wavelength_design / 4.0
@@ -787,6 +852,7 @@ def _sweep_moxon(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[f
         tipspacer_factor,
         t0_factor,
         n_per_wire,
+        z_offset=z_offset,
     )
     sim = TriangularPySim(
         wires=[geom["driver"], geom["reflector"]],
@@ -796,6 +862,7 @@ def _sweep_moxon(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[f
         wavelength=wavelength_design,
         halfdriver_factor=halfdriver_factor,
         nsegs=n_per_wire,
+        ground_z=0.0 if ground_on else None,
     )
     sim.wire_radius = wire_radius
 
@@ -814,6 +881,7 @@ def _sweep_hexbeam(
     tipspacer_factor = float(req.get("tipspacer_factor", 0.1312))
     t0_factor = float(req.get("t0_factor", 0.1243))
     wire_radius = float(req.get("wire_radius", 0.0005))
+    ground_on, _, z_offset = _read_ground(req)
 
     wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
     halfdriver = halfdriver_factor * wavelength_design / 4.0
@@ -823,6 +891,7 @@ def _sweep_hexbeam(
         tipspacer_factor,
         t0_factor,
         n_per_wire,
+        z_offset=z_offset,
     )
     sim = TriangularPySim(
         wires=[geom["driver"], geom["reflector"]],
@@ -832,6 +901,7 @@ def _sweep_hexbeam(
         wavelength=wavelength_design,
         halfdriver_factor=halfdriver_factor,
         nsegs=n_per_wire,
+        ground_z=0.0 if ground_on else None,
     )
     sim.wire_radius = wire_radius
 
