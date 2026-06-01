@@ -780,10 +780,22 @@ def _solve_hexbeam(req: dict) -> dict:
 
 _FANDIPOLE_FEED_GAP = 0.01  # half-gap, matches pynec_backend's eps_feed
 
-# Standard 5-point cone direction ring (36°, 108°, 180°, 252°, 324°).
-_FANDIPOLE_RING_5 = [
-    (np.cos(np.pi * i / 180.0), np.sin(np.pi * i / 180.0)) for i in range(36, 360, 72)
-]
+
+def _fandipole_ring(k_bands):
+    """K cone-direction ring positions evenly distributed at 360°/K around
+    the cone axis. K=2 places the two bands at opposite ends of a diameter
+    (180° apart), K=3 at the vertices of an equilateral triangle, etc.
+    Matches a physical K-spreader fan dipole where the bands fan
+    symmetrically around the central feed axis.
+    """
+    step = 360.0 / k_bands
+    return [
+        (
+            np.cos(np.deg2rad(i * step)),
+            np.sin(np.deg2rad(i * step)),
+        )
+        for i in range(k_bands)
+    ]
 
 
 def _fandipole_geometry(req: dict):
@@ -819,7 +831,7 @@ def _fandipole_geometry(req: dict):
     S = (0.0, eps_feed, z_offset)
     T = ry(S)
     C = (S[0], S[1] + t0 * Zc, S[2] - t0 * Zs)
-    lst = _FANDIPOLE_RING_5[:n_bands]
+    lst = _fandipole_ring(n_bands)
     A_pos = [
         (
             C[0] + cone_radius_m * x,

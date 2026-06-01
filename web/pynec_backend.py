@@ -777,13 +777,22 @@ def solve_hexbeam(req: dict) -> dict:
 
 _FANDIPOLE_FEED_GAP = 0.01  # meters; half-gap, matches antenna_designer eps
 
-# Standard 5-point cone direction ring (36°, 108°, 180°, 252°, 324°). With
-# n_bands < 5 we use the leading prefix so band-i parameters keep a stable
-# meaning as the user increases / decreases n_bands.
-_FANDIPOLE_RING_5 = [
-    (math.cos(math.pi * i / 180.0), math.sin(math.pi * i / 180.0))
-    for i in range(36, 360, 72)
-]
+
+def _fandipole_ring(k_bands):
+    """K cone-direction ring positions evenly distributed at 360°/K around
+    the cone axis. K=2 places the two bands at opposite ends of a diameter
+    (180° apart), K=3 at the vertices of an equilateral triangle, etc.
+    Matches a physical K-spreader fan dipole where the bands fan
+    symmetrically around the central feed axis.
+    """
+    step = 360.0 / k_bands
+    return [
+        (
+            math.cos(math.radians(i * step)),
+            math.sin(math.radians(i * step)),
+        )
+        for i in range(k_bands)
+    ]
 
 
 def _build_fandipole(req: dict):
@@ -823,7 +832,7 @@ def _build_fandipole(req: dict):
     S = (0.0, eps_feed, z_offset)
     T = ry(S)
     C = (S[0], S[1] + t0 * Zc, S[2] - t0 * Zs)
-    lst = _FANDIPOLE_RING_5[:n_bands]
+    lst = _fandipole_ring(n_bands)
 
     A_pos = [
         (
