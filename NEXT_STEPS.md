@@ -76,20 +76,22 @@ Ordered by what I'd actually do next, not by what's most ambitious.
 
 7. **Coverage for non-default geometries** — sweep `wavelength`, `halfdriver_factor`, `wire_radius`, verify `TriangularPySim` against NEC. Currently only the default (0.481 λ) dipole has been validated end-to-end.
 
-8. ~~**Third-reference validation**~~ — **resolved on the `per-pair-kernel-reg` branch probe**. The 2-band fan-dipole disagreement between `TriangularPySim` and PyNEC (~14 Ω real, ~15 Ω imag at 14.3 MHz design freq) is a **NEC2-formulation effect, not a pysim bug**. Evidence:
+8. ~~**Third-reference validation**~~ — **resolved with a refinement**. The 2-band fan-dipole disagreement between `TriangularPySim` and PyNEC originally looked like ~14 Ω on R AND ~15 Ω on X, but the X gap was a **geometry artifact**: the old `_FANDIPOLE_RING_5` constant placed K=2 bands at lopsided pentagon positions (36° and 108°, only 72° apart on one side of the cone) rather than at the natural opposite ends of a diameter. After replacing the static prefix with `_fandipole_ring(K)` that distributes K bands evenly at 360°/K (`fandipole-even-ring` branch), the X gap collapses to ~1.5 Ω across N and the only remaining axis is R.
 
-   The `scripts/compare_fandipole_solvers.py` 3-way comparison (pysim Galerkin-tent + PyNEC pulse-basis + pymininec pulse-basis) at K=3, n_per_wire ∈ {21, 41, 81}:
+   `scripts/compare_fandipole_solvers.py` 3-way comparison at n_bands=2 (the K=3 junction case), 14.3 MHz design freq, with the corrected even-distribution ring:
 
    ```
      N |    pysim (R + jX)    |    PyNEC (R + jX)    | pymininec (R + jX)
-    21 |   +60.3   -0.8j      |   +47.5   +0.2j      |   +60.2   -1.2j
-    41 |   +60.4   -0.3j      |   +46.3   +0.4j      |   +59.9   -7.2j
-    81 |   +60.5   -0.0j      |   +46.5   +0.5j      |   +58.5  -29.9j
+    21 |   +58.9   -5.3j      |   +51.6   -3.9j      |   +58.8   -5.8j
+    41 |   +59.0   -4.9j      |   +49.1   -3.5j      |   +58.5  -11.8j
+    81 |   +59.1   -4.6j      |   +46.8   -3.1j      |   +56.9  -34.9j
    ```
 
-   pysim and pymininec — two **independently-implemented** MoM solvers in different basis families (triangular Galerkin vs pulse) — **agree on R within ~2 Ω across N**. PyNEC sits ~14 Ω lower. NEC2's specific formulation (extended thin-wire kernel, junction handling) is the most plausible explanation. pymininec's X diverges with N as documented (the pulse-basis convergence-failure mode that motivated the triangular work in the first place), so only its R is useful — but R agreement with pysim across N is the load-bearing evidence.
+   pysim and pymininec — two independently-implemented MoM solvers in different basis families (triangular Galerkin vs pulse) — **agree on R to ~2 Ω across N**. PyNEC's R drifts downward with N (51.6 → 46.8, a further 4.8 Ω drift from N=21→81). The gap to pysim/pymininec is ~7 Ω at N=21 and ~12 Ω at N=81. The X gap is now small in all three solvers. pymininec's X diverges with N as documented (pulse-basis convergence-failure mode), so only its R is useful — R agreement with pysim across N is the load-bearing evidence.
 
-   **Decision**: accept the disagreement as a known NEC2-vs-others formulation gap and move on. NEC4 (option a) would be a fourth datapoint if the question ever resurfaces, but the pysim-vs-pymininec agreement settles "is pysim broken on the fan dipole?" with "no, it agrees with another MoM implementation." Web UI follow-up (item 10's "solver agreement diagnostic") should now treat fan-dipole pysim/PyNEC disagreement as the expected behavior, not a bug indicator.
+   **Decision**: accept the remaining R disagreement as a known NEC2-vs-others formulation gap and move on. Pysim is not the outlier — NEC2 is. The literature attributes this to NEC2's source-at-K-wire-junction handling and the thin-wire-kernel choice (these caveats apply independent of wire diameter, which is uniform in our model — that ruled out the dissimilar-diameter literature concerns). NEC4 (option a) would be a fourth datapoint if the question resurfaces but is not urgent.
+
+   **Implication for the web UI**: the "solver agreement diagnostic" idea in item 10 should now treat fan-dipole pysim/PyNEC R disagreement as expected (and *growing* with K and N), not a bug indicator. The X agreement is the new baseline.
 
 ### Interactive UI follow-ups
 
@@ -130,7 +132,9 @@ Ordered by what I'd actually do next, not by what's most ambitious.
 
     The ~15 Ω ΔX is **constant across K**. K=1 has no K≥3 junction at all and still shows the same gap. The disagreement is not about junction multiplicity.
 
-    Combined with item 8's pysim-vs-pymininec agreement on R, the conclusion: all three sub-options (per-pair regularization, adaptive junction meshing, sinusoidal-segment basis at junction nodes) were targeting K≥3 junction effects that don't exist as the dominant cause. The dominant effect is NEC2's formulation choices, not anything in pysim's local junction treatment. **Item closed.** The original PR #36 cone-angle correlation (~7 Ω tracking inter-arm angle) is a real secondary effect on top of the dominant ~14 Ω formulation gap — possibly close-fanning-related — but resolving it wouldn't close the dominant gap and isn't worth pursuing without a specific need for close-fanning accuracy.
+    Combined with item 8's pysim-vs-pymininec agreement on R, the conclusion: all three sub-options (per-pair regularization, adaptive junction meshing, sinusoidal-segment basis at junction nodes) were targeting K≥3 junction effects that don't exist as the dominant cause. The dominant effect is NEC2's formulation choices, not anything in pysim's local junction treatment. **Item closed.**
+
+    **Postscript (`fandipole-even-ring` branch, item 8 update)**: after fixing the lopsided pentagon `_FANDIPOLE_RING_5` to evenly distribute K bands at 360°/K, the ~15 Ω X-part of what was being called "the fan-dipole disagreement" turned out to be a *geometry* artifact (lopsided ring) that had been incorrectly attributed to junction/formulation effects. The original PR #36 cone-angle sweep (~7 Ω tracking inter-arm angle) was also partly contaminated by the same ring asymmetry — when n_bands varied while still using the pentagon prefix, the inter-arm angle changes mixed with ring-position bias. The remaining real-part disagreement (~5–17 Ω growing with K and N) is what's left after that contamination is removed; it sits in the same family as item 8's "NEC2 outlier" conclusion. No new actions — item stays closed.
 
 ## Key locations
 
