@@ -268,6 +268,12 @@ export function App() {
   useEffect(() => {
     setCameraProjection(defaultProjection(geometry));
   }, [geometry]);
+  // Antenna-canvas current visualization is split into two independent
+  // toggles: the per-segment current-magnitude heatmap (wire color/width)
+  // and the |I| envelope curve overlay. Either or both can be turned off;
+  // the wires and feed marker are always drawn.
+  const [showHeatmap, setShowHeatmap] = useState(true);
+  const [showEnvelope, setShowEnvelope] = useState(true);
   const { ref: slideRef, size: chartSize } = useSlideSize(720);
   const thumbStripRef = useRef<HTMLDivElement>(null);
   const thumbSize = useThumbColumnSize(thumbStripRef, 280);
@@ -1309,6 +1315,8 @@ export function App() {
                   azElevDeg={azElevDeg}
                   elevAzDeg={elevAzDeg}
                   cameraProjection={cameraProjection}
+                  showHeatmap={showHeatmap}
+                  showEnvelope={showEnvelope}
                 />
               </div>
               <div className="thumb-label">{v.label}</div>
@@ -1317,17 +1325,41 @@ export function App() {
         </div>
         <div className="carousel-slide" ref={slideRef}>
           {view === "antenna" && (
-            <div className="projection-toggle">
-              {PROJECTIONS.map((p) => (
-                <button
-                  key={p.id}
-                  className={p.id === cameraProjection ? "active" : ""}
-                  onClick={() => setCameraProjection(p.id)}
-                  title={`Project onto the ${p.id} plane`}
-                >
-                  {p.label}
-                </button>
-              ))}
+            <div className="antenna-overlay">
+              <div className="projection-toggle">
+                {PROJECTIONS.map((p) => (
+                  <button
+                    key={p.id}
+                    className={p.id === cameraProjection ? "active" : ""}
+                    onClick={() => setCameraProjection(p.id)}
+                    title={`Project onto the ${p.id} plane`}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+              <label
+                className="overlay-checkbox"
+                title="Color wire segments by current magnitude; modulate wire width"
+              >
+                <input
+                  type="checkbox"
+                  checked={showHeatmap}
+                  onChange={(e) => setShowHeatmap(e.target.checked)}
+                />
+                heatmapped currents
+              </label>
+              <label
+                className="overlay-checkbox"
+                title="Draw the |I| envelope curve along each wire"
+              >
+                <input
+                  type="checkbox"
+                  checked={showEnvelope}
+                  onChange={(e) => setShowEnvelope(e.target.checked)}
+                />
+                current waveforms
+              </label>
             </div>
           )}
           <ViewPanel
@@ -1342,6 +1374,8 @@ export function App() {
             azElevDeg={azElevDeg}
             elevAzDeg={elevAzDeg}
             cameraProjection={cameraProjection}
+            showHeatmap={showHeatmap}
+            showEnvelope={showEnvelope}
           />
         </div>
         <div className="status">ws: {status}</div>
@@ -1386,6 +1420,8 @@ function ViewPanel({
   azElevDeg,
   elevAzDeg,
   cameraProjection,
+  showHeatmap,
+  showEnvelope,
 }: {
   view: View;
   size: number;
@@ -1398,12 +1434,19 @@ function ViewPanel({
   azElevDeg: number;
   elevAzDeg: number;
   cameraProjection: Projection;
+  showHeatmap: boolean;
+  showEnvelope: boolean;
 }) {
   if (view === "antenna") {
     return (
       <div className={fill ? "antenna-fill" : "antenna-thumb"}
            style={fill ? undefined : { width: size, height: size }}>
-        <CurrentCanvas result={result} projection={cameraProjection} />
+        <CurrentCanvas
+          result={result}
+          projection={cameraProjection}
+          showHeatmap={showHeatmap}
+          showEnvelope={showEnvelope}
+        />
       </div>
     );
   }
@@ -2063,9 +2106,13 @@ function SmithChart({
 function CurrentCanvas({
   result,
   projection,
+  showHeatmap,
+  showEnvelope,
 }: {
   result: SolveResponse | null;
   projection: Projection;
+  showHeatmap: boolean;
+  showEnvelope: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -2174,27 +2221,35 @@ function CurrentCanvas({
         for (let i = 0; i < knots.length - 1; i++) {
           const a = project(knots[i]);
           const b = project(knots[i + 1]);
-          const m = (0.5 * (mags[i] + mags[i + 1])) / magMaxGlobal;
-          ctx!.strokeStyle = currentColor(m);
-          ctx!.lineWidth = (2 + 6 * m) * s;
+          if (showHeatmap) {
+            const m = (0.5 * (mags[i] + mags[i + 1])) / magMaxGlobal;
+            ctx!.strokeStyle = currentColor(m);
+            ctx!.lineWidth = (2 + 6 * m) * s;
+          } else {
+            // Plain wires: uniform color/width, no current-magnitude modulation.
+            ctx!.strokeStyle = "#9aa3b2";
+            ctx!.lineWidth = 2 * s;
+          }
           ctx!.beginPath();
           ctx!.moveTo(a.x, a.y);
           ctx!.lineTo(b.x, b.y);
           ctx!.stroke();
         }
 
-        // Envelope: if this is the feed wire (and the feed isn't at an end),
-        // split at the feed knot so a V's per-arm tangent flip is respected.
-        // Otherwise draw one continuous envelope.
-        ctx!.strokeStyle = "rgba(118, 208, 255, 0.7)";
-        ctx!.lineWidth = 1.5 * s;
-        const lastIdx = knots.length - 1;
-        const feedIdx = result.feed_knot_index;
-        if (wi === feedWireIdx && feedIdx > 0 && feedIdx < lastIdx) {
-          drawArmEnvelope(ctx!, knots, mags, magMaxGlobal, project, 0, feedIdx, envScale);
-          drawArmEnvelope(ctx!, knots, mags, magMaxGlobal, project, feedIdx, lastIdx, envScale);
-        } else {
-          drawArmEnvelope(ctx!, knots, mags, magMaxGlobal, project, 0, lastIdx, envScale);
+        // Current-waveform envelope: if this is the feed wire (and the feed
+        // isn't at an end), split at the feed knot so a V's per-arm tangent
+        // flip is respected. Otherwise draw one continuous envelope.
+        if (showEnvelope) {
+          ctx!.strokeStyle = "rgba(118, 208, 255, 0.7)";
+          ctx!.lineWidth = 1.5 * s;
+          const lastIdx = knots.length - 1;
+          const feedIdx = result.feed_knot_index;
+          if (wi === feedWireIdx && feedIdx > 0 && feedIdx < lastIdx) {
+            drawArmEnvelope(ctx!, knots, mags, magMaxGlobal, project, 0, feedIdx, envScale);
+            drawArmEnvelope(ctx!, knots, mags, magMaxGlobal, project, feedIdx, lastIdx, envScale);
+          } else {
+            drawArmEnvelope(ctx!, knots, mags, magMaxGlobal, project, 0, lastIdx, envScale);
+          }
         }
 
         // Wire label near the leftmost knot for multi-wire geometries.
@@ -2243,7 +2298,7 @@ function CurrentCanvas({
     const obs = new ResizeObserver(onResize);
     obs.observe(canvas);
     return () => obs.disconnect();
-  }, [result, projection]);
+  }, [result, projection, showHeatmap, showEnvelope]);
 
   return <canvas ref={canvasRef} />;
 }
