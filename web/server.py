@@ -1271,31 +1271,42 @@ async def sweep_endpoint(req: dict, request: Request):
                     + "\n"
                 )
         else:
-            # pysim is batched (vectorized); compute once, then stream the
-            # array. Batched is ~10x faster than per-point here, and pysim is
-            # cheap enough that we don't need mid-sweep cancellation.
-            if geometry == "yagi":
-                z_re, z_im = await run_in_threadpool(_sweep_yagi, req, freqs)
-            elif geometry == "moxon":
-                z_re, z_im = await run_in_threadpool(_sweep_moxon, req, freqs)
-            elif geometry == "hexbeam":
-                z_re, z_im = await run_in_threadpool(_sweep_hexbeam, req, freqs)
-            elif geometry == "fan_dipole":
-                z_re, z_im = await run_in_threadpool(_sweep_fandipole, req, freqs)
-            else:
-                z_re, z_im = await run_in_threadpool(_sweep_inverted_v, req, freqs)
-            for i, f in enumerate(freqs):
-                yield (
-                    json.dumps(
-                        {
-                            "freq_mhz": f,
-                            "z_re": z_re[i],
-                            "z_im": z_im[i],
-                            "solver": solver_name,
-                        }
+            # pysim's batched sweep is ~10x faster per-call than per-point,
+            # but a 5-band fan dipole sweep at n_per_wire=21, 41 freqs takes
+            # ~6 s — long enough that rapid slider drags would otherwise pile
+            # up concurrent computes in the threadpool (each holding several
+            # hundred MB of J tensors), eventually exhausting threads or
+            # memory and surfacing as a 500 at the Vite proxy.
+            #
+            # Chunk the sweep so we can check is_disconnected between batches
+            # and bail when the client aborted. Chunk size 8 keeps per-batch
+            # work small enough to feel responsive (~1 s on 5-band fan dipole,
+            # well under 100 ms on the simpler geometries) while still
+            # benefitting from numpy's vectorization within each batch.
+            sweep_fn = {
+                "yagi": _sweep_yagi,
+                "moxon": _sweep_moxon,
+                "hexbeam": _sweep_hexbeam,
+                "fan_dipole": _sweep_fandipole,
+            }.get(geometry, _sweep_inverted_v)
+            chunk_size = 8
+            for start in range(0, len(freqs), chunk_size):
+                if await request.is_disconnected():
+                    return
+                chunk = freqs[start : start + chunk_size]
+                z_re, z_im = await run_in_threadpool(sweep_fn, req, chunk)
+                for i, f in enumerate(chunk):
+                    yield (
+                        json.dumps(
+                            {
+                                "freq_mhz": f,
+                                "z_re": z_re[i],
+                                "z_im": z_im[i],
+                                "solver": solver_name,
+                            }
+                        )
+                        + "\n"
                     )
-                    + "\n"
-                )
 
         yield json.dumps({"done": True, "solver": solver_name}) + "\n"
 
