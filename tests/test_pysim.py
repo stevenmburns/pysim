@@ -513,6 +513,66 @@ def test_bspline_dipole_converges_to_nec(degree, nsegs):
     assert abs(z.imag - (-18.21)) < 1.0, f"X={z.imag}"
 
 
+def test_bspline_d2_dipole_smoothed_source():
+    """Source smoothing via `feed_smoothing_factor` (α) replaces the delta
+    gap with a cos² bump of width w = α·h_feed_segment, integrated against
+    each basis. On the dipole this removes the source-localized current
+    singularity that otherwise caps the integrated-impedance convergence
+    at O(1/N) regardless of basis degree.
+
+    Two checks:
+      1. Pin α=4 at n=81 to the recorded productized value.
+      2. Fit R(N) = R_inf + C/N^p over n ∈ {21, 41, 81} with α=2 and assert
+         the rate clearly lifts above the delta-gap baseline (empirically
+         the baseline runs ~1.20; α=2 lifts to ~1.55).
+    """
+    L = 2 * 0.962 * 22 / 4
+    wires = [np.array([[0.0, -L / 2, 0.0], [0.0, L / 2, 0.0]])]
+
+    def sweep(alpha, ns):
+        Zs = []
+        for n in ns:
+            z, _ = BSplinePySim(
+                wires=wires,
+                n_per_edge_per_wire=[[n]],
+                nsegs=n,
+                degree=2,
+                feed_smoothing_factor=alpha,
+            ).compute_impedance()
+            Zs.append(z)
+        return Zs
+
+    # 1. Pin α=4 at n=81 (smoothing-on converged value; ±0.1 Ω R, ±0.5 Ω X
+    #    leaves headroom for compiler/platform jitter while staying tighter
+    #    than the gap to the delta-gap baseline at the same n).
+    z = sweep(4.0, [81])[0]
+    assert abs(z.real - 69.78) < 0.1, f"α=4 n=81 R={z.real}, expected ≈69.78"
+    assert abs(z.imag - (-18.02)) < 0.5, f"α=4 n=81 X={z.imag}, expected ≈-18.02"
+
+    # 2. R-rate lift at α=2 vs delta-gap baseline.
+    ns = [21, 41, 81]
+    Rs_delta = [zz.real for zz in sweep(None, ns)]
+    Rs_a2 = [zz.real for zz in sweep(2.0, ns)]
+
+    def rate(vals):
+        d12 = vals[0] - vals[1]
+        d23 = vals[1] - vals[2]
+        assert d12 * d23 > 0, f"R differences sign-flipped (noise floor): {vals}"
+        return np.log(abs(d12 / d23)) / np.log(ns[1] / ns[0])
+
+    p_delta = rate(Rs_delta)
+    p_a2 = rate(Rs_a2)
+    # Floor of 1.4 has margin vs the empirical α=2 rate of ~1.55; the
+    # +0.2 lift assertion catches a silent regression where α=2 happens
+    # to land near 69.78 without actually improving the rate.
+    assert p_a2 > 1.4, (
+        f"α=2 R rate p={p_a2:.2f} below the 1.4 floor (delta p={p_delta:.2f})"
+    )
+    assert p_a2 > p_delta + 0.2, (
+        f"α=2 did not clearly lift R rate vs delta-gap: {p_delta:.2f} → {p_a2:.2f}"
+    )
+
+
 def test_bspline_d2_hentenna_arbitrates_against_triangular():
     """Degree-2 B-spline on the hentenna converges to the SAME value as the
     triangular basis (within ~0.1 Ω), independently arbitrating the

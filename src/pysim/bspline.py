@@ -93,8 +93,10 @@ class BSplinePySim:
         degree=2,
         feed_wire_index=0,
         feed_arclength=None,
+        feed_smoothing_factor=None,
         junctions=None,
         n_qp_pair=4,
+        n_qp_source=16,
         wavelength=22,
         halfdriver_factor=0.962,
         wire_radius=0.0005,
@@ -118,6 +120,15 @@ class BSplinePySim:
         self.halfdriver_factor = halfdriver_factor
         self.wire_radius = wire_radius
         self.nsegs = nsegs
+        # Source smoothing: when None (default) → delta-gap at exact midpoint
+        # of feed wire. When set to a float α, the delta-gap is replaced by a
+        # cos² bump of width w = α · h_feed_segment_at_source centered on s_f,
+        # giving basis-limited convergence instead of the O(1/N) delta-gap
+        # source-singularity rate. α ≈ 2-4 is a sensible starting point;
+        # larger α gives faster basis-limited convergence but the smoothing
+        # error from the bump's finite width takes longer to vanish.
+        self.feed_smoothing_factor = feed_smoothing_factor
+        self.n_qp_source = int(n_qp_source)
 
         self.c = 1 / np.sqrt(self.eps * self.mu)
         self.freq = self.c / self.wavelength
@@ -564,25 +575,88 @@ class BSplinePySim:
     # ------------------------------------------------------------------
 
     def _build_source_vector(self, geom, wire_knots, wire_basis_global, n_basis_total):
-        """v_m = Φ_m(s_f) on the feed wire, zeros elsewhere."""
+        """Galerkin RHS for either a delta-gap or smoothed source.
+
+        Delta-gap (feed_smoothing_factor=None): v_m = Φ_m(s_f).
+
+        Smoothed source: replace V·δ(s − s_f) with V·g_w(s − s_f) where g_w
+        is a cos² bump of integral 1 and half-width w/2 = α·h_feed/2 (with
+        α = self.feed_smoothing_factor). Then v_m = ⟨Φ_m, g_w(. − s_f)⟩,
+        computed by Gauss-Legendre quadrature on the bump's support. The
+        impedance extraction in `compute_impedance` is unchanged:
+        I_in = v^T c gives the smoothing-weighted current, and Z = 1/I_in.
+        In the α → 0 limit g_w → δ and both v and I_in revert to the
+        delta-gap formulas.
+
+        Why this fixes the convergence rate. The delta-gap source produces a
+        log singularity in the current at s_f that no polynomial basis can
+        represent; the integrated impedance picks up an O(1/N) error term
+        regardless of basis degree. The smoothed source has no singularity,
+        so the convergence is basis-limited (O(1/N³) for d=2).
+        """
         d = self.degree
-        w = self.feed_wire_index
-        arc = geom["per_wire"][w]["arc_at_knot"]
+        wi = self.feed_wire_index
+        arc = geom["per_wire"][wi]["arc_at_knot"]
         wire_arc = arc[-1]
         s_f = self.feed_arclength if self.feed_arclength is not None else wire_arc / 2.0
+        knots = wire_knots[wi]
+        kept, local_to_global = wire_basis_global[wi]
 
-        # design matrix at s_f, on the full (boundary-kept) basis set for
-        # the feed wire
-        knots = wire_knots[w]
-        DM = BSpline.design_matrix(np.array([s_f]), knots, d).toarray()[0]
-        # n_basis_w_full = len(knots) - d - 1 — includes all boundary bases.
-        # Map back via wire_basis_global[w] = (kept, local_to_global_dict).
-        kept, local_to_global = wire_basis_global[w]
+        if self.feed_smoothing_factor is None:
+            # Delta-gap (original)
+            DM = BSpline.design_matrix(np.array([s_f]), knots, d).toarray()[0]
+            v = np.zeros(n_basis_total, dtype=np.complex128)
+            for kept_idx, (j, _kind, _junc_idx, _end_pos) in enumerate(kept):
+                m_global = local_to_global[kept_idx]
+                v[m_global] = DM[j]
+            return v
+
+        # Smoothed source: find the feed segment to set the smoothing width
+        # w = α·h_feed. The "feed segment" is the segment containing s_f.
+        h_per_seg = geom["per_wire"][wi]["h_per_seg"]
+        arc_at_knot = arc
+        # Locate segment such that arc_at_knot[seg] <= s_f < arc_at_knot[seg+1]
+        seg_idx = int(np.searchsorted(arc_at_knot, s_f, side="right")) - 1
+        seg_idx = max(0, min(seg_idx, len(h_per_seg) - 1))
+        h_feed = float(h_per_seg[seg_idx])
+        alpha = float(self.feed_smoothing_factor)
+        smoothing_w = alpha * h_feed
+        half_w = smoothing_w / 2.0
+
+        # Clip to wire arc range — if the feed is too close to a wire end,
+        # the bump may not fit; in that case the integral is just over the
+        # available portion (consistent with the smoothed source convention
+        # but breaks symmetry at the wire end).
+        s_lo = max(0.0, s_f - half_w)
+        s_hi = min(wire_arc, s_f + half_w)
+        if s_lo >= s_hi:
+            raise ValueError(
+                "feed_smoothing_factor too large for wire — bump doesn't fit"
+            )
+
+        gl_xi, gl_w = np.polynomial.legendre.leggauss(self.n_qp_source)
+        t = 0.5 * (s_hi + s_lo) + 0.5 * (s_hi - s_lo) * gl_xi
+        weights = 0.5 * (s_hi - s_lo) * gl_w
+
+        # Cos² bump on |x| < smoothing_w/2:
+        #   g_w(x) = (2/smoothing_w) · cos²(π x / smoothing_w)
+        # so ∫ g_w = 1 (since ∫_{-w/2}^{w/2} cos²(πx/w) dx = w/2).
+        delta = t - s_f
+        in_support = np.abs(delta) < half_w
+        g_vals = np.where(
+            in_support,
+            (2.0 / smoothing_w) * np.cos(np.pi * delta / smoothing_w) ** 2,
+            0.0,
+        )
+
+        # Evaluate every basis at the quadrature points and integrate.
+        DM = BSpline.design_matrix(t, knots, d).toarray()  # (n_qp, n_basis_w_full)
+        v_full = np.einsum("qj,q,q->j", DM, g_vals, weights)  # (n_basis_w_full,)
 
         v = np.zeros(n_basis_total, dtype=np.complex128)
-        for kept_idx, (j, kind, junc_idx, end_pos) in enumerate(kept):
+        for kept_idx, (j, _kind, _junc_idx, _end_pos) in enumerate(kept):
             m_global = local_to_global[kept_idx]
-            v[m_global] = DM[j]
+            v[m_global] = v_full[j]
         return v
 
     # ------------------------------------------------------------------
