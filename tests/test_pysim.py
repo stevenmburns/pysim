@@ -7,6 +7,7 @@ os.environ["MKL_NUM_THREADS"] = "8"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "8"
 os.environ["NUMEXPR_NUM_THREADS"] = "8"
 
+from pysim.bspline import BSplinePySim
 from pysim.sinusoidal import SinusoidalPySim
 from pysim.triangular import TriangularPySim
 from pysim._accelerators import dist_outer_product
@@ -403,6 +404,29 @@ def test_triangular_hentenna_smoke():
     # generous bands as the moxon/hexbeam smoke tests.
     assert 25.0 < z.real < 110.0, f"R={z.real} out of plausible 50Ω-tuned range"
     assert -40.0 < z.imag < 60.0, f"X={z.imag} out of plausible 50Ω-tuned range"
+
+
+@pytest.mark.parametrize("degree,nsegs", [(2, 21), (2, 81)])
+def test_bspline_dipole_converges_to_nec(degree, nsegs):
+    """BSplinePySim degree-2 (quadratic) on the default half-wave dipole.
+    With higher-order bases and analytic singularity subtraction we expect
+    rapid convergence to the NEC reference 69.64 - j18.21; even N=21 should
+    be within ~1 Ω.
+    """
+    L = 2 * 0.962 * 22 / 4
+    wires = [np.array([[0.0, -L / 2, 0.0], [0.0, L / 2, 0.0]])]
+    sim = BSplinePySim(
+        wires=wires,
+        n_per_edge_per_wire=[[nsegs]],
+        nsegs=nsegs,
+        degree=degree,
+    )
+    z, coeffs = sim.compute_impedance()
+    assert np.isfinite(z.real) and np.isfinite(z.imag)
+    assert np.isfinite(coeffs).all()
+    # Half-wave dipole NEC reference: 69.64 - j18.21
+    assert abs(z.real - 69.64) < 1.0, f"R={z.real}"
+    assert abs(z.imag - (-18.21)) < 1.0, f"X={z.imag}"
 
 
 @pytest.mark.parametrize("nsegs", [21, 41, 101])
