@@ -173,6 +173,20 @@ Ordered by what I'd actually do next, not by what's most ambitious.
 
     pymininec at n=21 also read −j5.04 (matching PyNEC). Given the convergence picture, this is the same under-convergence at the same coarse n on two pulse-basis solvers — not an independent confirmation of "−j5 is correct." A per-n pymininec sweep would confirm it shows the same super-log climb.
 
+    **nec2c sweep — independent NEC2 implementation, same trajectory.** Re-ran the same hentenna deck through Neoklis Kyriazis's [nec2c](https://manpages.ubuntu.com/manpages/noble/en/man1/nec2c.1.html) (a C translation of the LLNL Fortran, independent code lineage from Tim Molteno's necpp that PyNEC wraps):
+
+    ```
+        n   |  nec2c (R + jX)     |  PyNEC (R + jX)     |  Δ (R, X)
+        15  |  45.614 − j5.838    |  45.613 − j5.769    |  +0.001, −0.069
+        21  |  45.606 − j4.673    |  45.604 − j4.604    |  +0.002, −0.069
+        81  |  45.245 + j1.578    |  45.244 + j1.646    |  +0.001, −0.068
+       161  |  45.008 + j6.469    |  45.006 + j6.536    |  +0.002, −0.067
+       281  |  44.735 +j12.648    |  44.733 +j12.722    |  +0.002, −0.074
+       441  |  44.424 +j20.110    |  44.423 +j20.218    |  +0.001, −0.108
+    ```
+
+    Two findings: (a) R matches to ~0.002 Ω across the entire range, X to ~0.07 Ω — small enough to be linear-solver / complex-arithmetic precision (different LU paths), so **PyNEC has no implementation bug**; (b) nec2c's X climbs the same super-log curve (dX/d(log n) monotonically increasing from 3.5 to 18.1, same shape as PyNEC) — so **the divergence is the NEC2 algorithm, not any PyNEC artifact**. Two independent NEC2 implementations agree on both the value and the non-convergence.
+
     **Relation to item 8 (fandipole).** Inverted-looking but structurally consistent: there pysim/pymininec agreed on R against PyNEC's drift; here PyNEC drifts on X with no asymptote in sight. Both cases point to the same conclusion: **on multi-wire/junction geometries with a delta-gap feed, NEC's pulse-ish basis can fail to converge, while pysim's tent basis gives a finite (basis-defined) value**. The `tests/test_pysim.py` comment attributing the fan-dipole pysim/PyNEC gap to "basis-shape at K=3 junctions" should be re-checked against an explicit per-solver convergence sweep — it may be the same non-convergence story.
 
     **What's open**:
