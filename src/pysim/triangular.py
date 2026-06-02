@@ -575,22 +575,20 @@ class TriangularPySim:
         return Z_A + Z_Phi
 
     def _solve_with_kcl(self, Z, v, geom):
-        """Lagrange-augmented solve enforcing KCL Σ I_k = 0 at each junction.
-
-        [ Z   Aᵀ ] [ I ]   [ v ]
-        [ A   0  ] [ λ ] = [ 0 ]
+        """KCL-constrained solve via Schur complement (single-k mirror of
+        `_solve_with_kcl_batch` — see that docstring for the derivation).
         """
         A = geom["kcl_A"]
         n_b = Z.shape[0]
         n_c = A.shape[0]
-        M = np.zeros((n_b + n_c, n_b + n_c), dtype=np.complex128)
-        M[:n_b, :n_b] = Z
-        M[:n_b, n_b:] = A.T
-        M[n_b:, :n_b] = A
-        rhs = np.zeros(n_b + n_c, dtype=np.complex128)
-        rhs[:n_b] = v
-        x = scipy.linalg.solve(M, rhs)
-        return x[:n_b]
+        rhs = np.empty((n_b, 1 + n_c), dtype=np.complex128)
+        rhs[:, 0] = v
+        rhs[:, 1:] = A.T
+        sol = scipy.linalg.solve(Z, rhs)
+        w = sol[:, 0]
+        X = sol[:, 1:]
+        lam = scipy.linalg.solve(A @ X, A @ w)
+        return w - X @ lam
 
     def compute_impedance(self, *, ntrap=None):
         geom = self._build_geometry()
@@ -760,21 +758,36 @@ class TriangularPySim:
         return Z_A + Z_Phi
 
     def _solve_with_kcl_batch(self, Z, v, geom):
-        """Batched Lagrange-augmented KCL solve — augments per k and uses a
-        batched np.linalg.solve.
+        """Batched KCL-constrained solve via Schur complement.
+
+        Solves the saddle-point system
+            [ Z   Aᵀ ] [ I ]   [ v ]
+            [ A    0 ] [ λ ] = [ 0 ]
+        without materializing the augmented (n_b+n_c, n_b+n_c) matrix M per
+        k — which on the 5-band fan dipole alone costs ~63 ms / 12% of
+        /sweep just to allocate and fill the (n_k, 425, 425) zero buffer.
+
+        Schur expansion:
+            I = Z⁻¹(v − Aᵀ λ),    (A Z⁻¹ Aᵀ) λ = A Z⁻¹ v
+
+        Implementation packs the (1 + n_c) right-hand sides into one batched
+        np.linalg.solve on Z, so the solve cost is dominated by the LU
+        factorization (the extra n_c RHS add <1% to back-substitution).
         """
         A = geom["kcl_A"]
         n_k = Z.shape[0]
         n_b = Z.shape[1]
         n_c = A.shape[0]
-        M = np.zeros((n_k, n_b + n_c, n_b + n_c), dtype=np.complex128)
-        M[:, :n_b, :n_b] = Z
-        M[:, :n_b, n_b:] = A.T[None, :, :]
-        M[:, n_b:, :n_b] = A[None, :, :]
-        rhs = np.zeros((n_b + n_c,), dtype=np.complex128)
-        rhs[:n_b] = v
-        x = np.linalg.solve(M, rhs)
-        return x[:, :n_b]
+        rhs = np.empty((n_k, n_b, 1 + n_c), dtype=np.complex128)
+        rhs[:, :, 0] = v[None, :]
+        rhs[:, :, 1:] = A.T[None, :, :]
+        sol = np.linalg.solve(Z, rhs)  # (n_k, n_b, 1 + n_c)
+        w = sol[:, :, 0]  # Z⁻¹ v   → (n_k, n_b)
+        X = sol[:, :, 1:]  # Z⁻¹ Aᵀ → (n_k, n_b, n_c)
+        S = np.einsum("cm,kmn->kcn", A, X)  # (n_k, n_c, n_c)
+        Aw = np.einsum("cm,km->kc", A, w)  # (n_k, n_c)
+        lam = np.linalg.solve(S, Aw[:, :, None])[:, :, 0]  # (n_k, n_c)
+        return w - np.einsum("kmc,kc->km", X, lam)
 
     def compute_impedance_swept(self, k_array):
         """Driver impedance over a batch of wavenumbers, sharing all
