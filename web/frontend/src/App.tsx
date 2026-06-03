@@ -145,7 +145,6 @@ const DEFAULT_SLOTS: Record<Slot, SlotConfig> = {
     opts: {
       ...DEFAULT_BACKEND_OPTS.bspline,
       nPerWire: 21,
-      useSingularEnrichment: true,
     },
   },
   C: {
