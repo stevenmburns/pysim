@@ -44,6 +44,7 @@ class SinusoidalPySim:
         halfdriver_factor=0.962,
         wire_radius=0.0005,
         nsegs=101,
+        ground_z=None,
         junctions=None,
         n_qp_const=8,
     ):
@@ -51,6 +52,7 @@ class SinusoidalPySim:
         self.halfdriver_factor = halfdriver_factor
         self.wire_radius = wire_radius
         self.nsegs = nsegs
+        self.ground_z = ground_z
 
         self.c = 1 / np.sqrt(self.eps * self.mu)
         self.freq = self.c / self.wavelength
@@ -412,7 +414,7 @@ class SinusoidalPySim:
     # Field of elementary current segments (Eqs 76-79)
     # ------------------------------------------------------------------
 
-    def _field_tensor(self, geom, k):
+    def _field_tensor(self, geom, k, src_centers=None, src_tangents=None):
         """Tangential-field tensor Φ of shape (3, N, N) where
         Φ[0, m, n] = ŝ_m · E^const_n(at center of m's surface),
         Φ[1, m, n] = ŝ_m · E^sin_n(at center of m's surface),
@@ -423,22 +425,29 @@ class SinusoidalPySim:
         sin(k·z'_local)/cos(k·z'_local) with z'_local measured from n's
         center along n's natural tangent. σ accounting is the caller's
         job — the tensor is in NATURAL-arc convention.
+
+        `src_centers` / `src_tangents` default to the geometry's segment
+        centers and tangents (free-space build). The PEC image build
+        passes mirrored versions so the same tensor formula computes
+        the image-source field at the original observer points.
         """
         a = self.wire_radius
-        seg_c = geom["seg_centers"]  # (N, 3)
-        seg_t = geom["seg_tangents"]  # (N, 3)
+        seg_c = geom["seg_centers"]  # (N, 3) — observer centers
+        seg_t = geom["seg_tangents"]  # (N, 3) — observer tangents
         seg_h = geom["seg_h"]  # (N,) full lengths
         N = geom["n_segs"]
         h_n = 0.5 * seg_h  # (N,) half-lengths
 
-        # Pairwise vectors c_m - c_n: shape (M=obs, N=src, 3)
-        # Use n as source axis index, m as observation index.
-        # rvec_mn = seg_c[m] - seg_c[n]
-        rvec = seg_c[:, None, :] - seg_c[None, :, :]  # (M, N, 3)
-        t_src = seg_t[None, :, :]  # (1, N, 3)
+        src_c = src_centers if src_centers is not None else seg_c
+        src_t = src_tangents if src_tangents is not None else seg_t
+
+        # Pairwise vectors c_m - c_n: shape (M=obs, N=src, 3).
+        # rvec_mn = seg_c[m] - src_c[n]
+        rvec = seg_c[:, None, :] - src_c[None, :, :]  # (M, N, 3)
+        t_src = src_t[None, :, :]  # (1, N, 3)
         t_obs = seg_t[:, None, :]  # (M, 1, 3)
 
-        z_eval = np.einsum("mnd,nd->mn", rvec, seg_t)  # (M, N)
+        z_eval = np.einsum("mnd,nd->mn", rvec, src_t)  # (M, N)
         # Perpendicular component:
         rho_vec = rvec - z_eval[..., None] * t_src  # (M, N, 3)
         rho_axis = np.linalg.norm(rho_vec, axis=-1)  # (M, N)
@@ -570,8 +579,43 @@ class SinusoidalPySim:
     # Matrix assembly and solve
     # ------------------------------------------------------------------
 
+    def _image_source_centers_tangents(self, geom):
+        """Mirror source segments across z = ground_z and flip their tangent
+        z-components, mirroring the convention TriangularPySim uses for the
+        PEC image build. Same shape ((N, 3), (N, 3)) as the originals.
+        """
+        seg_c = geom["seg_centers"]
+        seg_t = geom["seg_tangents"]
+        src_c_img = seg_c * np.array([1.0, 1.0, -1.0]) + np.array(
+            [0.0, 0.0, 2.0 * self.ground_z]
+        )
+        src_t_img = seg_t * np.array([1.0, 1.0, -1.0])
+        return src_c_img, src_t_img
+
+    def _field_tensor_image(self, geom, k):
+        """Field tensor for image sources at PEC ground. The image keeps the
+        same per-segment half-length and basis shape; only the source center
+        is mirrored and the source tangent z-component is flipped.
+        """
+        src_c_img, src_t_img = self._image_source_centers_tangents(geom)
+        return self._field_tensor(
+            geom, k, src_centers=src_c_img, src_tangents=src_t_img
+        )
+
     def _assemble_Z(self, geom, k):
         Phi_c, Phi_s, Phi_co = self._field_tensor(geom, k)
+        if self.ground_z is not None:
+            # PEC image: subtract the sub-assembly built from the image
+            # field tensor. The image source's mirrored geometry + flipped
+            # z-tangent already encode both the anti-parallel horizontal
+            # image current and the parallel vertical image current; the
+            # combined image-current + image-charge sign flip reduces to
+            # a single minus sign on the image-Z block (same as Triangular).
+            Phi_c_i, Phi_s_i, Phi_co_i = self._field_tensor_image(geom, k)
+            Phi_c = Phi_c - Phi_c_i
+            Phi_s = Phi_s - Phi_s_i
+            Phi_co = Phi_co - Phi_co_i
+
         basis = self._basis_coefs(geom, k)
         N = geom["n_segs"]
         G = np.zeros((N, N), dtype=np.complex128)

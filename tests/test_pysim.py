@@ -1175,6 +1175,83 @@ def test_bspline_ground_swept_matches_single_freq():
     assert abs(z_single - z_swept) < 1e-9
 
 
+# ---- PEC ground on SinusoidalPySim (NEC three-term basis, image method) ----
+
+
+def test_sinusoidal_ground_none_matches_free_space_bit_exact():
+    L = 2 * 0.962 * 22 / 4
+    poly = _h_dipole(L, 0.0)
+    z_no, _ = SinusoidalPySim(
+        wires=[poly], n_per_edge_per_wire=[[40]], nsegs=40
+    ).compute_impedance()
+    z_none, _ = SinusoidalPySim(
+        wires=[poly], n_per_edge_per_wire=[[40]], nsegs=40, ground_z=None
+    ).compute_impedance()
+    assert z_no == z_none
+
+
+def test_sinusoidal_ground_horizontal_dipole_at_height_recovers_free_space():
+    L = 2 * 0.962 * 22 / 4
+    N = 30
+    z_free, _ = SinusoidalPySim(
+        wires=[_h_dipole(L, 0.0)], n_per_edge_per_wire=[[N]], nsegs=N
+    ).compute_impedance()
+    z_high, _ = SinusoidalPySim(
+        wires=[_h_dipole(L, 100.0)],
+        n_per_edge_per_wire=[[N]],
+        nsegs=N,
+        ground_z=0.0,
+    ).compute_impedance()
+    assert abs(z_high.real - z_free.real) < 2.0
+    assert abs(z_high.imag - z_free.imag) < 3.0
+
+
+def test_sinusoidal_ground_horizontal_dipole_at_zero_height_shorts_out():
+    L = 2 * 0.962 * 22 / 4
+    z_lo, _ = SinusoidalPySim(
+        wires=[_h_dipole(L, 0.01)],
+        n_per_edge_per_wire=[[40]],
+        nsegs=40,
+        ground_z=0.0,
+    ).compute_impedance()
+    assert abs(z_lo.real) < 0.5
+
+
+def test_sinusoidal_ground_agrees_with_triangular_at_moderate_height():
+    L = 2 * 0.962 * 22 / 4
+    N = 40
+    h = 7.0
+    z_tri, _ = TriangularPySim(
+        wires=[_h_dipole(L, h)],
+        n_per_edge_per_wire=[[N]],
+        nsegs=N,
+        ground_z=0.0,
+    ).compute_impedance()
+    z_sin, _ = SinusoidalPySim(
+        wires=[_h_dipole(L, h)],
+        n_per_edge_per_wire=[[N]],
+        nsegs=N,
+        ground_z=0.0,
+    ).compute_impedance()
+    assert abs(z_sin.real - z_tri.real) < 0.03 * abs(z_tri.real)
+    assert abs(z_sin.imag - z_tri.imag) < 0.10 * max(abs(z_tri.imag), 5.0)
+
+
+def test_sinusoidal_ground_swept_matches_single_freq():
+    L = 2 * 0.962 * 22 / 4
+    N = 30
+    h = 5.0
+    sim = SinusoidalPySim(
+        wires=[_h_dipole(L, h)],
+        n_per_edge_per_wire=[[N]],
+        nsegs=N,
+        ground_z=0.0,
+    )
+    z_single, _ = sim.compute_impedance()
+    z_swept = sim.compute_impedance_swept(np.array([sim.k]))[0]
+    assert abs(z_single - z_swept) < 1e-9
+
+
 def test_bspline_ground_with_enrichment_raises():
     L = 2 * 0.962 * 22 / 4
     import pytest

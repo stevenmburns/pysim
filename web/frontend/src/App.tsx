@@ -74,11 +74,13 @@ const BACKEND_LABEL: Record<Backend, string> = {
 
 const BACKEND_ORDER: Backend[] = ["triangular", "sinusoidal", "bspline", "pynec"];
 
-// Triangular and B-spline both have the PEC image-method ground; PyNEC
-// has its own Sommerfeld / reflection-coefficient ground. Sinusoidal is
-// free-space-only right now (no ground_z constructor kwarg).
+// All three pysim models have the PEC image-method ground; PyNEC uses
+// its own Sommerfeld / reflection-coefficient ground. Kept as an explicit
+// list so future backends without ground support can be excluded by name.
 function backendSupportsGround(b: Backend): boolean {
-  return b === "triangular" || b === "bspline" || b === "pynec";
+  return (
+    b === "triangular" || b === "bspline" || b === "sinusoidal" || b === "pynec"
+  );
 }
 
 type CommonOpts = { nPerWire: number; wireRadius: number };
@@ -1406,7 +1408,7 @@ export function App() {
         </div>
 
         {!backendSupportsGround(backend) && groundEnabled && (
-          <div className="field" title="Sinusoidal doesn't model ground; ignored until you switch to Triangular, B-spline, or PyNEC.">
+          <div className="field" title="This backend doesn't model ground; ignored until you switch to one that does.">
             <em style={{ color: "var(--muted)", fontSize: 12 }}>
               ground plane ignored for {BACKEND_LABEL[backend]}
             </em>

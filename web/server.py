@@ -123,7 +123,7 @@ _PYSIM_MODELS = {
 }
 
 
-_PYSIM_MODELS_WITH_GROUND = {"triangular", "bspline"}
+_PYSIM_MODELS_WITH_GROUND = {"triangular", "bspline", "sinusoidal"}
 
 
 def _make_pysim_sim(req: dict, **base_kwargs):
@@ -131,9 +131,10 @@ def _make_pysim_sim(req: dict, **base_kwargs):
 
     base_kwargs are the geometry-derived constructor kwargs every model
     accepts (wires, n_per_edge_per_wire, feed_*, wavelength, halfdriver_factor,
-    nsegs, junctions). ground_z is forwarded only to models that accept it
-    (Triangular and BSpline today); Sinusoidal still strips it. model_options
-    entries are filtered through the per-model allowlist.
+    nsegs, junctions). All three pysim models now accept ground_z; the set
+    is kept as an allowlist so future models that don't support it can be
+    excluded by name. model_options entries are filtered through the
+    per-model allowlist.
     """
     model = req.get("pysim_model", "triangular")
     if model not in _PYSIM_MODELS:
