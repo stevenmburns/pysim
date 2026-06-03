@@ -816,3 +816,34 @@ class BSplinePySim:
         driver_impedance = 1.0 / I_at_feed
         self.z = Z
         return driver_impedance, coeffs
+
+    def currents_at_knots(self, coeffs):
+        """Per-wire complex current at every mesh knot.
+
+        Evaluates Σ_kept c_g · B_{j_local}(s_knot) per wire using scipy's
+        B-spline design matrix on the wire's clamped knot vector. The
+        singular-enrichment block (if present, trailing entries in `coeffs`)
+        and any KCL Lagrange multipliers contribute extra structure near
+        junctions that this smooth-basis sum omits — for the v1
+        visualization the dominant smooth shape is what's plotted.
+        """
+        coeffs = np.asarray(coeffs)
+        geom = self._build_geometry()
+        _, _, _, wire_knots, wire_basis_global = self._build_basis_polynomials(geom)
+        d = self.degree
+
+        out = []
+        for w_idx in range(len(self.wires_polylines)):
+            arc_at_knot = geom["per_wire"][w_idx]["arc_at_knot"]
+            knots_vec = wire_knots[w_idx]
+            # design_matrix at [0, wire_arc] — clip tiny FP overshoots that
+            # would push the endpoint epsilon outside the clamped knot range.
+            s_eval = np.clip(arc_at_knot, knots_vec[0], knots_vec[-1])
+            DM = BSpline.design_matrix(s_eval, knots_vec, d).toarray()
+
+            kept, local_to_global = wire_basis_global[w_idx]
+            I_knots = np.zeros(arc_at_knot.shape[0], dtype=np.complex128)
+            for kept_idx, (j_local, _, _, _) in enumerate(kept):
+                I_knots += coeffs[local_to_global[kept_idx]] * DM[:, j_local]
+            out.append(I_knots)
+        return out

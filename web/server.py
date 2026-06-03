@@ -92,9 +92,60 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+from pysim.bspline import BSplinePySim
+from pysim.sinusoidal import SinusoidalPySim
 from pysim.triangular import TriangularPySim
 
 from . import pynec_backend
+
+
+# Per-model option allowlist. Frontend sends `pysim_model` + `model_options`
+# (a flat dict); we forward only the kwargs each class accepts, so an
+# unrecognised option from a stale client never raises. Defaults match the
+# class signatures so unset options behave identically to the old code.
+_PYSIM_MODEL_KEYS = {
+    "triangular": ("n_qp_reg", "n_qp_off"),
+    "sinusoidal": ("n_qp_const",),
+    "bspline": (
+        "degree",
+        "n_qp_pair",
+        "n_qp_source",
+        "feed_smoothing_factor",
+        "use_singular_enrichment",
+        "n_qp_sing",
+        "enrichment_min_k",
+    ),
+}
+_PYSIM_MODELS = {
+    "triangular": TriangularPySim,
+    "sinusoidal": SinusoidalPySim,
+    "bspline": BSplinePySim,
+}
+
+
+def _make_pysim_sim(req: dict, **base_kwargs):
+    """Instantiate the PySim model the request selected.
+
+    base_kwargs are the geometry-derived constructor kwargs every model
+    accepts (wires, n_per_edge_per_wire, feed_*, wavelength, halfdriver_factor,
+    nsegs, junctions). ground_z is only passed to Triangular (Sinusoidal /
+    BSpline don't support a PEC image plane). model_options entries are
+    filtered through the per-model allowlist.
+    """
+    model = req.get("pysim_model", "triangular")
+    if model not in _PYSIM_MODELS:
+        model = "triangular"
+    cls = _PYSIM_MODELS[model]
+    allowed = _PYSIM_MODEL_KEYS[model]
+
+    opts = req.get("model_options") or {}
+    extra = {k: opts[k] for k in allowed if k in opts}
+
+    if model != "triangular":
+        base_kwargs.pop("ground_z", None)
+
+    return cls(**base_kwargs, **extra)
+
 
 # Target per-chunk wall time for the adaptive pysim /sweep chunking. The
 # chunk size is tuned each iteration so a batch takes roughly this long —
@@ -215,18 +266,22 @@ def _compute_directivity_norm(out: dict, n_theta: int = 45, n_phi: int = 90) -> 
     out["directivity_norm"] = (4 * np.pi / p_rad) if p_rad > 0 else 0.0
 
 
-def _wire_record(knots: np.ndarray, coeffs: np.ndarray, label: str) -> dict:
-    """Pad interior-knot coefficients with zero endpoints (open-wire BC) and
-    package one wire's record for the JSON response.
+def _wire_record(knots: np.ndarray, currents: np.ndarray, label: str) -> dict:
+    """Package one wire's record for the JSON response. `currents` is a
+    length-M_w complex array (one per mesh knot) as produced by each
+    model's `currents_at_knots(coeffs)` method.
     """
-    n_knots = knots.shape[0]
-    full = np.zeros(n_knots, dtype=np.complex128)
-    full[1:-1] = coeffs
+    currents = np.asarray(currents, dtype=np.complex128)
+    if currents.shape[0] != knots.shape[0]:
+        raise ValueError(
+            f"_wire_record: currents/knots length mismatch "
+            f"({currents.shape[0]} vs {knots.shape[0]})"
+        )
     return {
         "label": label,
         "knot_positions": knots.tolist(),
-        "knot_currents_re": full.real.tolist(),
-        "knot_currents_im": full.imag.tolist(),
+        "knot_currents_re": currents.real.tolist(),
+        "knot_currents_im": currents.imag.tolist(),
     }
 
 
@@ -303,7 +358,8 @@ def _solve_inverted_v(req: dict) -> dict:
     arm_len = halfdriver_factor * wavelength_design / 4.0
 
     polyline = _inverted_v_polyline(arm_len, angle_deg, z_offset=z_offset)
-    sim = TriangularPySim(
+    sim = _make_pysim_sim(
+        req,
         wires=[polyline],
         n_per_edge_per_wire=[[n_per_wire, n_per_wire]],
         feed_wire_index=0,
@@ -320,10 +376,11 @@ def _solve_inverted_v(req: dict) -> dict:
 
     knots = _polyline_knots(polyline, [n_per_wire, n_per_wire])
     feed_knot_index = n_per_wire  # apex (midpoint of polyline)
+    currents = sim.currents_at_knots(coeffs)
 
     return {
         "geometry": "inverted_v",
-        "wires": [_wire_record(knots, coeffs, "wire")],
+        "wires": [_wire_record(knots, currents[0], "wire")],
         "feed_wire_index": 0,
         "feed_knot_index": feed_knot_index,
         "z_in_re": float(z_in.real),
@@ -384,7 +441,8 @@ def _solve_yagi(req: dict) -> dict:
         z_offset=z_offset,
     )
 
-    sim = TriangularPySim(
+    sim = _make_pysim_sim(
+        req,
         wires=wires_polylines,
         n_per_edge_per_wire=[[n_per_wire]] * len(wires_polylines),
         feed_wire_index=0,
@@ -400,7 +458,7 @@ def _solve_yagi(req: dict) -> dict:
     solve_ms = (time.perf_counter() - t0) * 1e3
 
     N = n_per_wire
-    nb = N - 1
+    currents = sim.currents_at_knots(coeffs)
 
     def _knots_at(x_pos: float, half_len: float) -> np.ndarray:
         return np.column_stack(
@@ -412,15 +470,14 @@ def _solve_yagi(req: dict) -> dict:
         )
 
     wires = [
-        _wire_record(_knots_at(0.0, h_driver), coeffs[:nb], "driver"),
-        _wire_record(_knots_at(-spacing_m, h_refl), coeffs[nb : 2 * nb], "reflector"),
+        _wire_record(_knots_at(0.0, h_driver), currents[0], "driver"),
+        _wire_record(_knots_at(-spacing_m, h_refl), currents[1], "reflector"),
     ]
     for i in range(n_directors):
-        sl = slice((2 + i) * nb, (3 + i) * nb)
         wires.append(
             _wire_record(
                 _knots_at((i + 1) * dir_spacing_m, h_dir),
-                coeffs[sl],
+                currents[2 + i],
                 f"director {i + 1}" if n_directors > 1 else "director",
             )
         )
@@ -570,7 +627,8 @@ def _solve_moxon(req: dict) -> dict:
         z_offset=z_offset,
     )
 
-    sim = TriangularPySim(
+    sim = _make_pysim_sim(
+        req,
         wires=[geom["driver"], geom["reflector"]],
         n_per_edge_per_wire=[geom["npe_driver"], geom["npe_reflector"]],
         feed_wire_index=0,
@@ -588,8 +646,7 @@ def _solve_moxon(req: dict) -> dict:
 
     driver_knots = _polyline_knots(geom["driver"], geom["npe_driver"])
     refl_knots = _polyline_knots(geom["reflector"], geom["npe_reflector"])
-    nb_d = sum(geom["npe_driver"]) - 1
-    nb_r = sum(geom["npe_reflector"]) - 1
+    currents = sim.currents_at_knots(coeffs)
 
     # Feed knot index on the driver wire: the interior knot the solver picked
     # (closest to feed_arclength). Recompute here to mark it in the response.
@@ -603,8 +660,8 @@ def _solve_moxon(req: dict) -> dict:
     return {
         "geometry": "moxon",
         "wires": [
-            _wire_record(driver_knots, coeffs[:nb_d], "driver"),
-            _wire_record(refl_knots, coeffs[nb_d : nb_d + nb_r], "reflector"),
+            _wire_record(driver_knots, currents[0], "driver"),
+            _wire_record(refl_knots, currents[1], "reflector"),
         ],
         "feed_wire_index": 0,
         "feed_knot_index": feed_knot_index,
@@ -731,7 +788,8 @@ def _solve_hexbeam(req: dict) -> dict:
         z_offset=z_offset,
     )
 
-    sim = TriangularPySim(
+    sim = _make_pysim_sim(
+        req,
         wires=[geom["driver"], geom["reflector"]],
         n_per_edge_per_wire=[geom["npe_driver"], geom["npe_reflector"]],
         feed_wire_index=0,
@@ -749,8 +807,7 @@ def _solve_hexbeam(req: dict) -> dict:
 
     driver_knots = _polyline_knots(geom["driver"], geom["npe_driver"])
     refl_knots = _polyline_knots(geom["reflector"], geom["npe_reflector"])
-    nb_d = sum(geom["npe_driver"]) - 1
-    nb_r = sum(geom["npe_reflector"]) - 1
+    currents = sim.currents_at_knots(coeffs)
 
     arc_at_knot = np.concatenate(
         [[0.0], np.cumsum(np.linalg.norm(np.diff(driver_knots, axis=0), axis=1))]
@@ -762,8 +819,8 @@ def _solve_hexbeam(req: dict) -> dict:
     return {
         "geometry": "hexbeam",
         "wires": [
-            _wire_record(driver_knots, coeffs[:nb_d], "driver"),
-            _wire_record(refl_knots, coeffs[nb_d : nb_d + nb_r], "reflector"),
+            _wire_record(driver_knots, currents[0], "driver"),
+            _wire_record(refl_knots, currents[1], "reflector"),
         ],
         "feed_wire_index": 0,
         "feed_knot_index": feed_knot_index,
@@ -914,7 +971,8 @@ def _solve_hentenna(req: dict) -> dict:
         z_offset=z_offset,
     )
 
-    sim = TriangularPySim(
+    sim = _make_pysim_sim(
+        req,
         wires=geom["wires"],
         n_per_edge_per_wire=geom["n_per_edge_per_wire"],
         feed_wire_index=geom["feed_wire_index"],
@@ -930,18 +988,16 @@ def _solve_hentenna(req: dict) -> dict:
     z_in, coeffs = sim.compute_impedance()
     solve_ms = (time.perf_counter() - t0_clock) * 1e3
 
-    # Slice the global coeffs vector back into per-wire chunks for packaging.
     knots_per_wire = [
         _polyline_knots(w, npe)
         for w, npe in zip(geom["wires"], geom["n_per_edge_per_wire"])
     ]
-    interior_per_wire = [sum(npe) - 1 for npe in geom["n_per_edge_per_wire"]]
+    currents = sim.currents_at_knots(coeffs)
     wire_labels = ["feed", "cross_right", "upper", "cross_left", "lower"]
-    wire_records = []
-    offset = 0
-    for knots, n_int, label in zip(knots_per_wire, interior_per_wire, wire_labels):
-        wire_records.append(_wire_record(knots, coeffs[offset : offset + n_int], label))
-        offset += n_int
+    wire_records = [
+        _wire_record(knots, currents[i], label)
+        for i, (knots, label) in enumerate(zip(knots_per_wire, wire_labels))
+    ]
 
     # Feed knot index on the feed wire: feed_arclength sits at the midpoint
     # of the single feed-gap edge, so it's the interior knot closest to
@@ -1093,93 +1149,37 @@ def _fandipole_geometry(req: dict):
     }
 
 
-def _fandipole_pack_wires(g, coeffs):
-    """Turn the pysim coefficient vector into the wire-record list the UI
-    expects, mirroring pynec_backend.solve_fandipole's response shape.
-
-    Layout of the coefficient vector:
-      [0 : nb_feed]                     feed wire's interior bases (1 basis)
-      [nb_feed : nb_feed + 2*nb_arm * n_bands]
-                                        +y arms then -y arms, n_bands each
-      [n_interior : n_interior + K_S + K_T]
-                                        junction directional bases at S then T
+def _fandipole_pack_wires(g, sim, coeffs):
+    """Package the fan-dipole wire records: feed wire (T->S, 2 segments)
+    plus n_bands +y arms and n_bands -y arms, each starting at the shared
+    junction node. `sim.currents_at_knots(coeffs)` returns one complex
+    array per pysim wire; junction-directional bases at S and T flow
+    through naturally into the wire-end knots.
     """
     n_bands = g["n_bands"]
     n_per = g["n_per_wire"]
-    nb_feed = 1  # 2 segs, 1 interior knot
-    nb_arm = 2 * n_per - 1  # 2 edges × n_per segments → 2*n_per - 1 interior knots
-    K_S = 1 + n_bands  # K at S and T are equal; only K_S is referenced below
-
-    n_interior = nb_feed + 2 * n_bands * nb_arm
-
-    # Feed wire record: synthetic 3-knot (T, feed_knot, S) so the UI can
-    # mark feed_knot_index=1 at the source location.
     T, S = g["T"], g["S"]
-    feed_knot = (0.5 * (T[0] + S[0]), 0.5 * (T[1] + S[1]), 0.5 * (T[2] + S[2]))
-    feed_coeff = complex(coeffs[0])
-    feed_knots = np.array([T, feed_knot, S], dtype=float)
-    # Junction-side endpoints (T at index 0, S at index 2) carry the
-    # junction-directional basis amplitudes — the directional bases at T
-    # and S are the first two appended after the interior block.
-    feed_T_directional = complex(coeffs[n_interior + 0])  # first basis at S
-    # Find the feed-end directional at each junction by scanning the
-    # junctions spec: the feed wire is wire 0, connected at S with end="end"
-    # and at T with end="start".
-    a_S_feed_local = 0  # feed_end at S — first entry of j_S
-    a_T_feed_local = 0  # feed_start at T — first entry of j_T
-    base_S = n_interior
-    base_T = n_interior + K_S
-    feed_cur_at_T = complex(coeffs[base_T + a_T_feed_local])
-    feed_cur_at_S = complex(coeffs[base_S + a_S_feed_local])
-    feed_currents = np.array(
-        [feed_cur_at_T, feed_coeff, feed_cur_at_S], dtype=np.complex128
-    )
-    _ = feed_T_directional  # placeholder for potential future use
-    wires_out = [
-        {
-            "label": "feed",
-            "knot_positions": feed_knots.tolist(),
-            "knot_currents_re": feed_currents.real.tolist(),
-            "knot_currents_im": feed_currents.imag.tolist(),
-        }
-    ]
+    currents = sim.currents_at_knots(coeffs)
+
+    feed_knots = _polyline_knots(np.array([T, S], dtype=float), [2])
+    wires_out = [_wire_record(feed_knots, currents[0], "feed")]
 
     def _band_label(i):
         if i < len(g["band_freqs_mhz"]):
             return f"{g['band_freqs_mhz'][i]:.2f} MHz"
         return f"band {i} ({g['band_lengths_m'][i]:.2f} m)"
 
-    # +y arms then -y arms. Each arm has 2*n_per+1 knots and nb_arm interior
-    # bases; the inner knot at S or T carries the corresponding directional
-    # basis's coefficient (rather than the open-wire zero).
-    for side, base_arm_idx, junction_base, k_offset_start in [
-        ("+y", nb_feed, base_S, 1),  # +y arms: bases 1..n_bands at S
-        ("-y", nb_feed + n_bands * nb_arm, base_T, 1),  # -y arms at T
-    ]:
+    arm_idx = 1
+    for side in ("+y", "-y"):
         for i in range(n_bands):
-            arm_label = _band_label(i)
             if side == "+y":
                 path = [g["S"], g["A_pos"][i], g["B_pos"][i]]
             else:
                 path = [g["T"], g["A_neg"][i], g["B_neg"][i]]
             knots = _polyline_knots(np.array(path), [n_per, n_per])
-            arm_coeffs = coeffs[
-                base_arm_idx + i * nb_arm : base_arm_idx + (i + 1) * nb_arm
-            ]
-            full = np.zeros(knots.shape[0], dtype=np.complex128)
-            full[1:-1] = arm_coeffs
-            # Inner-knot current = the arm's directional basis amplitude at
-            # the shared junction; outer-knot stays zero (true wire tip).
-            full[0] = complex(coeffs[junction_base + k_offset_start + i])
-            wires_out.append(
-                {
-                    "label": f"{arm_label} {side}",
-                    "knot_positions": knots.tolist(),
-                    "knot_currents_re": full.real.tolist(),
-                    "knot_currents_im": full.imag.tolist(),
-                }
-            )
-
+            label = f"{_band_label(i)} {side}"
+            wires_out.append(_wire_record(knots, currents[arm_idx], label))
+            arm_idx += 1
     return wires_out
 
 
@@ -1193,7 +1193,8 @@ def _solve_fandipole(req: dict) -> dict:
     wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
     wavelength_meas = C_LIGHT / (meas_freq_mhz * 1e6)
 
-    sim = TriangularPySim(
+    sim = _make_pysim_sim(
+        req,
         wires=g["wires"],
         n_per_edge_per_wire=g["n_per_edge"],
         feed_wire_index=0,
@@ -1211,7 +1212,7 @@ def _solve_fandipole(req: dict) -> dict:
 
     return {
         "geometry": "fan_dipole",
-        "wires": _fandipole_pack_wires(g, coeffs),
+        "wires": _fandipole_pack_wires(g, sim, coeffs),
         "feed_wire_index": 0,
         "feed_knot_index": 1,  # midpoint of the 3-knot feed wire record
         "z_in_re": float(z_in.real),
@@ -1241,7 +1242,8 @@ def _sweep_fandipole(
     design_freq_mhz = float(req.get("design_freq_mhz", 14.3))
     wire_radius = float(req.get("wire_radius", 0.0005))
     ground_on, _, _ = _read_ground(req)
-    sim = TriangularPySim(
+    sim = _make_pysim_sim(
+        req,
         wires=g["wires"],
         n_per_edge_per_wire=g["n_per_edge"],
         feed_wire_index=0,
@@ -1295,7 +1297,8 @@ def _sweep_inverted_v(
     wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
     arm_len = halfdriver_factor * wavelength_design / 4.0
 
-    sim = TriangularPySim(
+    sim = _make_pysim_sim(
+        req,
         wires=[_inverted_v_polyline(arm_len, angle_deg, z_offset=z_offset)],
         n_per_edge_per_wire=[[n_per_wire, n_per_wire]],
         feed_wire_index=0,
@@ -1340,7 +1343,8 @@ def _sweep_yagi(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[fl
         h_dir,
         z_offset=z_offset,
     )
-    sim = TriangularPySim(
+    sim = _make_pysim_sim(
+        req,
         wires=wires_polylines,
         n_per_edge_per_wire=[[n_per_wire]] * len(wires_polylines),
         feed_wire_index=0,
@@ -1378,7 +1382,8 @@ def _sweep_moxon(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[f
         n_per_wire,
         z_offset=z_offset,
     )
-    sim = TriangularPySim(
+    sim = _make_pysim_sim(
+        req,
         wires=[geom["driver"], geom["reflector"]],
         n_per_edge_per_wire=[geom["npe_driver"], geom["npe_reflector"]],
         feed_wire_index=0,
@@ -1417,7 +1422,8 @@ def _sweep_hexbeam(
         n_per_wire,
         z_offset=z_offset,
     )
-    sim = TriangularPySim(
+    sim = _make_pysim_sim(
+        req,
         wires=[geom["driver"], geom["reflector"]],
         n_per_edge_per_wire=[geom["npe_driver"], geom["npe_reflector"]],
         feed_wire_index=0,
@@ -1456,7 +1462,8 @@ def _sweep_hentenna(
         n_per_wire,
         z_offset=z_offset,
     )
-    sim = TriangularPySim(
+    sim = _make_pysim_sim(
+        req,
         wires=geom["wires"],
         n_per_edge_per_wire=geom["n_per_edge_per_wire"],
         feed_wire_index=geom["feed_wire_index"],

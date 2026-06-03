@@ -626,6 +626,37 @@ class TriangularPySim:
         driver_impedance = 1.0 / coeffs[m_center]
         return driver_impedance, coeffs
 
+    def currents_at_knots(self, coeffs):
+        """Per-wire complex current at every mesh knot, length = M_w knots per wire.
+
+        Tent basis k peaks at its single interior knot with value 1 and is zero
+        at every other knot, so the current at interior knot j of wire w is
+        just coeffs[basis_offsets[w] + j - 1]. Junction directional bases
+        (when present) carry value 1 at the wire-end knot of their (wire, end)
+        tuple — those contribute the endpoint currents at junctioned ends.
+        Free ends are zero (open-wire BC).
+        """
+        coeffs = np.asarray(coeffs)
+        geom = self._build_geometry()
+        per_wire = geom["per_wire"]
+        basis_offsets = geom["basis_offsets"]
+        n_interior = basis_offsets[-1]
+
+        out = []
+        for w_idx, pw in enumerate(per_wire):
+            n_knots = pw["arc_at_knot"].shape[0]
+            I = np.zeros(n_knots, dtype=np.complex128)
+            I[1:-1] = coeffs[basis_offsets[w_idx] : basis_offsets[w_idx + 1]]
+            out.append(I)
+
+        if self.junctions:
+            k = n_interior
+            for jw in self.junctions:
+                for w, end in jw:
+                    out[w][0 if end == "start" else -1] = coeffs[k]
+                    k += 1
+        return out
+
     def _assemble_Z_batch(self, J00, J10, J01, J11, td_all, geom, omega_array):
         """Batched (n_k, n_basis, n_basis) Z assembly, mirroring
         `_assemble_Z_single` but with a leading k-axis. Uses the C++

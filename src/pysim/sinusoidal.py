@@ -622,3 +622,53 @@ class SinusoidalPySim:
         Z_drive = 1.0 / I_feed
         self.Z_matrix = G
         return Z_drive, alpha
+
+    def currents_at_knots(self, alpha):
+        """Per-wire complex current sampled at every mesh knot.
+
+        Each basis j contributes (A_jn + B_jn sin(k·s_local) +
+        C_jn cos(k·s_local))·σ_jn on every segment n in its support, with
+        s_local measured from segment n's centre. The current at a knot
+        between adjacent segments is the average of the right-edge value
+        of the segment to its left and the left-edge value of the segment
+        to its right (continuity makes them equal up to round-off; the
+        average is the symmetric pick). Wire-endpoint knots use only the
+        adjacent segment.
+        """
+        alpha = np.asarray(alpha)
+        geom = self._build_geometry()
+        basis = self._basis_coefs(geom, self.k)
+        seg_h = geom["seg_h"]
+        n_segs = geom["n_segs"]
+
+        # Per-segment lookup of bases that touch it.
+        seg_bases = [[] for _ in range(n_segs)]
+        for j_basis, entries in enumerate(basis):
+            for seg_idx, A, B, C, sigma in entries:
+                seg_bases[seg_idx].append((j_basis, A, B, C, sigma))
+
+        def eval_at(seg_idx, s_local):
+            ks = self.k * s_local
+            sin_ks = np.sin(ks)
+            cos_ks = np.cos(ks)
+            I = 0.0 + 0.0j
+            for j_basis, A, B, C, sigma in seg_bases[seg_idx]:
+                I += alpha[j_basis] * sigma * (A + B * sin_ks + C * cos_ks)
+            return I
+
+        out = []
+        for w_idx in range(len(self.wires_polylines)):
+            first = geom["wire_first"][w_idx]
+            last = geom["wire_last"][w_idx]
+            n_w_segs = last - first + 1
+            I_knots = np.zeros(n_w_segs + 1, dtype=np.complex128)
+            I_knots[0] = eval_at(first, -0.5 * seg_h[first])
+            I_knots[-1] = eval_at(last, +0.5 * seg_h[last])
+            for kk in range(1, n_w_segs):
+                seg_left = first + kk - 1
+                seg_right = first + kk
+                I_l = eval_at(seg_left, +0.5 * seg_h[seg_left])
+                I_r = eval_at(seg_right, -0.5 * seg_h[seg_right])
+                I_knots[kk] = 0.5 * (I_l + I_r)
+            out.append(I_knots)
+        return out
