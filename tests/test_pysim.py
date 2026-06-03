@@ -839,6 +839,91 @@ def test_bspline_hentenna_enrichment_left_right_symmetry():
         )
 
 
+def test_sinusoidal_hentenna_left_right_symmetry():
+    """Hentenna is mirror-symmetric about y=0, so SinusoidalPySim's per-knot
+    currents on the cross-bar halves (wires 1 and 3) and on the upper /
+    lower rectangles (wires 2 and 4) must be mirror-symmetric to machine
+    precision.
+
+    Pre-fix bug: `currents_at_knots` multiplied the whole (A + B·sin +
+    C·cos) basis evaluation by σ instead of using the (σA, B, σC) effective
+    coefficients that `_assemble_Z` already uses. At σ=−1 junction
+    neighbours (K=2 junctions where both wires "start" or both "end" at
+    the node, plus the σ=−1 entries at K=3 junctions) this added a
+    spurious 2·B·sin(k·s) term, surfacing as asymmetric kinks at the
+    junction-adjacent knots. Caught here at modest N so any re-introduction
+    fails loudly.
+    """
+    C_LIGHT = 299_792_458.0
+    freq_mhz = 28.47
+    wavelength = C_LIGHT / (freq_mhz * 1e6)
+    width_factor = 0.1378
+    top_height_factor = 0.5081
+    mid_height_factor = 0.1094
+    eps = 0.05
+    half_w = wavelength * width_factor / 2
+    z_mid = wavelength * (mid_height_factor - top_height_factor)
+    z_bot = -wavelength * top_height_factor
+    A = (0.0, half_w, 0.0)
+    B_ = (0.0, half_w, z_mid)
+    F = (0.0, half_w, z_bot)
+    S = (0.0, eps, z_mid)
+    C_ = (0.0, -half_w, 0.0)
+    D = (0.0, -half_w, z_mid)
+    E_ = (0.0, -half_w, z_bot)
+    T = (0.0, -eps, z_mid)
+    wires = [
+        np.array([T, S], dtype=float),
+        np.array([S, B_], dtype=float),
+        np.array([B_, A, C_, D], dtype=float),
+        np.array([T, D], dtype=float),
+        np.array([D, E_, F, B_], dtype=float),
+    ]
+    junctions = [
+        [(0, "end"), (1, "start")],
+        [(0, "start"), (3, "start")],
+        [(1, "end"), (2, "start"), (4, "end")],
+        [(2, "end"), (3, "end"), (4, "start")],
+    ]
+    n = 21
+    sim = SinusoidalPySim(
+        wires=wires,
+        n_per_edge_per_wire=[[3], [n], [n, n, n], [n], [n, n, n]],
+        feed_wire_index=0,
+        feed_arclength=eps,
+        wavelength=wavelength,
+        wire_radius=0.0005,
+        nsegs=n,
+        junctions=junctions,
+    )
+    _, alpha = sim.compute_impedance()
+    knots = sim.currents_at_knots(alpha)
+
+    # Cross-bar halves wire 1 (S→B) vs wire 3 (T→D): same arc-direction
+    # mirror, so |I_w1[i]| should equal |I_w3[i]| for all i.
+    w1 = np.abs(knots[1])
+    w3 = np.abs(knots[3])
+    max_dev = float(np.max(np.abs(w1 - w3)))
+    assert max_dev < 1e-12, (
+        f"cross-bar halves max |Δ|I|| = {max_dev:.2e} — L/R asymmetry"
+    )
+
+    # Upper rectangle wire 2 (B→A→C→D) is its own mirror traversed
+    # backwards: |I_w2[i]| should equal |I_w2[-1-i]| for all i.
+    w2 = np.abs(knots[2])
+    max_dev = float(np.max(np.abs(w2 - w2[::-1])))
+    assert max_dev < 1e-12, (
+        f"upper rectangle max self-reversed |Δ|I|| = {max_dev:.2e} — L/R asymmetry"
+    )
+
+    # Lower rectangle wire 4 (D→E→F→B): same self-mirror story.
+    w4 = np.abs(knots[4])
+    max_dev = float(np.max(np.abs(w4 - w4[::-1])))
+    assert max_dev < 1e-12, (
+        f"lower rectangle max self-reversed |Δ|I|| = {max_dev:.2e} — L/R asymmetry"
+    )
+
+
 @pytest.mark.parametrize("nsegs", [21, 41, 101])
 def test_sinusoidal_dipole_matches_nec2(nsegs):
     """SinusoidalPySim implements NEC2's three-term basis (Eqs 43-64 of the

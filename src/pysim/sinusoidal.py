@@ -718,7 +718,16 @@ class SinusoidalPySim:
             cos_ks = np.cos(ks)
             I = 0.0 + 0.0j
             for j_basis, A, B, C, sigma in seg_bases[seg_idx]:
-                I += alpha[j_basis] * sigma * (A + B * sin_ks + C * cos_ks)
+                # In natural-tangent frame, I = σ·f^NEC(σ·s_local). With
+                # sin(σ·k·s) = σ·sin(k·s) and cos(σ·k·s) = cos(k·s):
+                #   I = σA + σ²·B·sin(k·s) + σ·C·cos(k·s)
+                #     = σA + B·sin(k·s) + σ·C·cos(k·s)
+                # Same effective (σA, B, σC) split as _assemble_Z's per-
+                # segment Galerkin testing. Multiplying the whole bracket
+                # by σ (the historical bug, fixed 2026-06) added a
+                # spurious 2·B·sin(k·s) term at σ=−1 junction neighbours,
+                # showing up as asymmetric kinks on the hentenna canvas.
+                I += alpha[j_basis] * (sigma * A + B * sin_ks + sigma * C * cos_ks)
             return I
 
         out = []
