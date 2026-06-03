@@ -8,3 +8,8 @@ dist/
 .venv/
 .pytest_cache/
 *.py~
+
+# Vendored NEC2 theory manual — large binary + extracted plain text,
+# available externally. Don't track any local copies.
+docs/nec2_theory_manual.pdf
+docs/nec2_theory_manual.txt
