@@ -187,10 +187,20 @@ def _compute_directivity_norm(out: dict, n_theta: int = 45, n_phi: int = 90) -> 
 
     mids, drs, i_mids = [], [], []
     for w in out["wires"]:
-        pts = np.asarray(w["knot_positions"], dtype=np.float64)
-        cur = np.asarray(w["knot_currents_re"], dtype=np.float64) + 1j * np.asarray(
-            w["knot_currents_im"], dtype=np.float64
-        )
+        # Prefer the finer-grained sample arrays (knot + segment-midpoint)
+        # when the model produced them, so non-tent bases get their intra-
+        # segment curvature integrated. Falls back to knot arrays for any
+        # backend that only ships knot data (PyNEC).
+        if "sample_positions" in w:
+            pts = np.asarray(w["sample_positions"], dtype=np.float64)
+            cur = np.asarray(
+                w["sample_currents_re"], dtype=np.float64
+            ) + 1j * np.asarray(w["sample_currents_im"], dtype=np.float64)
+        else:
+            pts = np.asarray(w["knot_positions"], dtype=np.float64)
+            cur = np.asarray(w["knot_currents_re"], dtype=np.float64) + 1j * np.asarray(
+                w["knot_currents_im"], dtype=np.float64
+            )
         drs.append(pts[1:] - pts[:-1])
         mids.append(0.5 * (pts[1:] + pts[:-1]))
         i_mids.append(0.5 * (cur[1:] + cur[:-1]))
@@ -270,10 +280,22 @@ def _compute_directivity_norm(out: dict, n_theta: int = 45, n_phi: int = 90) -> 
     out["directivity_norm"] = (4 * np.pi / p_rad) if p_rad > 0 else 0.0
 
 
-def _wire_record(knots: np.ndarray, currents: np.ndarray, label: str) -> dict:
+def _wire_record(
+    knots: np.ndarray,
+    currents: np.ndarray,
+    label: str,
+    sample_currents: np.ndarray | None = None,
+) -> dict:
     """Package one wire's record for the JSON response. `currents` is a
     length-M_w complex array (one per mesh knot) as produced by each
     model's `currents_at_knots(coeffs)` method.
+
+    When `sample_currents` is provided, additional `sample_positions` /
+    `sample_currents_re` / `sample_currents_im` arrays are attached at
+    knots-and-midpoints interleaved (2*N_seg + 1 entries per wire). This is
+    what `_compute_directivity_norm` and the frontend renderers consume to
+    resolve intra-segment basis curvature (B-spline d=2, sinusoidal three-
+    term) and the B-spline enrichment shape that vanishes at every knot.
     """
     currents = np.asarray(currents, dtype=np.complex128)
     if currents.shape[0] != knots.shape[0]:
@@ -281,12 +303,67 @@ def _wire_record(knots: np.ndarray, currents: np.ndarray, label: str) -> dict:
             f"_wire_record: currents/knots length mismatch "
             f"({currents.shape[0]} vs {knots.shape[0]})"
         )
-    return {
+    out = {
         "label": label,
         "knot_positions": knots.tolist(),
         "knot_currents_re": currents.real.tolist(),
         "knot_currents_im": currents.imag.tolist(),
     }
+    if sample_currents is not None:
+        sample_currents = np.asarray(sample_currents, dtype=np.complex128)
+        n_seg = knots.shape[0] - 1
+        expected = 2 * n_seg + 1
+        if sample_currents.shape[0] != expected:
+            raise ValueError(
+                f"_wire_record: sample_currents length {sample_currents.shape[0]} "
+                f"!= expected 2*N_seg+1 = {expected}"
+            )
+        sample_positions = np.empty((expected, 3), dtype=np.float64)
+        sample_positions[0::2] = knots
+        sample_positions[1::2] = 0.5 * (knots[:-1] + knots[1:])
+        out["sample_positions"] = sample_positions.tolist()
+        out["sample_currents_re"] = sample_currents.real.tolist()
+        out["sample_currents_im"] = sample_currents.imag.tolist()
+    return out
+
+
+def _sample_arc_for_wire(knots: np.ndarray) -> np.ndarray:
+    """Build interleaved (knot_arc, midpoint_arc, knot_arc, ...) array from a
+    wire's 3D knot positions. Segment lengths come from successive-knot
+    distances along the polyline.
+    """
+    knots = np.asarray(knots, dtype=np.float64)
+    h_seg = np.linalg.norm(knots[1:] - knots[:-1], axis=1)
+    arc_at_knot = np.concatenate([[0.0], np.cumsum(h_seg)])
+    mid_arc = 0.5 * (arc_at_knot[:-1] + arc_at_knot[1:])
+    sample_arc = np.empty(2 * h_seg.shape[0] + 1, dtype=np.float64)
+    sample_arc[0::2] = arc_at_knot
+    sample_arc[1::2] = mid_arc
+    return sample_arc
+
+
+def _pack_pysim_wires(sim, coeffs, knot_arrays, labels) -> list[dict]:
+    """Build wire records for every pysim wire with both knot-level currents
+    AND finer-grained mid-segment samples (one extra sample per segment).
+
+    Calls `sim.currents_at_knots(coeffs)` once for the knot values and once
+    more with an `s_array` of per-wire interleaved knot-and-midpoint arcs.
+    The model's basis is then evaluated exactly at the midpoints — including
+    the B-spline enrichment basis Φ_sing, which is zero at the knots but
+    non-zero in the interior.
+    """
+    sample_arcs = [_sample_arc_for_wire(k) for k in knot_arrays]
+    knot_currents = sim.currents_at_knots(coeffs)
+    sample_currents = sim.currents_at_knots(coeffs, s_array=sample_arcs)
+    return [
+        _wire_record(
+            np.asarray(knot_arrays[i]),
+            knot_currents[i],
+            labels[i],
+            sample_currents=sample_currents[i],
+        )
+        for i in range(len(knot_arrays))
+    ]
 
 
 def _yagi_polylines(
@@ -380,11 +457,10 @@ def _solve_inverted_v(req: dict) -> dict:
 
     knots = _polyline_knots(polyline, [n_per_wire, n_per_wire])
     feed_knot_index = n_per_wire  # apex (midpoint of polyline)
-    currents = sim.currents_at_knots(coeffs)
 
     return {
         "geometry": "inverted_v",
-        "wires": [_wire_record(knots, currents[0], "wire")],
+        "wires": _pack_pysim_wires(sim, coeffs, [knots], ["wire"]),
         "feed_wire_index": 0,
         "feed_knot_index": feed_knot_index,
         "z_in_re": float(z_in.real),
@@ -462,7 +538,6 @@ def _solve_yagi(req: dict) -> dict:
     solve_ms = (time.perf_counter() - t0) * 1e3
 
     N = n_per_wire
-    currents = sim.currents_at_knots(coeffs)
 
     def _knots_at(x_pos: float, half_len: float) -> np.ndarray:
         return np.column_stack(
@@ -473,18 +548,12 @@ def _solve_yagi(req: dict) -> dict:
             ]
         )
 
-    wires = [
-        _wire_record(_knots_at(0.0, h_driver), currents[0], "driver"),
-        _wire_record(_knots_at(-spacing_m, h_refl), currents[1], "reflector"),
-    ]
+    knot_arrays = [_knots_at(0.0, h_driver), _knots_at(-spacing_m, h_refl)]
+    labels = ["driver", "reflector"]
     for i in range(n_directors):
-        wires.append(
-            _wire_record(
-                _knots_at((i + 1) * dir_spacing_m, h_dir),
-                currents[2 + i],
-                f"director {i + 1}" if n_directors > 1 else "director",
-            )
-        )
+        knot_arrays.append(_knots_at((i + 1) * dir_spacing_m, h_dir))
+        labels.append(f"director {i + 1}" if n_directors > 1 else "director")
+    wires = _pack_pysim_wires(sim, coeffs, knot_arrays, labels)
 
     # Feed: TriangularPySim picks the interior knot of the driver closest to
     # the wire midpoint (= h_driver in arc length). For N segments / N+1 knots
@@ -650,7 +719,6 @@ def _solve_moxon(req: dict) -> dict:
 
     driver_knots = _polyline_knots(geom["driver"], geom["npe_driver"])
     refl_knots = _polyline_knots(geom["reflector"], geom["npe_reflector"])
-    currents = sim.currents_at_knots(coeffs)
 
     # Feed knot index on the driver wire: the interior knot the solver picked
     # (closest to feed_arclength). Recompute here to mark it in the response.
@@ -663,10 +731,9 @@ def _solve_moxon(req: dict) -> dict:
 
     return {
         "geometry": "moxon",
-        "wires": [
-            _wire_record(driver_knots, currents[0], "driver"),
-            _wire_record(refl_knots, currents[1], "reflector"),
-        ],
+        "wires": _pack_pysim_wires(
+            sim, coeffs, [driver_knots, refl_knots], ["driver", "reflector"]
+        ),
         "feed_wire_index": 0,
         "feed_knot_index": feed_knot_index,
         "z_in_re": float(z_in.real),
@@ -811,7 +878,6 @@ def _solve_hexbeam(req: dict) -> dict:
 
     driver_knots = _polyline_knots(geom["driver"], geom["npe_driver"])
     refl_knots = _polyline_knots(geom["reflector"], geom["npe_reflector"])
-    currents = sim.currents_at_knots(coeffs)
 
     arc_at_knot = np.concatenate(
         [[0.0], np.cumsum(np.linalg.norm(np.diff(driver_knots, axis=0), axis=1))]
@@ -822,10 +888,9 @@ def _solve_hexbeam(req: dict) -> dict:
 
     return {
         "geometry": "hexbeam",
-        "wires": [
-            _wire_record(driver_knots, currents[0], "driver"),
-            _wire_record(refl_knots, currents[1], "reflector"),
-        ],
+        "wires": _pack_pysim_wires(
+            sim, coeffs, [driver_knots, refl_knots], ["driver", "reflector"]
+        ),
         "feed_wire_index": 0,
         "feed_knot_index": feed_knot_index,
         "z_in_re": float(z_in.real),
@@ -996,12 +1061,8 @@ def _solve_hentenna(req: dict) -> dict:
         _polyline_knots(w, npe)
         for w, npe in zip(geom["wires"], geom["n_per_edge_per_wire"])
     ]
-    currents = sim.currents_at_knots(coeffs)
     wire_labels = ["feed", "cross_right", "upper", "cross_left", "lower"]
-    wire_records = [
-        _wire_record(knots, currents[i], label)
-        for i, (knots, label) in enumerate(zip(knots_per_wire, wire_labels))
-    ]
+    wire_records = _pack_pysim_wires(sim, coeffs, knots_per_wire, wire_labels)
 
     # Feed knot index on the feed wire: feed_arclength sits at the midpoint
     # of the single feed-gap edge, so it's the interior knot closest to
@@ -1163,28 +1224,23 @@ def _fandipole_pack_wires(g, sim, coeffs):
     n_bands = g["n_bands"]
     n_per = g["n_per_wire"]
     T, S = g["T"], g["S"]
-    currents = sim.currents_at_knots(coeffs)
-
-    feed_knots = _polyline_knots(np.array([T, S], dtype=float), [2])
-    wires_out = [_wire_record(feed_knots, currents[0], "feed")]
 
     def _band_label(i):
         if i < len(g["band_freqs_mhz"]):
             return f"{g['band_freqs_mhz'][i]:.2f} MHz"
         return f"band {i} ({g['band_lengths_m'][i]:.2f} m)"
 
-    arm_idx = 1
+    knot_arrays = [_polyline_knots(np.array([T, S], dtype=float), [2])]
+    labels = ["feed"]
     for side in ("+y", "-y"):
         for i in range(n_bands):
             if side == "+y":
                 path = [g["S"], g["A_pos"][i], g["B_pos"][i]]
             else:
                 path = [g["T"], g["A_neg"][i], g["B_neg"][i]]
-            knots = _polyline_knots(np.array(path), [n_per, n_per])
-            label = f"{_band_label(i)} {side}"
-            wires_out.append(_wire_record(knots, currents[arm_idx], label))
-            arm_idx += 1
-    return wires_out
+            knot_arrays.append(_polyline_knots(np.array(path), [n_per, n_per]))
+            labels.append(f"{_band_label(i)} {side}")
+    return _pack_pysim_wires(sim, coeffs, knot_arrays, labels)
 
 
 def _solve_fandipole(req: dict) -> dict:

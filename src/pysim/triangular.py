@@ -626,7 +626,7 @@ class TriangularPySim:
         driver_impedance = 1.0 / coeffs[m_center]
         return driver_impedance, coeffs
 
-    def currents_at_knots(self, coeffs):
+    def currents_at_knots(self, coeffs, s_array=None):
         """Per-wire complex current at every mesh knot, length = M_w knots per wire.
 
         Tent basis k peaks at its single interior knot with value 1 and is zero
@@ -635,6 +635,12 @@ class TriangularPySim:
         (when present) carry value 1 at the wire-end knot of their (wire, end)
         tuple — those contribute the endpoint currents at junctioned ends.
         Free ends are zero (open-wire BC).
+
+        When `s_array` is provided as a list of 1D arc-length arrays (one per
+        wire), the basis sum is evaluated at those arc positions instead of
+        the mesh knots. Tent basis is piecewise linear between adjacent knots,
+        so this reduces to a linear interpolation of the knot values along
+        the wire's cumulative-arc parameterization.
         """
         coeffs = np.asarray(coeffs)
         geom = self._build_geometry()
@@ -655,7 +661,19 @@ class TriangularPySim:
                 for w, end in jw:
                     out[w][0 if end == "start" else -1] = coeffs[k]
                     k += 1
-        return out
+
+        if s_array is None:
+            return out
+
+        sampled = []
+        for w_idx, sv in enumerate(s_array):
+            arc = per_wire[w_idx]["arc_at_knot"]
+            knot_I = out[w_idx]
+            sv = np.asarray(sv, dtype=np.float64)
+            Ire = np.interp(sv, arc, knot_I.real)
+            Iim = np.interp(sv, arc, knot_I.imag)
+            sampled.append(Ire + 1j * Iim)
+        return sampled
 
     def _assemble_Z_batch(self, J00, J10, J01, J11, td_all, geom, omega_array):
         """Batched (n_k, n_basis, n_basis) Z assembly, mirroring

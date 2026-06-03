@@ -5,6 +5,11 @@ type Wire = {
   knot_positions: [number, number, number][];
   knot_currents_re: number[];
   knot_currents_im: number[];
+  // Optional finer-grained samples: knots interleaved with segment midpoints
+  // (length 2*N_seg + 1). Present from pysim backends, absent from PyNEC.
+  sample_positions?: [number, number, number][];
+  sample_currents_re?: number[];
+  sample_currents_im?: number[];
 };
 
 type Geometry = "inverted_v" | "yagi" | "moxon" | "hexbeam" | "fan_dipole" | "hentenna";
@@ -2299,9 +2304,17 @@ function FarFieldChart({
     const epsRe = result.ground_eps_r ?? 1;
     const epsIm = -(result.ground_sigma ?? 0) / (omega * EPS0);
 
-    // Flatten per-segment quantities across every wire.
+    // Flatten per-segment quantities across every wire. Prefer the finer-
+    // grained sample arrays (knots interleaved with segment midpoints) when
+    // the backend supplies them; that way non-tent bases (B-spline d=2,
+    // sinusoidal three-term) and the B-spline enrichment shape — all of
+    // which carry intra-segment curvature the knot-only samples drop — get
+    // resolved at twice the cadence. PyNEC stays on the knot path.
     let nSeg = 0;
-    for (const w of result.wires) nSeg += w.knot_positions.length - 1;
+    for (const w of result.wires) {
+      const pts = w.sample_positions ?? w.knot_positions;
+      nSeg += pts.length - 1;
+    }
     const dx = new Float64Array(nSeg);
     const dy = new Float64Array(nSeg);
     const dz = new Float64Array(nSeg);
@@ -2312,12 +2325,12 @@ function FarFieldChart({
     const Iim = new Float64Array(nSeg);
     let off = 0;
     for (const w of result.wires) {
-      const knots = w.knot_positions;
-      const cre = w.knot_currents_re;
-      const cim = w.knot_currents_im;
-      for (let n = 0; n < knots.length - 1; n++) {
-        const a = knots[n];
-        const b = knots[n + 1];
+      const pts = w.sample_positions ?? w.knot_positions;
+      const cre = w.sample_currents_re ?? w.knot_currents_re;
+      const cim = w.sample_currents_im ?? w.knot_currents_im;
+      for (let n = 0; n < pts.length - 1; n++) {
+        const a = pts[n];
+        const b = pts[n + 1];
         dx[off] = b[0] - a[0];
         dy[off] = b[1] - a[1];
         dz[off] = b[2] - a[2];
@@ -2835,10 +2848,6 @@ function CurrentCanvas({
       const pad = 50 * s;
       const barReserveBottom = 40 * s;
       const FILL = 0.85;
-      const scale = FILL * Math.min(
-        (w - 2 * pad) / (0.6 * lambdaDesign),
-        (h - pad - barReserveBottom) / (0.5 * lambdaDesign),
-      );
 
       // Camera projection: pick the two world axes to map to canvas
       // (horizontal, vertical). The hidden axis is the camera ray. App.tsx
@@ -2858,8 +2867,28 @@ function CurrentCanvas({
           if (p[vertAxis] > vMax) vMax = p[vertAxis];
         }
       }
+
+      // When ground is enabled and the vertical projection axis is z, expand
+      // the visible vertical range to include z=0 so the ground reference
+      // line lands inside the canvas. Without this, high antennas
+      // (height_m ≳ λ/2) push the ground line off-screen.
+      let vEffMin = vMin, vEffMax = vMax;
+      if (result.ground && vertAxis === 2) {
+        vEffMin = Math.min(vMin, 0);
+        vEffMax = Math.max(vMax, 0);
+      }
+      // Vertical span used to size the canvas. Floor at the wavelength
+      // worst-case so small antennas don't render comically large; grow with
+      // the ground-adjusted antenna span so high antennas zoom out enough
+      // to fit the ground line.
+      const vSpanEff = Math.max(vEffMax - vEffMin, 0.5 * lambdaDesign);
+      const scale = FILL * Math.min(
+        (w - 2 * pad) / (0.6 * lambdaDesign),
+        (h - pad - barReserveBottom) / vSpanEff,
+      );
+
       const hC = (hMin + hMax) / 2;
-      const vC = (vMin + vMax) / 2;
+      const vC = (vEffMin + vEffMax) / 2;
       const cx = w / 2;
       const cy = h / 2;
       const project = (p: [number, number, number]) => ({
@@ -2867,13 +2896,39 @@ function CurrentCanvas({
         y: cy + (vC - p[vertAxis]) * scale, // higher vert value = higher on screen
       });
 
-      // Global current magnitude so the per-wire colors share a scale.
+      // Ground reference line at world z=0, drawn only on side projections
+      // (vertAxis === 2) when the backend has ground enabled. Cosmetic — the
+      // math is correct regardless; this just removes the "where is the
+      // ground" guessing game from the side view. vC was adjusted above to
+      // keep this on-canvas, so no bounds check needed here.
+      if (result.ground && vertAxis === 2) {
+        const groundY = cy + vC * scale;
+        ctx!.strokeStyle = "rgba(140, 110, 70, 0.55)";
+        ctx!.lineWidth = 1;
+        ctx!.setLineDash([6, 4]);
+        ctx!.beginPath();
+        ctx!.moveTo(0, groundY);
+        ctx!.lineTo(w, groundY);
+        ctx!.stroke();
+        ctx!.setLineDash([]);
+        ctx!.fillStyle = "rgba(140, 110, 70, 0.85)";
+        ctx!.font = `${Math.max(8, Math.round(10 * s))}px ui-monospace, monospace`;
+        ctx!.fillText("ground (z = 0)", 8 * s, groundY - 4 * s);
+      }
+
+      // Global current magnitude — use sample arrays when available so the
+      // shared color scale catches mid-segment peaks (B-spline d=2 quadratic
+      // curvature, sinusoidal three-term, B-spline enrichment dip). Falls
+      // back to knot arrays for backends that don't ship samples (PyNEC).
       let magMaxGlobal = 1e-30;
+      const perWirePts: [number, number, number][][] = [];
       const perWireMags: number[][] = [];
       for (const wire of result.wires) {
-        const m = wire.knot_currents_re.map((r, i) =>
-          Math.hypot(r, wire.knot_currents_im[i]),
-        );
+        const pts = wire.sample_positions ?? wire.knot_positions;
+        const cre = wire.sample_currents_re ?? wire.knot_currents_re;
+        const cim = wire.sample_currents_im ?? wire.knot_currents_im;
+        const m = cre.map((r, i) => Math.hypot(r, cim[i]));
+        perWirePts.push(pts);
         perWireMags.push(m);
         for (const v of m) if (v > magMaxGlobal) magMaxGlobal = v;
       }
@@ -2888,12 +2943,12 @@ function CurrentCanvas({
       const feedWireIdx = result.feed_wire_index;
       for (let wi = 0; wi < result.wires.length; wi++) {
         const wire = result.wires[wi];
-        const knots = wire.knot_positions;
+        const pts = perWirePts[wi];
         const mags = perWireMags[wi];
 
-        for (let i = 0; i < knots.length - 1; i++) {
-          const a = project(knots[i]);
-          const b = project(knots[i + 1]);
+        for (let i = 0; i < pts.length - 1; i++) {
+          const a = project(pts[i]);
+          const b = project(pts[i + 1]);
           if (showHeatmap) {
             const m = (0.5 * (mags[i] + mags[i + 1])) / magMaxGlobal;
             ctx!.strokeStyle = currentColor(m);
@@ -2912,22 +2967,25 @@ function CurrentCanvas({
         // Current-waveform envelope: if this is the feed wire (and the feed
         // isn't at an end), split at the feed knot so a V's per-arm tangent
         // flip is respected. Otherwise draw one continuous envelope.
+        // feed_knot_index lives in knot-array space; in sample space (knots
+        // interleaved with midpoints) it maps to 2*feed_knot_index.
         if (showEnvelope) {
           ctx!.strokeStyle = "rgba(118, 208, 255, 0.7)";
           ctx!.lineWidth = 1.5 * s;
-          const lastIdx = knots.length - 1;
-          const feedIdx = result.feed_knot_index;
+          const lastIdx = pts.length - 1;
+          const hasSamples = wire.sample_positions != null;
+          const feedIdx = result.feed_knot_index * (hasSamples ? 2 : 1);
           if (wi === feedWireIdx && feedIdx > 0 && feedIdx < lastIdx) {
-            drawArmEnvelope(ctx!, knots, mags, magMaxGlobal, project, 0, feedIdx, envScale);
-            drawArmEnvelope(ctx!, knots, mags, magMaxGlobal, project, feedIdx, lastIdx, envScale);
+            drawArmEnvelope(ctx!, pts, mags, magMaxGlobal, project, 0, feedIdx, envScale);
+            drawArmEnvelope(ctx!, pts, mags, magMaxGlobal, project, feedIdx, lastIdx, envScale);
           } else {
-            drawArmEnvelope(ctx!, knots, mags, magMaxGlobal, project, 0, lastIdx, envScale);
+            drawArmEnvelope(ctx!, pts, mags, magMaxGlobal, project, 0, lastIdx, envScale);
           }
         }
 
         // Wire label near the leftmost knot for multi-wire geometries.
         if (result.wires.length > 1) {
-          const lp = project(knots[0]);
+          const lp = project(wire.knot_positions[0]);
           ctx!.fillStyle = "#7b8493";
           ctx!.font = `${labelFontPx}px ui-monospace, monospace`;
           ctx!.fillText(wire.label, lp.x - 8 * s - ctx!.measureText(wire.label).width, lp.y + 3 * s);

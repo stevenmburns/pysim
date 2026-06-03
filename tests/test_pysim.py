@@ -924,6 +924,58 @@ def test_sinusoidal_hentenna_left_right_symmetry():
     )
 
 
+@pytest.mark.parametrize(
+    "model_cls,kwargs",
+    [
+        (TriangularPySim, {}),
+        (SinusoidalPySim, {}),
+        (BSplinePySim, {"degree": 2}),
+    ],
+)
+def test_currents_at_knots_s_array_matches_default_at_knots(model_cls, kwargs):
+    """`currents_at_knots(coeffs, s_array=[knot_arcs_per_wire])` must agree
+    bit-for-bit with the default `currents_at_knots(coeffs)` at the mesh
+    knots, for every basis family. Guards against future basis-evaluation
+    drift between the two paths.
+    """
+    wires = [np.array([[0.0, 0.0, -0.24], [0.0, 0.0, 0.24]])]
+    nsegs = 21
+    sim = model_cls(
+        wires=wires,
+        n_per_edge_per_wire=[[nsegs]],
+        wavelength=1.0,
+        wire_radius=1e-3,
+        nsegs=nsegs,
+        **kwargs,
+    )
+    _, coeffs = sim.compute_impedance()
+    knot_default = sim.currents_at_knots(coeffs)
+
+    geom = sim._build_geometry()
+    if isinstance(sim, SinusoidalPySim):
+        first = geom["wire_first"][0]
+        last = geom["wire_last"][0]
+        wire_h = geom["seg_h"][first : last + 1]
+        arc_at_knot = np.concatenate([[0.0], np.cumsum(wire_h)])
+    else:
+        arc_at_knot = geom["per_wire"][0]["arc_at_knot"]
+
+    knot_via_s = sim.currents_at_knots(coeffs, s_array=[arc_at_knot])
+    np.testing.assert_allclose(knot_via_s[0], knot_default[0], rtol=0, atol=1e-12)
+
+    # Sampling at quarter-points should pass through the knot values exactly
+    # at every even-indexed sample (where samples = knots interleaved with
+    # midpoints).
+    mid_arc = 0.5 * (arc_at_knot[:-1] + arc_at_knot[1:])
+    sample_arc = np.empty(2 * mid_arc.shape[0] + 1)
+    sample_arc[0::2] = arc_at_knot
+    sample_arc[1::2] = mid_arc
+    sample_I = sim.currents_at_knots(coeffs, s_array=[sample_arc])[0]
+    np.testing.assert_allclose(sample_I[0::2], knot_default[0], rtol=0, atol=1e-12)
+    # Mid-segment samples should be finite and on roughly the right scale.
+    assert np.isfinite(sample_I).all()
+
+
 @pytest.mark.parametrize("nsegs", [21, 41, 101])
 def test_sinusoidal_dipole_matches_nec2(nsegs):
     """SinusoidalPySim implements NEC2's three-term basis (Eqs 43-64 of the

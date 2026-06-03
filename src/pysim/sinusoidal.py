@@ -688,7 +688,7 @@ class SinusoidalPySim:
         self.omega = omega_save
         return z_out
 
-    def currents_at_knots(self, alpha):
+    def currents_at_knots(self, alpha, s_array=None):
         """Per-wire complex current sampled at every mesh knot.
 
         Each basis j contributes (A_jn + B_jn sin(k·s_local) +
@@ -699,6 +699,14 @@ class SinusoidalPySim:
         to its right (continuity makes them equal up to round-off; the
         average is the symmetric pick). Wire-endpoint knots use only the
         adjacent segment.
+
+        When `s_array` is provided as a list of 1D arc-length arrays (one per
+        wire), evaluates the basis sum at those arc positions instead of the
+        mesh knots. Arc is measured from the wire's start (s=0) to its end
+        (s=Σ h_seg). Samples that fall exactly on an interior knot return the
+        symmetric average of the two adjacent segments (same as the default
+        knot path); samples in the interior of a segment evaluate the basis
+        directly on that segment.
         """
         alpha = np.asarray(alpha)
         geom = self._build_geometry()
@@ -730,19 +738,59 @@ class SinusoidalPySim:
                 I += alpha[j_basis] * (sigma * A + B * sin_ks + sigma * C * cos_ks)
             return I
 
-        out = []
-        for w_idx in range(len(self.wires_polylines)):
+        if s_array is None:
+            out = []
+            for w_idx in range(len(self.wires_polylines)):
+                first = geom["wire_first"][w_idx]
+                last = geom["wire_last"][w_idx]
+                n_w_segs = last - first + 1
+                I_knots = np.zeros(n_w_segs + 1, dtype=np.complex128)
+                I_knots[0] = eval_at(first, -0.5 * seg_h[first])
+                I_knots[-1] = eval_at(last, +0.5 * seg_h[last])
+                for kk in range(1, n_w_segs):
+                    seg_left = first + kk - 1
+                    seg_right = first + kk
+                    I_l = eval_at(seg_left, +0.5 * seg_h[seg_left])
+                    I_r = eval_at(seg_right, -0.5 * seg_h[seg_right])
+                    I_knots[kk] = 0.5 * (I_l + I_r)
+                out.append(I_knots)
+            return out
+
+        sampled = []
+        for w_idx, sv in enumerate(s_array):
+            sv = np.asarray(sv, dtype=np.float64)
             first = geom["wire_first"][w_idx]
             last = geom["wire_last"][w_idx]
             n_w_segs = last - first + 1
-            I_knots = np.zeros(n_w_segs + 1, dtype=np.complex128)
-            I_knots[0] = eval_at(first, -0.5 * seg_h[first])
-            I_knots[-1] = eval_at(last, +0.5 * seg_h[last])
-            for kk in range(1, n_w_segs):
-                seg_left = first + kk - 1
-                seg_right = first + kk
-                I_l = eval_at(seg_left, +0.5 * seg_h[seg_left])
-                I_r = eval_at(seg_right, -0.5 * seg_h[seg_right])
-                I_knots[kk] = 0.5 * (I_l + I_r)
-            out.append(I_knots)
-        return out
+            wire_h = seg_h[first : last + 1]
+            arc_at_knot = np.concatenate([[0.0], np.cumsum(wire_h)])
+            wire_arc = float(arc_at_knot[-1])
+            I_out = np.zeros(sv.shape[0], dtype=np.complex128)
+            for i, s in enumerate(sv):
+                s_clipped = max(0.0, min(wire_arc, float(s)))
+                eps = 1e-12 * max(wire_arc, 1.0)
+                # Interior-knot symmetric average for continuity.
+                knot_hit = np.searchsorted(arc_at_knot, s_clipped)
+                if (
+                    0 < knot_hit < n_w_segs
+                    and abs(s_clipped - arc_at_knot[knot_hit]) <= eps
+                ):
+                    seg_left = first + knot_hit - 1
+                    seg_right = first + knot_hit
+                    I_l = eval_at(seg_left, +0.5 * seg_h[seg_left])
+                    I_r = eval_at(seg_right, -0.5 * seg_h[seg_right])
+                    I_out[i] = 0.5 * (I_l + I_r)
+                    continue
+                # Locate the containing segment and evaluate at s_local
+                # measured from that segment's centre.
+                seg_in_wire = int(
+                    np.searchsorted(arc_at_knot, s_clipped, side="right") - 1
+                )
+                seg_in_wire = max(0, min(n_w_segs - 1, seg_in_wire))
+                seg_global = first + seg_in_wire
+                s_local = (s_clipped - arc_at_knot[seg_in_wire]) - 0.5 * seg_h[
+                    seg_global
+                ]
+                I_out[i] = eval_at(seg_global, s_local)
+            sampled.append(I_out)
+        return sampled
