@@ -1531,6 +1531,299 @@ assemble_Z_enrich(
 }
 
 
+// Sinusoidal-basis (NEC2 three-term) tangential-field tensor.
+//
+// For each (m=obs, n=src) pair of segments, compute the three scalar tensors
+//   Phi_const[m, n] = ŝ_m · E^const_n(c_m)
+//   Phi_sin  [m, n] = ŝ_m · E^sin_n  (c_m)
+//   Phi_cos  [m, n] = ŝ_m · E^cos_n  (c_m)
+// where the source's local frame is centered on segment n with z-axis along
+// src_tangents[n]; the const/sin/cos sources are I(z')=1 / sin(k z') /
+// cos(k z') over z' ∈ [-H_n, +H_n], H_n = h_n/2. Result is in NEC's natural-
+// arc convention (σ accounting is the caller's job).
+//
+// Closed forms for the const-source `int G_0 dz'` are 1/r_0 singularity
+// extraction: ∫ 1/r_0 dz' = arcsinh((H-z)/ρ) - arcsinh((-H-z)/ρ); regular
+// remainder via Gauss-Legendre on the (G_0 - 1/r_0) integrand. Sin/cos
+// sources are fully closed-form per Eqs 76-79 of the LLNL theory manual
+// (mirrored by the numpy reference in src/pysim/sinusoidal.py _field_tensor).
+//
+// Parallelism: each (m, n) pair is independent. OpenMP collapse(2) over the
+// (m, n) grid; per-n constants (H_n, sin(kH_n), cos(kH_n)) are precomputed
+// outside the parallel region.
+static std::tuple<py::array_t<std::complex<double>>,
+                  py::array_t<std::complex<double>>,
+                  py::array_t<std::complex<double>>>
+sinusoidal_field_tensor(
+    py::array_t<double, py::array::c_style | py::array::forcecast> obs_centers,
+    py::array_t<double, py::array::c_style | py::array::forcecast> obs_tangents,
+    py::array_t<double, py::array::c_style | py::array::forcecast> src_centers,
+    py::array_t<double, py::array::c_style | py::array::forcecast> src_tangents,
+    py::array_t<double, py::array::c_style | py::array::forcecast> seg_h,
+    double a, double k, double eta,
+    py::array_t<double, py::array::c_style | py::array::forcecast> gl_t,
+    py::array_t<double, py::array::c_style | py::array::forcecast> gl_w
+) {
+    auto oc = obs_centers.unchecked<2>();
+    auto ot = obs_tangents.unchecked<2>();
+    auto sc = src_centers.unchecked<2>();
+    auto st = src_tangents.unchecked<2>();
+    auto sh = seg_h.unchecked<1>();
+    auto glt = gl_t.unchecked<1>();
+    auto glw = gl_w.unchecked<1>();
+
+    if (oc.shape(1) != 3 || ot.shape(1) != 3 ||
+        sc.shape(1) != 3 || st.shape(1) != 3) {
+        throw std::runtime_error("center/tangent arrays must have shape (N, 3)");
+    }
+    if (oc.shape(0) != ot.shape(0)) {
+        throw std::runtime_error("obs_centers and obs_tangents must have matching N");
+    }
+    if (sc.shape(0) != st.shape(0) || sc.shape(0) != sh.shape(0)) {
+        throw std::runtime_error("src arrays must all have matching N");
+    }
+    if (glt.shape(0) != glw.shape(0)) {
+        throw std::runtime_error("gl_t and gl_w must have matching length");
+    }
+
+    size_t M = oc.shape(0);
+    size_t N = sc.shape(0);
+    size_t n_qp = glt.shape(0);
+
+    py::array_t<std::complex<double>> Phi_const({M, N});
+    py::array_t<std::complex<double>> Phi_sin({M, N});
+    py::array_t<std::complex<double>> Phi_cos({M, N});
+    auto pc = Phi_const.mutable_unchecked<2>();
+    auto ps = Phi_sin.mutable_unchecked<2>();
+    auto pco = Phi_cos.mutable_unchecked<2>();
+
+    // Per-source-segment precompute: H_n = h_n/2, sin(kH_n), cos(kH_n).
+    std::vector<double> H_n(N), sin_kH(N), cos_kH(N);
+    for (size_t n = 0; n < N; n++) {
+        H_n[n] = 0.5 * sh(n);
+        sin_kH[n] = std::sin(k * H_n[n]);
+        cos_kH[n] = std::cos(k * H_n[n]);
+    }
+
+    // Cache GL nodes/weights in std::vector so the per-pair loops avoid
+    // bouncing through the pybind11 unchecked accessor in the inner loop.
+    std::vector<double> glt_v(n_qp), glw_v(n_qp);
+    for (size_t q = 0; q < n_qp; q++) {
+        glt_v[q] = glt(q);
+        glw_v[q] = glw(q);
+    }
+
+    // Scalar prefactors. pref_z = +j eta / (4 pi k); pref_rho_const has the
+    // same form (the per-pair 1/rho_eval scaling lives inside pref_rho).
+    const double four_pi_k = 4.0 * M_PI * k;
+    const double pref_z_im = eta / four_pi_k;
+    const double pref_rho_const_im = -eta / four_pi_k;
+    const double a_sq = a * a;
+
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (size_t m = 0; m < M; m++) {
+        for (size_t n = 0; n < N; n++) {
+            double cmx = oc(m, 0), cmy = oc(m, 1), cmz = oc(m, 2);
+            double cnx = sc(n, 0), cny = sc(n, 1), cnz = sc(n, 2);
+            double tnx = st(n, 0), tny = st(n, 1), tnz = st(n, 2);
+            double tmx = ot(m, 0), tmy = ot(m, 1), tmz = ot(m, 2);
+
+            // rvec = c_m - c_n; z_eval = rvec · t_src; rho_vec = rvec - z*t_src.
+            double rvx = cmx - cnx, rvy = cmy - cny, rvz = cmz - cnz;
+            double z_eval = rvx * tnx + rvy * tny + rvz * tnz;
+            double rho_vx = rvx - z_eval * tnx;
+            double rho_vy = rvy - z_eval * tny;
+            double rho_vz = rvz - z_eval * tnz;
+            double rho_axis = std::sqrt(rho_vx*rho_vx + rho_vy*rho_vy + rho_vz*rho_vz);
+            double rho_eval = std::sqrt(rho_axis*rho_axis + a_sq);
+            double td = tmx*tnx + tmy*tny + tmz*tnz;
+            double rho_dot_tobs = rho_vx*tmx + rho_vy*tmy + rho_vz*tmz;
+            double rho_proj_factor = rho_dot_tobs / rho_eval;
+
+            double H = H_n[n];
+            double dz2 = z_eval - H;
+            double dz1 = z_eval + H;
+            double r0_2 = std::sqrt(rho_eval*rho_eval + dz2*dz2);
+            double r0_1 = std::sqrt(rho_eval*rho_eval + dz1*dz1);
+
+            // G0_2, G0_1 = exp(-jk r0)/r0 (complex)
+            double phase_2 = -k * r0_2;
+            double phase_1 = -k * r0_1;
+            double cph_2 = std::cos(phase_2), sph_2 = std::sin(phase_2);
+            double cph_1 = std::cos(phase_1), sph_1 = std::sin(phase_1);
+            double inv_r0_2 = 1.0 / r0_2;
+            double inv_r0_1 = 1.0 / r0_1;
+            double G0_2_re = cph_2 * inv_r0_2, G0_2_im = sph_2 * inv_r0_2;
+            double G0_1_re = cph_1 * inv_r0_1, G0_1_im = sph_1 * inv_r0_1;
+
+            // (1 + j k r0) / r0² split into re/im
+            double inv_r0_2_sq = inv_r0_2 * inv_r0_2;
+            double inv_r0_1_sq = inv_r0_1 * inv_r0_1;
+            double one_jkr_2_re = inv_r0_2_sq;
+            double one_jkr_2_im = k * r0_2 * inv_r0_2_sq;
+            double one_jkr_1_re = inv_r0_1_sq;
+            double one_jkr_1_im = k * r0_1 * inv_r0_1_sq;
+
+            // ---- Const source -------------------------------------------------
+            // Erho_const = pref_rho_const * (
+            //     (1 + j k r0_2) * rho_eval * G0_2 / r0_2²
+            //   - (1 + j k r0_1) * rho_eval * G0_1 / r0_1²
+            // )
+            // Let A_2 = (1 + jk r0_2) / r0_2² = one_jkr_2 (complex).
+            // term_2 = A_2 * G0_2 — complex product.
+            auto cmul = [](double ar, double ai, double br, double bi,
+                           double &cr, double &ci) {
+                cr = ar*br - ai*bi;
+                ci = ar*bi + ai*br;
+            };
+
+            double term_const2_re, term_const2_im;
+            cmul(one_jkr_2_re, one_jkr_2_im, G0_2_re, G0_2_im,
+                 term_const2_re, term_const2_im);
+            double term_const1_re, term_const1_im;
+            cmul(one_jkr_1_re, one_jkr_1_im, G0_1_re, G0_1_im,
+                 term_const1_re, term_const1_im);
+            double rho_diff_re = rho_eval * (term_const2_re - term_const1_re);
+            double rho_diff_im = rho_eval * (term_const2_im - term_const1_im);
+            // pref_rho_const = j * pref_rho_const_im  (pure imaginary scalar)
+            double Erho_const_re = -pref_rho_const_im * rho_diff_im;
+            double Erho_const_im =  pref_rho_const_im * rho_diff_re;
+
+            // u2, u1, int_inv_r0
+            double inv_rho_eval = 1.0 / rho_eval;
+            double u2 = (H - z_eval) * inv_rho_eval;
+            double u1 = (-H - z_eval) * inv_rho_eval;
+            double int_inv_r0 = std::asinh(u2) - std::asinh(u1);
+
+            // Quadrature for the smooth remainder of int_G0:
+            //   reg(q) = (exp(-jk r0_q) - 1) / r0_q,   r0_q = sqrt(ρ² + (z - H gx[q])²)
+            //   int_reg = H * Σ_q reg(q) * gw[q]
+            double int_reg_re = 0.0, int_reg_im = 0.0;
+            for (size_t q = 0; q < n_qp; q++) {
+                double z_q = H * glt_v[q];
+                double dz_q = z_eval - z_q;
+                double r0_q = std::sqrt(rho_eval*rho_eval + dz_q*dz_q);
+                double phase_q = -k * r0_q;
+                double cph_q = std::cos(phase_q);
+                double sph_q = std::sin(phase_q);
+                double inv_r0_q = 1.0 / r0_q;
+                // (exp(jphase) - 1) / r0
+                double reg_re = (cph_q - 1.0) * inv_r0_q;
+                double reg_im = sph_q * inv_r0_q;
+                int_reg_re += reg_re * glw_v[q];
+                int_reg_im += reg_im * glw_v[q];
+            }
+            int_reg_re *= H;
+            int_reg_im *= H;
+            double int_G0_re = int_inv_r0 + int_reg_re;
+            double int_G0_im = int_reg_im;
+
+            // Ez_const_boundary = (1+jk r0_2) dz2 G0_2 / r0_2² - (1+jk r0_1) dz1 G0_1 / r0_1²
+            double Ez_boundary_re = dz2 * term_const2_re - dz1 * term_const1_re;
+            double Ez_boundary_im = dz2 * term_const2_im - dz1 * term_const1_im;
+            double k_sq = k * k;
+            // Ez_const = -pref_z * (Ez_boundary + k² int_G0). pref_z = j * pref_z_im.
+            double inside_re = Ez_boundary_re + k_sq * int_G0_re;
+            double inside_im = Ez_boundary_im + k_sq * int_G0_im;
+            // Multiply by -j * pref_z_im
+            double Ez_const_re =  pref_z_im * inside_im;
+            double Ez_const_im = -pref_z_im * inside_re;
+
+            // ---- Sine source (Eq 76, 77) --------------------------------------
+            double sin2 = sin_kH[n];
+            double cos2 = cos_kH[n];
+            double sin1 = -sin2;
+            double cos1 =  cos2;
+
+            // bracket_sin_2 = G0_2 * (k dz2 cos2 + (1 - dz2² (1+jk r0_2)/r0_2²) sin2)
+            double inner_2_re = 1.0 - dz2*dz2 * one_jkr_2_re;
+            double inner_2_im =     - dz2*dz2 * one_jkr_2_im;
+            double bracket_sin_2_re = k*dz2*cos2 + inner_2_re*sin2;
+            double bracket_sin_2_im =              inner_2_im*sin2;
+            double bsin2_re, bsin2_im;
+            cmul(G0_2_re, G0_2_im, bracket_sin_2_re, bracket_sin_2_im,
+                 bsin2_re, bsin2_im);
+
+            double inner_1_re = 1.0 - dz1*dz1 * one_jkr_1_re;
+            double inner_1_im =     - dz1*dz1 * one_jkr_1_im;
+            double bracket_sin_1_re = k*dz1*cos1 + inner_1_re*sin1;
+            double bracket_sin_1_im =              inner_1_im*sin1;
+            double bsin1_re, bsin1_im;
+            cmul(G0_1_re, G0_1_im, bracket_sin_1_re, bracket_sin_1_im,
+                 bsin1_re, bsin1_im);
+            double Erho_sin_inner_re = bsin2_re - bsin1_re;
+            double Erho_sin_inner_im = bsin2_im - bsin1_im;
+            // pref_rho = -j eta / (4 pi k rho_eval)
+            double pref_rho_im = pref_rho_const_im * inv_rho_eval;
+            double Erho_sin_re = -pref_rho_im * Erho_sin_inner_im;
+            double Erho_sin_im =  pref_rho_im * Erho_sin_inner_re;
+
+            // bracket_sin_z = G0 * (k cos - (1+jk r0) dz / r0² sin)
+            double bracket_sin_z_2_re = k*cos2 - dz2*one_jkr_2_re*sin2;
+            double bracket_sin_z_2_im =        - dz2*one_jkr_2_im*sin2;
+            double bszin2_re, bszin2_im;
+            cmul(G0_2_re, G0_2_im, bracket_sin_z_2_re, bracket_sin_z_2_im,
+                 bszin2_re, bszin2_im);
+            double bracket_sin_z_1_re = k*cos1 - dz1*one_jkr_1_re*sin1;
+            double bracket_sin_z_1_im =        - dz1*one_jkr_1_im*sin1;
+            double bszin1_re, bszin1_im;
+            cmul(G0_1_re, G0_1_im, bracket_sin_z_1_re, bracket_sin_z_1_im,
+                 bszin1_re, bszin1_im);
+            double Ez_sin_inner_re = bszin2_re - bszin1_re;
+            double Ez_sin_inner_im = bszin2_im - bszin1_im;
+            // pref_z = +j pref_z_im
+            double Ez_sin_re = -pref_z_im * Ez_sin_inner_im;
+            double Ez_sin_im =  pref_z_im * Ez_sin_inner_re;
+
+            // ---- Cosine source ------------------------------------------------
+            // bracket_cos_2 = G0_2 * (-k dz2 sin2 + (1 - dz2² (1+jk r0_2)/r0_2²) cos2)
+            double bracket_cos_2_re = -k*dz2*sin2 + inner_2_re*cos2;
+            double bracket_cos_2_im =              inner_2_im*cos2;
+            double bcos2_re, bcos2_im;
+            cmul(G0_2_re, G0_2_im, bracket_cos_2_re, bracket_cos_2_im,
+                 bcos2_re, bcos2_im);
+            double bracket_cos_1_re = -k*dz1*sin1 + inner_1_re*cos1;
+            double bracket_cos_1_im =              inner_1_im*cos1;
+            double bcos1_re, bcos1_im;
+            cmul(G0_1_re, G0_1_im, bracket_cos_1_re, bracket_cos_1_im,
+                 bcos1_re, bcos1_im);
+            double Erho_cos_inner_re = bcos2_re - bcos1_re;
+            double Erho_cos_inner_im = bcos2_im - bcos1_im;
+            double Erho_cos_re = -pref_rho_im * Erho_cos_inner_im;
+            double Erho_cos_im =  pref_rho_im * Erho_cos_inner_re;
+
+            double bracket_cos_z_2_re = -k*sin2 - dz2*one_jkr_2_re*cos2;
+            double bracket_cos_z_2_im =         - dz2*one_jkr_2_im*cos2;
+            double bczin2_re, bczin2_im;
+            cmul(G0_2_re, G0_2_im, bracket_cos_z_2_re, bracket_cos_z_2_im,
+                 bczin2_re, bczin2_im);
+            double bracket_cos_z_1_re = -k*sin1 - dz1*one_jkr_1_re*cos1;
+            double bracket_cos_z_1_im =         - dz1*one_jkr_1_im*cos1;
+            double bczin1_re, bczin1_im;
+            cmul(G0_1_re, G0_1_im, bracket_cos_z_1_re, bracket_cos_z_1_im,
+                 bczin1_re, bczin1_im);
+            double Ez_cos_inner_re = bczin2_re - bczin1_re;
+            double Ez_cos_inner_im = bczin2_im - bczin1_im;
+            double Ez_cos_re = -pref_z_im * Ez_cos_inner_im;
+            double Ez_cos_im =  pref_z_im * Ez_cos_inner_re;
+
+            // Project to obs tangent: Phi = td * Ez + rho_proj * Erho.
+            pc(m, n) = std::complex<double>(
+                td * Ez_const_re + rho_proj_factor * Erho_const_re,
+                td * Ez_const_im + rho_proj_factor * Erho_const_im);
+            ps(m, n) = std::complex<double>(
+                td * Ez_sin_re + rho_proj_factor * Erho_sin_re,
+                td * Ez_sin_im + rho_proj_factor * Erho_sin_im);
+            pco(m, n) = std::complex<double>(
+                td * Ez_cos_re + rho_proj_factor * Erho_cos_re,
+                td * Ez_cos_im + rho_proj_factor * Erho_cos_im);
+        }
+    }
+
+    return std::make_tuple(Phi_const, Phi_sin, Phi_cos);
+}
+
+
 PYBIND11_MODULE(_accelerators, m) {
     m.def("dist_outer_product", &dist_outer_product, "Compute point to point euclidean distance");
     m.def("seg_seg_quad_batch_3d", &seg_seg_quad_batch_3d,
@@ -1609,4 +1902,14 @@ PYBIND11_MODULE(_accelerators, m) {
           py::arg("a_squared"), py::arg("k"),
           py::arg("omega"), py::arg("eps"), py::arg("mu"),
           py::arg("gl_t01"), py::arg("gl_w01"));
+    m.def("sinusoidal_field_tensor", &sinusoidal_field_tensor,
+          "Tangential field tensor for the NEC2 three-term basis. Returns "
+          "(Phi_const, Phi_sin, Phi_cos), each (M, N) complex. obs_*/src_* "
+          "can be the same arrays (free-space build) or src_* mirrored "
+          "(PEC image build).",
+          py::arg("obs_centers"), py::arg("obs_tangents"),
+          py::arg("src_centers"), py::arg("src_tangents"),
+          py::arg("seg_h"),
+          py::arg("a"), py::arg("k"), py::arg("eta"),
+          py::arg("gl_t"), py::arg("gl_w"));
 }

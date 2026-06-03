@@ -19,6 +19,13 @@ Scope (deliberately narrow):
 import numpy as np
 import scipy.linalg
 
+try:
+    from pysim import _accelerators as _acc
+
+    _HAVE_FIELD_TENSOR = hasattr(_acc, "sinusoidal_field_tensor")
+except ImportError:
+    _HAVE_FIELD_TENSOR = False
+
 _EULER_GAMMA = 0.5772156649015329
 
 
@@ -60,6 +67,10 @@ class SinusoidalPySim:
         self.k = self.omega / self.c
         self.eta = float(np.sqrt(self.mu / self.eps))
         self.halfdriver = self.halfdriver_factor * self.wavelength / 4
+        # Gauss-Legendre nodes for the const-source self-integral are
+        # k-independent; cache by n_qp so sweep loops don't pay for
+        # repeated leggauss() calls.
+        self._leggauss_cache: dict[int, tuple[np.ndarray, np.ndarray]] = {}
 
         if not wires:
             raise ValueError("wires must be non-empty")
@@ -117,6 +128,16 @@ class SinusoidalPySim:
                         )
                     normalized.append((int(w), end))
                 self.junctions.append(normalized)
+
+    def _leggauss_cached(self, n: int) -> tuple[np.ndarray, np.ndarray]:
+        cached = self._leggauss_cache.get(n)
+        if cached is not None:
+            return cached
+        gx, gw = np.polynomial.legendre.leggauss(n)
+        gx = np.ascontiguousarray(gx, dtype=np.float64)
+        gw = np.ascontiguousarray(gw, dtype=np.float64)
+        self._leggauss_cache[n] = (gx, gw)
+        return gx, gw
 
     # ------------------------------------------------------------------
     # Geometry build
@@ -430,6 +451,11 @@ class SinusoidalPySim:
         centers and tangents (free-space build). The PEC image build
         passes mirrored versions so the same tensor formula computes
         the image-source field at the original observer points.
+
+        Hot path uses the C++ accelerator `sinusoidal_field_tensor` (the
+        70% bottleneck of single-k solves at N≳80); the pure-numpy
+        formulation below is kept as a reference / fallback when the
+        accelerator isn't available.
         """
         a = self.wire_radius
         seg_c = geom["seg_centers"]  # (N, 3) — observer centers
@@ -440,6 +466,21 @@ class SinusoidalPySim:
 
         src_c = src_centers if src_centers is not None else seg_c
         src_t = src_tangents if src_tangents is not None else seg_t
+
+        if _HAVE_FIELD_TENSOR:
+            gx, gw = self._leggauss_cached(self.n_qp_const)
+            return _acc.sinusoidal_field_tensor(
+                np.ascontiguousarray(seg_c, dtype=np.float64),
+                np.ascontiguousarray(seg_t, dtype=np.float64),
+                np.ascontiguousarray(src_c, dtype=np.float64),
+                np.ascontiguousarray(src_t, dtype=np.float64),
+                np.ascontiguousarray(seg_h, dtype=np.float64),
+                float(a),
+                float(k),
+                float(self.eta),
+                np.ascontiguousarray(gx, dtype=np.float64),
+                np.ascontiguousarray(gw, dtype=np.float64),
+            )
 
         # Pairwise vectors c_m - c_n: shape (M=obs, N=src, 3).
         # rvec_mn = seg_c[m] - src_c[n]
@@ -509,7 +550,7 @@ class SinusoidalPySim:
         u2 = (H - z_eval) / rho_eval  # (M, N)
         u1 = (-H - z_eval) / rho_eval
         int_inv_r0 = np.arcsinh(u2) - np.arcsinh(u1)
-        gx, gw = np.polynomial.legendre.leggauss(self.n_qp_const)
+        gx, gw = self._leggauss_cached(self.n_qp_const)
         z_qp = H[..., None] * gx[None, None, :]  # (M, N, n_qp)
         dz_qp = z_eval[..., None] - z_qp
         r0_qp = np.sqrt(rho_eval[..., None] ** 2 + dz_qp**2)
@@ -668,21 +709,34 @@ class SinusoidalPySim:
         return Z_drive, alpha
 
     def compute_impedance_swept(self, k_array):
-        """Loop over wavenumbers; this class doesn't have a batched assembly
-        like TriangularPySim, so this is just compute_impedance() repeated
-        with the wavenumber/wavelength rebound per call.
+        """Loop over wavenumbers. Per-call work that doesn't depend on k
+        (geometry build) is lifted out of the loop so the per-k cost at
+        small N reduces to field-tensor + basis-coefs + assembly + solve,
+        and shaves ~25% off the n=21 sweep that was bottlenecked on
+        repeated `_build_geometry` calls in the prior naive loop.
         """
         k_array = np.asarray(k_array, dtype=float)
         z_out = np.zeros(k_array.shape[0], dtype=np.complex128)
         k_save = self.k
         wl_save = self.wavelength
         omega_save = self.omega
+        geom = self._build_geometry()
         for i, kk in enumerate(k_array):
             self.k = float(kk)
             self.omega = self.k * self.c
             self.wavelength = self.c / (self.omega / (2 * np.pi))
-            z, _ = self.compute_impedance()
-            z_out[i] = z
+            G, basis = self._assemble_Z(geom, self.k)
+            feed = geom["feed_seg"]
+            h_feed = geom["seg_h"][feed]
+            v = np.zeros(geom["n_segs"], dtype=np.complex128)
+            v[feed] = -1.0 / h_feed
+            alpha = scipy.linalg.solve(G, v)
+            I_feed = 0.0 + 0.0j
+            for j_basis, entries in enumerate(basis):
+                for n_seg, A_jn, B_jn, C_jn, sigma in entries:
+                    if n_seg == feed:
+                        I_feed += alpha[j_basis] * sigma * (A_jn + C_jn)
+            z_out[i] = 1.0 / I_feed
         self.k = k_save
         self.wavelength = wl_save
         self.omega = omega_save

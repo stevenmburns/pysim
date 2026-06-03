@@ -839,6 +839,46 @@ def test_bspline_hentenna_enrichment_left_right_symmetry():
         )
 
 
+def test_sinusoidal_field_tensor_cpp_matches_numpy():
+    """The C++ `sinusoidal_field_tensor` accelerator and the pure-numpy
+    reference path must produce bit-equivalent (Phi_const, Phi_sin, Phi_cos)
+    on representative geometries. Anything looser than ~1e-13 relative
+    indicates the C++ kernel diverged from the formula in sinusoidal.py.
+    """
+    import pysim.sinusoidal as sin_mod
+
+    if not sin_mod._HAVE_FIELD_TENSOR:
+        pytest.skip("C++ accelerator not built")
+
+    # Bent two-edge polyline so the (m, n) loop sees varying tangents.
+    wires = [np.array([[0.0, 0.0, -5.0], [0.5, 0.0, 0.0], [0.0, 0.0, 5.0]])]
+    for n in (15, 41):
+        sim = SinusoidalPySim(
+            wires=wires,
+            n_per_edge_per_wire=[[n, n]],
+            wavelength=22.0,
+            wire_radius=5e-4,
+            nsegs=n,
+        )
+        geom = sim._build_geometry()
+        # C++ path
+        Pc_cpp, Ps_cpp, Pco_cpp = sim._field_tensor(geom, sim.k)
+        # Numpy reference path
+        sin_mod._HAVE_FIELD_TENSOR = False
+        try:
+            Pc_np, Ps_np, Pco_np = sim._field_tensor(geom, sim.k)
+        finally:
+            sin_mod._HAVE_FIELD_TENSOR = True
+        for name, a_cpp, a_np in [
+            ("Phi_const", Pc_cpp, Pc_np),
+            ("Phi_sin", Ps_cpp, Ps_np),
+            ("Phi_cos", Pco_cpp, Pco_np),
+        ]:
+            denom = max(np.max(np.abs(a_np)), 1e-30)
+            rel = np.max(np.abs(a_cpp - a_np)) / denom
+            assert rel < 1e-13, f"n={n} {name} max rel diff = {rel:.3e}"
+
+
 def test_sinusoidal_hentenna_left_right_symmetry():
     """Hentenna is mirror-symmetric about y=0, so SinusoidalPySim's per-knot
     currents on the cross-bar halves (wires 1 and 3) and on the upper /
