@@ -101,6 +101,7 @@ class BSplinePySim:
         halfdriver_factor=0.962,
         wire_radius=0.0005,
         nsegs=101,
+        ground_z=None,
         use_singular_enrichment=False,
         n_qp_sing=32,
         enrichment_min_k=3,
@@ -114,12 +115,18 @@ class BSplinePySim:
             )
         if not wires:
             raise ValueError("wires must be non-empty")
+        if use_singular_enrichment and ground_z is not None:
+            raise NotImplementedError(
+                "use_singular_enrichment + ground_z together not supported "
+                "yet — image reaction for enrichment bases isn't implemented"
+            )
 
         self.degree = int(degree)
         self.wavelength = wavelength
         self.halfdriver_factor = halfdriver_factor
         self.wire_radius = wire_radius
         self.nsegs = nsegs
+        self.ground_z = ground_z
         # Source smoothing: when None (default) → delta-gap at exact midpoint
         # of feed wire. When set to a float α, the delta-gap is replaced by a
         # cos² bump of width w = α · h_feed_segment_at_source centered on s_f,
@@ -472,6 +479,32 @@ class BSplinePySim:
     # J moment integrals
     # ------------------------------------------------------------------
 
+    def _image_positions(self, positions):
+        """Mirror an array of 3D positions across z = ground_z."""
+        out = positions.copy()
+        out[..., 2] = 2 * self.ground_z - out[..., 2]
+        return out
+
+    def _image_tangent_dot(self, tangents):
+        """t_m · t_image_n with t_image_n = (t_n_x, t_n_y, -t_n_z)."""
+        return tangents @ (tangents * np.array([1.0, 1.0, -1.0])).T
+
+    def _build_J_image_blocks(self, geom, k):
+        """Build the J moment tensor with j-segments mirrored across the
+        PEC ground plane. The image is always far enough from the original
+        that the analytic same-edge static + reg split doesn't apply — full
+        off-edge quadrature handles every (i, j) pair uniformly.
+        """
+        a = self.wire_radius
+        d = self.degree
+        seg_l = geom["seg_l"]
+        seg_r = geom["seg_r"]
+        seg_l_img = self._image_positions(seg_l)
+        seg_r_img = self._image_positions(seg_r)
+        return _seg_seg_full_moments_offedge(
+            seg_l, seg_r, seg_l_img, seg_r_img, a, k, d, self.n_qp_pair
+        )
+
     def _build_J_blocks(self, geom, k):
         """All polynomial moment integrals J_pq[i, j] for p, q ∈ {0..d} and
         every (i, j) global segment pair. Returns shape (d+1, d+1, N, N).
@@ -516,20 +549,26 @@ class BSplinePySim:
     # Z assembly
     # ------------------------------------------------------------------
 
-    def _assemble_Z(self, J, supp_seg, polys, geom):
+    def _assemble_Z(self, J, supp_seg, polys, geom, td_all=None):
         """Assemble the (n_basis, n_basis) complex Z matrix.
 
         Uses the templated C++ accelerator `assemble_Z_bspline` when
         available and `self.degree` is in its instantiation set; otherwise
         falls back to a numpy-einsum implementation that's a bit-exact
         reference target.
+
+        `td_all` defaults to the free-space tangent dot product matrix
+        derived from `geom["tangents"]`. The PEC image build passes its
+        own (tx, ty, -tz)-modified table here so the same assembly fuses
+        the image-current sign flip.
         """
         d = self.degree
         n_basis, n_wings, n_poly = polys.shape
         assert n_wings == d + 1 and n_poly == d + 1
 
-        tangents = geom["tangents"]
-        td_all = tangents @ tangents.T
+        if td_all is None:
+            tangents = geom["tangents"]
+            td_all = tangents @ tangents.T
 
         if _HAVE_BSPLINE_ASSEMBLE_ACCEL and d <= _BSPLINE_ASSEMBLE_ACCEL_MAX_D:
             return _acc.assemble_Z_bspline(
@@ -785,6 +824,17 @@ class BSplinePySim:
 
         J = self._build_J_blocks(geom, self.k)
         Z = self._assemble_Z(J, supp_seg, polys, geom)
+
+        if self.ground_z is not None:
+            # PEC image method: subtract the same-shape assembly built from
+            # J integrals over image segments + (tx, ty, -tz)-modified
+            # tangent dot products. The minus sign captures both the
+            # image current's horizontal anti-parallel direction and the
+            # image charge's sign flip (one minus combined).
+            J_img = self._build_J_image_blocks(geom, self.k)
+            td_img = self._image_tangent_dot(geom["tangents"])
+            Z = Z - self._assemble_Z(J_img, supp_seg, polys, geom, td_all=td_img)
+
         v = self._build_source_vector(
             geom, wire_knots, wire_basis_global, n_basis_total
         )

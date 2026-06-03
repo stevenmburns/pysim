@@ -123,14 +123,17 @@ _PYSIM_MODELS = {
 }
 
 
+_PYSIM_MODELS_WITH_GROUND = {"triangular", "bspline"}
+
+
 def _make_pysim_sim(req: dict, **base_kwargs):
     """Instantiate the PySim model the request selected.
 
     base_kwargs are the geometry-derived constructor kwargs every model
     accepts (wires, n_per_edge_per_wire, feed_*, wavelength, halfdriver_factor,
-    nsegs, junctions). ground_z is only passed to Triangular (Sinusoidal /
-    BSpline don't support a PEC image plane). model_options entries are
-    filtered through the per-model allowlist.
+    nsegs, junctions). ground_z is forwarded only to models that accept it
+    (Triangular and BSpline today); Sinusoidal still strips it. model_options
+    entries are filtered through the per-model allowlist.
     """
     model = req.get("pysim_model", "triangular")
     if model not in _PYSIM_MODELS:
@@ -141,7 +144,7 @@ def _make_pysim_sim(req: dict, **base_kwargs):
     opts = req.get("model_options") or {}
     extra = {k: opts[k] for k in allowed if k in opts}
 
-    if model != "triangular":
+    if model not in _PYSIM_MODELS_WITH_GROUND:
         base_kwargs.pop("ground_z", None)
 
     return cls(**base_kwargs, **extra)

@@ -74,11 +74,11 @@ const BACKEND_LABEL: Record<Backend, string> = {
 
 const BACKEND_ORDER: Backend[] = ["triangular", "sinusoidal", "bspline", "pynec"];
 
-// Only Triangular has the PEC image-method ground; PyNEC has its own
-// Sommerfeld / reflection-coefficient ground. Sinusoidal and B-spline are
+// Triangular and B-spline both have the PEC image-method ground; PyNEC
+// has its own Sommerfeld / reflection-coefficient ground. Sinusoidal is
 // free-space-only right now (no ground_z constructor kwarg).
 function backendSupportsGround(b: Backend): boolean {
-  return b === "triangular" || b === "pynec";
+  return b === "triangular" || b === "bspline" || b === "pynec";
 }
 
 type CommonOpts = { nPerWire: number; wireRadius: number };
@@ -601,10 +601,10 @@ export function App() {
   const sendStartRef = useRef(0);
 
   function buildRequest(): SolveRequest {
-    // Both solver families support ground: PyNEC uses Sommerfeld-Norton (or
-    // the fast reflection-coefficient approximation) with εr=10, σ=0.002;
-    // pysim's Triangular model uses the PEC image method. Sinusoidal /
-    // B-spline don't model ground — the gear UI grays the toggle for them.
+    // Solver-family ground notes: PyNEC uses Sommerfeld-Norton (or the
+    // fast reflection-coefficient approximation) with εr=10, σ=0.002;
+    // pysim's Triangular and B-spline models use the PEC image method.
+    // Sinusoidal is free-space-only — the gear UI grays the toggle for it.
     const groundActive = groundEnabled && backendSupportsGround(backend);
     const base: SolveRequest = {
       geometry,
@@ -619,7 +619,16 @@ export function App() {
     };
     if (backend !== "pynec") {
       base.pysim_model = backend;
-      base.model_options = modelOptionsForRequest(backend, currentOpts);
+      const opts = modelOptionsForRequest(backend, currentOpts);
+      // BSplinePySim rejects ground_z + use_singular_enrichment together
+      // (image reaction for enrichment bases isn't worked out yet). Force
+      // enrichment off in the request when ground is active so the user
+      // gets a sensible solve instead of a server error; the gear shows
+      // an inline note.
+      if (backend === "bspline" && groundActive) {
+        opts.use_singular_enrichment = false;
+      }
+      base.model_options = opts;
     }
     if (geometry === "inverted_v") {
       base.angle_deg = angle;
@@ -1397,7 +1406,7 @@ export function App() {
         </div>
 
         {!backendSupportsGround(backend) && groundEnabled && (
-          <div className="field" title="Sinusoidal and B-spline don't model ground; ignored until you switch to Triangular or PyNEC.">
+          <div className="field" title="Sinusoidal doesn't model ground; ignored until you switch to Triangular, B-spline, or PyNEC.">
             <em style={{ color: "var(--muted)", fontSize: 12 }}>
               ground plane ignored for {BACKEND_LABEL[backend]}
             </em>
