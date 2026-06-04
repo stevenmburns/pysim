@@ -319,9 +319,31 @@ class SinusoidalPySim:
         """Per-basis closed-form (A, B, C, σ) coefficients on every
         supporting segment, following Eqs 43-64 of the NEC2 Theory Manual.
 
-        Returns a list of length n_segs; entry i is a list of
-        (seg_idx, A_in, B_in, C_in, sigma_in) tuples covering basis i's
-        support (segment i plus all N^- and N^+ neighbours).
+        Returns a CSR-by-segment `seg_view` dict:
+
+            seg_view["starts"][s:s+2] → range of entries for segment s in
+                the flat per-segment arrays below.
+            seg_view["jbasis"][k]     → which basis contributes entry k.
+            seg_view["A"/"B"/"C"][k]  → that basis's coefficient on seg.
+            seg_view["sigma"][k]      → σ sign relative to NEC arc.
+
+        Writing the entries directly into seg-major position during the
+        main per-basis loop (instead of building a list-of-lists `basis`
+        and then transposing it) avoids a second Python pass over ~1700
+        entries — the path that was costing ~1.2 ms/step at N=21 hentenna.
+        It also lets `_assemble_Z`'s flat-array fill become vectorized
+        numpy (np.repeat + element-wise multiply) rather than a Python
+        scatter loop.
+
+        Reciprocity lets us compute `starts[]` upfront from the geometry
+        alone, without a first pass to count: a segment s appears as a
+        support entry of basis s itself (the self entry) plus once per
+        basis i in `nm[s] ∪ np_[s]` — i.e. once for every neighbour of s.
+        So entries_per_seg[s] = 1 + len(nm[s]) + len(np_[s]). Each basis
+        i contributes 1 + len(nm[i]) + len(np_[i]) entries on its own
+        support, so the *basis-major* count is the same value indexed
+        differently. We only need the seg-major layout for downstream
+        consumers, so that's all we materialise.
         """
         a = self.wire_radius
         cached = self._cached_basis
@@ -342,7 +364,22 @@ class SinusoidalPySim:
         # uniform; we name it a_const).
         a_const = 1.0 / (np.log(2.0 / ka) - _EULER_GAMMA)
 
-        basis = []
+        # Pre-allocate the seg-major flat arrays. counts[s] = 1 (self) +
+        # len(nm[s]) + len(np_[s]) by reciprocity (see docstring).
+        counts = np.empty(n_segs, dtype=np.int64)
+        for s in range(n_segs):
+            counts[s] = 1 + len(nm[s]) + len(np_[s])
+        starts = np.empty(n_segs + 1, dtype=np.int64)
+        starts[0] = 0
+        np.cumsum(counts, out=starts[1:])
+        total = int(starts[-1])
+        jbasis_flat = np.empty(total, dtype=np.int64)
+        A_flat = np.empty(total, dtype=np.complex128)
+        B_flat = np.empty(total, dtype=np.complex128)
+        C_flat = np.empty(total, dtype=np.complex128)
+        sigma_flat = np.empty(total, dtype=np.int8)
+        cursor = starts[:-1].copy()  # write head per segment
+
         for i in range(n_segs):
             d_i = seg_h[i]
             kd_i = k * d_i
@@ -430,7 +467,14 @@ class SinusoidalPySim:
                 Q_minus = 0.0
                 Q_plus = 0.0
 
-            entries = [(i, A_i0, B_i0, C_i0, +1)]
+            # Self entry of basis i — lands at seg i.
+            p = cursor[i]
+            jbasis_flat[p] = i
+            A_flat[p] = A_i0
+            B_flat[p] = B_i0
+            C_flat[p] = C_i0
+            sigma_flat[p] = +1
+            cursor[i] = p + 1
 
             # N^- neighbours: Eqs 43-45. σ records the arc-flip relative
             # to the segment's natural tangent; coefficients are NEC's
@@ -441,10 +485,13 @@ class SinusoidalPySim:
                 sin_kdj = np.sin(kd_j)
                 cos_kdj_2 = np.cos(0.5 * kd_j)
                 sin_kdj_2 = np.sin(0.5 * kd_j)
-                A_jm = a_plus * Q_minus / sin_kdj
-                B_jm = a_plus * Q_minus / (2.0 * cos_kdj_2)
-                C_jm = -a_plus * Q_minus / (2.0 * sin_kdj_2)
-                entries.append((j, A_jm, B_jm, C_jm, sig))
+                p = cursor[j]
+                jbasis_flat[p] = i
+                A_flat[p] = a_plus * Q_minus / sin_kdj
+                B_flat[p] = a_plus * Q_minus / (2.0 * cos_kdj_2)
+                C_flat[p] = -a_plus * Q_minus / (2.0 * sin_kdj_2)
+                sigma_flat[p] = sig
+                cursor[j] = p + 1
 
             # N^+ neighbours: Eqs 46-48.
             for j, sig in N_plus:
@@ -453,14 +500,84 @@ class SinusoidalPySim:
                 sin_kdj = np.sin(kd_j)
                 cos_kdj_2 = np.cos(0.5 * kd_j)
                 sin_kdj_2 = np.sin(0.5 * kd_j)
-                A_jp = -a_minus * Q_plus / sin_kdj
-                B_jp = a_minus * Q_plus / (2.0 * cos_kdj_2)
-                C_jp = a_minus * Q_plus / (2.0 * sin_kdj_2)
-                entries.append((j, A_jp, B_jp, C_jp, sig))
+                p = cursor[j]
+                jbasis_flat[p] = i
+                A_flat[p] = -a_minus * Q_plus / sin_kdj
+                B_flat[p] = a_minus * Q_plus / (2.0 * cos_kdj_2)
+                C_flat[p] = a_minus * Q_plus / (2.0 * sin_kdj_2)
+                sigma_flat[p] = sig
+                cursor[j] = p + 1
 
-            basis.append(entries)
-        self._cached_basis = (geom, k, a, basis)
-        return basis
+        seg_view = {
+            "starts": starts,
+            "jbasis": jbasis_flat,
+            "A": A_flat,
+            "B": B_flat,
+            "C": C_flat,
+            "sigma": sigma_flat,
+        }
+        self._cached_basis = (geom, k, a, seg_view)
+        return seg_view
+
+    def _evaluate_basis_at_points(self, seg_view, eval_seg, eval_s, alpha):
+        """Vectorized evaluation of Σ_j α_j · f_{j, seg}(s_local) at an
+        array of (segment, s_local) pairs.
+
+        Replaces the per-knot `eval_at` Python closure: 342 individual
+        calls per N=21 hentenna step (1.5 ms/step of Python frame +
+        per-segment list iteration) collapse to one sin/cos call over
+        n_eval points, one ragged gather, and one scatter-add.
+
+        Parameters
+        ----------
+        seg_view : dict
+            CSR-format inverse index from `_basis_coefs`.
+        eval_seg : (n_eval,) int64
+            Segment index per evaluation point.
+        eval_s : (n_eval,) float64
+            Local arc from each segment's centre.
+        alpha : (n_basis,) complex128
+            Basis amplitudes (from the EFIE solve).
+
+        Returns
+        -------
+        (n_eval,) complex128
+        """
+        n_eval = eval_seg.shape[0]
+        if n_eval == 0:
+            return np.zeros(0, dtype=np.complex128)
+        starts = seg_view["starts"]
+        starts_at = starts[eval_seg]  # (n_eval,)
+        lengths = starts[eval_seg + 1] - starts_at  # entries per eval
+        n_entries = int(lengths.sum())
+        if n_entries == 0:
+            return np.zeros(n_eval, dtype=np.complex128)
+        # Precompute trig at each eval point.
+        sin_ks = np.sin(self.k * eval_s)
+        cos_ks = np.cos(self.k * eval_s)
+        # Ragged-gather expansion: for each eval i with `lengths[i]` entries,
+        # produce that many entry-level rows. `entry_eval_idx` maps each row
+        # back to its source eval; `entry_global` gathers from `seg_view`.
+        entry_eval_idx = np.repeat(np.arange(n_eval, dtype=np.int64), lengths)
+        # within-segment offset of each entry within its eval's block:
+        # arange(n_entries) - cumulative-start-per-eval-block
+        cum_starts = np.empty(n_eval, dtype=np.int64)
+        cum_starts[0] = 0
+        if n_eval > 1:
+            np.cumsum(lengths[:-1], out=cum_starts[1:])
+        within = np.arange(n_entries, dtype=np.int64) - np.repeat(cum_starts, lengths)
+        entry_global = np.repeat(starts_at, lengths) + within
+        jb = seg_view["jbasis"][entry_global]
+        A_e = seg_view["A"][entry_global]
+        B_e = seg_view["B"][entry_global]
+        C_e = seg_view["C"][entry_global]
+        sigma_e = seg_view["sigma"][entry_global]
+        sin_e = sin_ks[entry_eval_idx]
+        cos_e = cos_ks[entry_eval_idx]
+        contrib = alpha[jb] * (sigma_e * A_e + B_e * sin_e + sigma_e * C_e * cos_e)
+        I_out = np.zeros(n_eval, dtype=np.complex128)
+        np.add.at(I_out, entry_eval_idx, contrib)
+        return I_out
 
     # ------------------------------------------------------------------
     # Field of elementary current segments (Eqs 76-79)
@@ -688,13 +805,18 @@ class SinusoidalPySim:
             Phi_s = Phi_s - Phi_s_i
             Phi_co = Phi_co - Phi_co_i
 
-        basis = self._basis_coefs(geom, k)
+        seg_view = self._basis_coefs(geom, k)
         N = geom["n_segs"]
         # Build (N, N) coefficient matrices M_{A,B,C}[n, j] = effective
         # coefficient that basis j contributes at source segment n. With
         #   A_eff = σ * A, B_eff = B, C_eff = σ * C
         # (see docs/sinusoidal_basis_design.md), the per-basis loop reduces
         # to three N×N matmuls G = Phi_c @ M_A + Phi_s @ M_B + Phi_co @ M_C.
+        #
+        # seg_view is already CSR-by-segment, so the row coordinate n_idx
+        # is just np.repeat(arange(N), counts) and σA / σC are element-wise
+        # numpy products. No Python scatter loop here — the per-basis fill
+        # already happened directly into seg_view inside _basis_coefs.
         #
         # Each basis has only ~3 entries (self + N⁻ + N⁺ neighbour), so M
         # is very sparse (~3N nonzeros). Two regimes:
@@ -704,21 +826,13 @@ class SinusoidalPySim:
         #     full O(N³) cost on a mostly-zero matrix, while CSC matmul
         #     pays O(N · 3N) = O(N²).
         # Crossover measured ≈ N=60 on Kaby Lake R / OpenBLAS-pthreads.
-        n_entries = sum(len(e) for e in basis)
-        n_idx_arr = np.empty(n_entries, dtype=np.int64)
-        j_idx_arr = np.empty(n_entries, dtype=np.int64)
-        A_eff = np.empty(n_entries, dtype=np.complex128)
-        B_eff = np.empty(n_entries, dtype=np.complex128)
-        C_eff = np.empty(n_entries, dtype=np.complex128)
-        idx = 0
-        for j_basis, entries in enumerate(basis):
-            for n_seg, A_jn, B_jn, C_jn, sigma in entries:
-                n_idx_arr[idx] = n_seg
-                j_idx_arr[idx] = j_basis
-                A_eff[idx] = sigma * A_jn
-                B_eff[idx] = B_jn
-                C_eff[idx] = sigma * C_jn
-                idx += 1
+        starts = seg_view["starts"]
+        n_idx_arr = np.repeat(np.arange(N, dtype=np.int64), starts[1:] - starts[:-1])
+        j_idx_arr = seg_view["jbasis"]
+        sigma_arr = seg_view["sigma"]
+        A_eff = sigma_arr * seg_view["A"]
+        B_eff = seg_view["B"]
+        C_eff = sigma_arr * seg_view["C"]
         if N < _DENSE_ASSEMBLY_THRESHOLD:
             M_A = np.zeros((N, N), dtype=np.complex128)
             M_B = np.zeros((N, N), dtype=np.complex128)
@@ -732,14 +846,14 @@ class SinusoidalPySim:
             M_B = scipy.sparse.csc_matrix((B_eff, (n_idx_arr, j_idx_arr)), shape=(N, N))
             M_C = scipy.sparse.csc_matrix((C_eff, (n_idx_arr, j_idx_arr)), shape=(N, N))
             G = (Phi_c @ M_A) + (Phi_s @ M_B) + (Phi_co @ M_C)
-        return G, basis
+        return G, seg_view
 
     def compute_impedance(self):
         """Return (Z_drive, alpha) where alpha[j] is the amplitude of
         basis j and Z_drive = V_applied / I(feed-center) using V = 1 V.
         """
         geom = self._build_geometry()
-        G, basis = self._assemble_Z(geom, self.k)
+        G, seg_view = self._assemble_Z(geom, self.k)
         feed = geom["feed_seg"]
         h_feed = geom["seg_h"][feed]
         # Eq 187 applied-E source: E_feed = V/Δ_feed, zero elsewhere.
@@ -750,17 +864,21 @@ class SinusoidalPySim:
         v[feed] = -1.0 / h_feed
         alpha = scipy.linalg.solve(G, v)
 
-        # Current at center of feed segment: I(s = feed_center) is the sum
-        # over all basis functions whose support includes `feed` of
-        # α_j · f_{j, feed}(0) where f_{j, feed}(s_local) =
-        # A + B sin(k·s_local) + C cos(k·s_local). At s_local = 0:
-        # f_{j, feed}(0) = A + C (in NEC-arc convention).  Multiplied by
-        # σ to convert to current along the feed segment's natural tangent.
-        I_feed = 0.0 + 0.0j
-        for j_basis, entries in enumerate(basis):
-            for n_seg, A_jn, B_jn, C_jn, sigma in entries:
-                if n_seg == feed:
-                    I_feed += alpha[j_basis] * sigma * (A_jn + C_jn)
+        # Current at centre of feed segment: I(s_local=0) = Σ_j α_j · σ_j ·
+        # (A_jn + C_jn) summed over bases j whose support includes `feed`
+        # (sin(k·0)=0 so B drops out). Pre-indexed in seg_view: every basis
+        # entry whose `n_seg == feed` lives in the slice
+        # seg_view[feed : feed+1]. Single numpy reduction replaces the
+        # original double-Python-loop that filtered the full basis list.
+        s = seg_view["starts"][feed]
+        e = seg_view["starts"][feed + 1]
+        I_feed = complex(
+            (
+                alpha[seg_view["jbasis"][s:e]]
+                * seg_view["sigma"][s:e]
+                * (seg_view["A"][s:e] + seg_view["C"][s:e])
+            ).sum()
+        )
         Z_drive = 1.0 / I_feed
         self.Z_matrix = G
         return Z_drive, alpha
@@ -788,16 +906,17 @@ class SinusoidalPySim:
             self.k = float(kk)
             self.omega = self.k * self.c
             self.wavelength = self.c / (self.omega / (2 * np.pi))
-            G, basis = self._assemble_Z(geom, self.k)
+            G, seg_view = self._assemble_Z(geom, self.k)
             alpha = scipy.linalg.solve(G, v)
-            # Sum α_j · σ · (A + C) over basis entries on the feed segment.
-            # Each basis j has one entry per segment in its support; only
-            # the ones with n_seg == feed contribute.
-            I_feed = 0.0 + 0.0j
-            for j_basis, entries in enumerate(basis):
-                for n_seg, A_jn, B_jn, C_jn, sigma in entries:
-                    if n_seg == feed:
-                        I_feed += alpha[j_basis] * sigma * (A_jn + C_jn)
+            s = seg_view["starts"][feed]
+            e = seg_view["starts"][feed + 1]
+            I_feed = complex(
+                (
+                    alpha[seg_view["jbasis"][s:e]]
+                    * seg_view["sigma"][s:e]
+                    * (seg_view["A"][s:e] + seg_view["C"][s:e])
+                ).sum()
+            )
             z_out[i] = 1.0 / I_feed
         self.k = k_save
         self.wavelength = wl_save
@@ -826,52 +945,70 @@ class SinusoidalPySim:
         """
         alpha = np.asarray(alpha)
         geom = self._build_geometry()
-        basis = self._basis_coefs(geom, self.k)
+        seg_view = self._basis_coefs(geom, self.k)
         seg_h = geom["seg_h"]
-        n_segs = geom["n_segs"]
+        n_wires = len(self.wires_polylines)
 
-        # Per-segment lookup of bases that touch it.
-        seg_bases = [[] for _ in range(n_segs)]
-        for j_basis, entries in enumerate(basis):
-            for seg_idx, A, B, C, sigma in entries:
-                seg_bases[seg_idx].append((j_basis, A, B, C, sigma))
-
-        def eval_at(seg_idx, s_local):
-            ks = self.k * s_local
-            sin_ks = np.sin(ks)
-            cos_ks = np.cos(ks)
-            I = 0.0 + 0.0j
-            for j_basis, A, B, C, sigma in seg_bases[seg_idx]:
-                # In natural-tangent frame, I = σ·f^NEC(σ·s_local). With
-                # sin(σ·k·s) = σ·sin(k·s) and cos(σ·k·s) = cos(k·s):
-                #   I = σA + σ²·B·sin(k·s) + σ·C·cos(k·s)
-                #     = σA + B·sin(k·s) + σ·C·cos(k·s)
-                # Same effective (σA, B, σC) split as _assemble_Z's per-
-                # segment Galerkin testing. Multiplying the whole bracket
-                # by σ (the historical bug, fixed 2026-06) added a
-                # spurious 2·B·sin(k·s) term at σ=−1 junction neighbours,
-                # showing up as asymmetric kinks on the hentenna canvas.
-                I += alpha[j_basis] * (sigma * A + B * sin_ks + sigma * C * cos_ks)
-            return I
+        # Pattern shared between both paths: each evaluation produces a
+        # (segment, s_local) pair, a destination index in the flat output,
+        # and a weight (1.0 for endpoints / interior samples, 0.5 each side
+        # for interior-knot symmetric-average pairs). We batch them all up,
+        # call `_evaluate_basis_at_points` once, then scatter-add into the
+        # output. In the natural-tangent frame I = σA + B·sin(ks) + σC·cos(ks);
+        # this lives inside `_evaluate_basis_at_points`. The earlier `σ` bug
+        # (fixed 2026-06: multiplying the whole bracket by σ added a spurious
+        # 2·B·sin(ks) at σ=−1 junction neighbours) is gone by construction.
 
         if s_array is None:
-            out = []
-            for w_idx in range(len(self.wires_polylines)):
+            # Per wire of M segs: M+1 knots. Each segment contributes two
+            # edge evaluations — its left edge to the adjacent left knot,
+            # its right edge to the adjacent right knot. The first seg's
+            # left-edge and the last seg's right-edge hit wire endpoints
+            # (weight 1.0); every other edge hits an interior knot shared
+            # with another segment's edge, so each contributes weight 0.5.
+            eval_seg_parts = []
+            eval_s_parts = []
+            eval_target_parts = []
+            eval_weight_parts = []
+            wire_knot_offsets = [0]
+            for w_idx in range(n_wires):
                 first = geom["wire_first"][w_idx]
                 last = geom["wire_last"][w_idx]
                 n_w_segs = last - first + 1
-                I_knots = np.zeros(n_w_segs + 1, dtype=np.complex128)
-                I_knots[0] = eval_at(first, -0.5 * seg_h[first])
-                I_knots[-1] = eval_at(last, +0.5 * seg_h[last])
-                for kk in range(1, n_w_segs):
-                    seg_left = first + kk - 1
-                    seg_right = first + kk
-                    I_l = eval_at(seg_left, +0.5 * seg_h[seg_left])
-                    I_r = eval_at(seg_right, -0.5 * seg_h[seg_right])
-                    I_knots[kk] = 0.5 * (I_l + I_r)
-                out.append(I_knots)
-            return out
+                h_w = seg_h[first : last + 1]
+                base = wire_knot_offsets[-1]
+                seg_arr = np.arange(first, last + 1, dtype=np.int64)
+                # Left edges (s = -h/2) feed knot 0..M-1
+                left_target = base + np.arange(n_w_segs, dtype=np.int64)
+                left_weight = np.full(n_w_segs, 0.5)
+                left_weight[0] = 1.0
+                # Right edges (s = +h/2) feed knot 1..M
+                right_target = base + np.arange(1, n_w_segs + 1, dtype=np.int64)
+                right_weight = np.full(n_w_segs, 0.5)
+                right_weight[-1] = 1.0
+                eval_seg_parts.append(np.concatenate([seg_arr, seg_arr]))
+                eval_s_parts.append(np.concatenate([-0.5 * h_w, +0.5 * h_w]))
+                eval_target_parts.append(np.concatenate([left_target, right_target]))
+                eval_weight_parts.append(np.concatenate([left_weight, right_weight]))
+                wire_knot_offsets.append(base + n_w_segs + 1)
 
+            eval_seg = np.concatenate(eval_seg_parts)
+            eval_s = np.concatenate(eval_s_parts)
+            eval_target = np.concatenate(eval_target_parts)
+            eval_weight = np.concatenate(eval_weight_parts)
+
+            I_evals = self._evaluate_basis_at_points(seg_view, eval_seg, eval_s, alpha)
+            I_flat = np.zeros(wire_knot_offsets[-1], dtype=np.complex128)
+            np.add.at(I_flat, eval_target, eval_weight * I_evals)
+            return [
+                I_flat[wire_knot_offsets[i] : wire_knot_offsets[i + 1]]
+                for i in range(n_wires)
+            ]
+
+        # s_array path: per-wire, vectorized over the sample positions.
+        # Each sample is either right on an interior knot (→ two evals,
+        # weight 0.5 each, for the continuity-average) or interior to a
+        # segment (→ one eval, weight 1.0).
         sampled = []
         for w_idx, sv in enumerate(s_array):
             sv = np.asarray(sv, dtype=np.float64)
@@ -881,32 +1018,47 @@ class SinusoidalPySim:
             wire_h = seg_h[first : last + 1]
             arc_at_knot = np.concatenate([[0.0], np.cumsum(wire_h)])
             wire_arc = float(arc_at_knot[-1])
-            I_out = np.zeros(sv.shape[0], dtype=np.complex128)
-            for i, s in enumerate(sv):
-                s_clipped = max(0.0, min(wire_arc, float(s)))
-                eps = 1e-12 * max(wire_arc, 1.0)
-                # Interior-knot symmetric average for continuity.
-                knot_hit = np.searchsorted(arc_at_knot, s_clipped)
-                if (
-                    0 < knot_hit < n_w_segs
-                    and abs(s_clipped - arc_at_knot[knot_hit]) <= eps
-                ):
-                    seg_left = first + knot_hit - 1
-                    seg_right = first + knot_hit
-                    I_l = eval_at(seg_left, +0.5 * seg_h[seg_left])
-                    I_r = eval_at(seg_right, -0.5 * seg_h[seg_right])
-                    I_out[i] = 0.5 * (I_l + I_r)
-                    continue
-                # Locate the containing segment and evaluate at s_local
-                # measured from that segment's centre.
-                seg_in_wire = int(
-                    np.searchsorted(arc_at_knot, s_clipped, side="right") - 1
-                )
-                seg_in_wire = max(0, min(n_w_segs - 1, seg_in_wire))
-                seg_global = first + seg_in_wire
-                s_local = (s_clipped - arc_at_knot[seg_in_wire]) - 0.5 * seg_h[
-                    seg_global
-                ]
-                I_out[i] = eval_at(seg_global, s_local)
+            n_s = sv.shape[0]
+            if n_s == 0:
+                sampled.append(np.zeros(0, dtype=np.complex128))
+                continue
+            s_clip = np.clip(sv, 0.0, wire_arc)
+            eps = 1e-12 * max(wire_arc, 1.0)
+            knot_hit = np.searchsorted(arc_at_knot, s_clip)
+            on_interior_knot = (
+                (knot_hit > 0)
+                & (knot_hit < n_w_segs)
+                & (np.abs(s_clip - arc_at_knot[np.clip(knot_hit, 0, n_w_segs)]) <= eps)
+            )
+            non_knot_mask = ~on_interior_knot
+
+            # Containing-segment evaluation for non-knot samples.
+            seg_in_wire = np.searchsorted(arc_at_knot, s_clip, side="right") - 1
+            seg_in_wire = np.clip(seg_in_wire, 0, n_w_segs - 1)
+            nk_target = np.nonzero(non_knot_mask)[0]
+            nk_seg_in_wire = seg_in_wire[non_knot_mask]
+            nk_seg = first + nk_seg_in_wire
+            nk_s = (s_clip[non_knot_mask] - arc_at_knot[nk_seg_in_wire]) - 0.5 * wire_h[
+                nk_seg_in_wire
+            ]
+            nk_weight = np.ones(nk_seg.shape[0])
+
+            # Two-sided evaluation for samples on an interior knot.
+            k_target = np.nonzero(on_interior_knot)[0]
+            k_idx = knot_hit[on_interior_knot]
+            k_left_seg = first + k_idx - 1
+            k_right_seg = first + k_idx
+            k_left_s = +0.5 * seg_h[k_left_seg]
+            k_right_s = -0.5 * seg_h[k_right_seg]
+            k_weight = np.full(2 * k_target.shape[0], 0.5)
+
+            all_seg = np.concatenate([nk_seg, k_left_seg, k_right_seg])
+            all_s = np.concatenate([nk_s, k_left_s, k_right_s])
+            all_target = np.concatenate([nk_target, k_target, k_target])
+            all_weight = np.concatenate([nk_weight, k_weight])
+
+            I_evals = self._evaluate_basis_at_points(seg_view, all_seg, all_s, alpha)
+            I_out = np.zeros(n_s, dtype=np.complex128)
+            np.add.at(I_out, all_target, all_weight * I_evals)
             sampled.append(I_out)
         return sampled
