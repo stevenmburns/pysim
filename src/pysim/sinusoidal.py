@@ -78,6 +78,18 @@ class SinusoidalPySim:
         # k-independent; cache by n_qp so sweep loops don't pay for
         # repeated leggauss() calls.
         self._leggauss_cache: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        # `compute_impedance(...)` and `currents_at_knots(alpha)` are almost
+        # always called as a pair from the UI; both internally rebuild geom
+        # and basis-coefs from scratch (~5 ms/step on N=21 hentenna). The
+        # geometry is purely a function of (wires, n_per_edge, junctions),
+        # which are immutable after __init__; the basis-coefs are a function
+        # of (geom, k, wire_radius). Cache both so the second call reuses
+        # the work the first call already did. _basis_coefs validates the
+        # cache by identity-checking the geom dict + value-comparing k and
+        # wire_radius — so `compute_impedance_swept` (which mutates self.k
+        # in a loop) still rebuilds basis-coefs per k, but reuses geom.
+        self._cached_geometry: dict | None = None
+        self._cached_basis: tuple[dict, float, float, list] | None = None
 
         if not wires:
             raise ValueError("wires must be non-empty")
@@ -160,6 +172,8 @@ class SinusoidalPySim:
         of another basis), σ = +1. When the natural tangent is reversed
         relative to NEC's expected arc, σ = -1.
         """
+        if self._cached_geometry is not None:
+            return self._cached_geometry
         seg_l_list = []
         seg_r_list = []
         seg_centers_list = []
@@ -282,7 +296,7 @@ class SinusoidalPySim:
         )
         feed_seg = first + int(np.argmin(np.abs(feed_arc_centers - feed_arc)))
 
-        return {
+        self._cached_geometry = {
             "seg_l": seg_l,
             "seg_r": seg_r,
             "seg_centers": seg_c,
@@ -295,6 +309,7 @@ class SinusoidalPySim:
             "wire_last": wire_last_seg,
             "feed_seg": feed_seg,
         }
+        return self._cached_geometry
 
     # ------------------------------------------------------------------
     # Basis-function coefficient computation
@@ -309,6 +324,14 @@ class SinusoidalPySim:
         support (segment i plus all N^- and N^+ neighbours).
         """
         a = self.wire_radius
+        cached = self._cached_basis
+        if (
+            cached is not None
+            and cached[0] is geom
+            and cached[1] == k
+            and cached[2] == a
+        ):
+            return cached[3]
         seg_h = geom["seg_h"]
         n_segs = geom["n_segs"]
         nm = geom["nm"]
@@ -436,6 +459,7 @@ class SinusoidalPySim:
                 entries.append((j, A_jp, B_jp, C_jp, sig))
 
             basis.append(entries)
+        self._cached_basis = (geom, k, a, basis)
         return basis
 
     # ------------------------------------------------------------------

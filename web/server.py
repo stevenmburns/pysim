@@ -80,6 +80,17 @@ _NPROC = str(_physical_cpu_count())
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", _NPROC)
 os.environ.setdefault("MKL_NUM_THREADS", _NPROC)
+# Between OMP parallel regions the workers default to busy-spinning on the
+# team barrier (GOMP_SPINCOUNT ~300k, ~80 ms on KBL). Each pysim solve runs
+# only ~1 ms of C++ kernel then ~10–20 ms of Python serial work (basis-coef
+# build, sparse matmul, LU solve); the workers spin through all of that
+# Python time on every solve. On the N=21 hentenna width-sweep harness
+# (`scripts/vtune_hentenna_width_sweep.py`) VTune attributed ~63% of sin's
+# CPU and ~32% of pynec's CPU to `libgomp` barrier-wait under this default.
+# Make workers park immediately so the spin time goes away — wall-clock
+# drops ~4× on both solvers at N=21 (sin 78 → 19 ms/step, pynec 67 → 9 ms).
+os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+os.environ.setdefault("GOMP_SPINCOUNT", "0")
 
 # ruff: noqa: E402 — imports below must follow the env-var setup above so
 # OpenBLAS picks up the thread count at its own import time.
