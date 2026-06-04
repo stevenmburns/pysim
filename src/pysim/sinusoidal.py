@@ -301,6 +301,39 @@ class SinusoidalPySim:
         )
         feed_seg = first + int(np.argmin(np.abs(feed_arc_centers - feed_arc)))
 
+        # Flat per-edge versions of the nm/np_ list-of-lists, for
+        # _basis_coefs's vectorized P-sum scatter and entry build.
+        # nm_basis[k] = which basis (i) the k-th N⁻ edge belongs to;
+        # nm_seg[k] = the neighbour seg j; nm_sigma[k] = σ.
+        nm_basis_list: list[int] = []
+        nm_seg_list: list[int] = []
+        nm_sigma_list: list[int] = []
+        for i_b in range(n_segs):
+            for j_seg, sig in nm[i_b]:
+                nm_basis_list.append(i_b)
+                nm_seg_list.append(j_seg)
+                nm_sigma_list.append(sig)
+        np_basis_list: list[int] = []
+        np_seg_list: list[int] = []
+        np_sigma_list: list[int] = []
+        for i_b in range(n_segs):
+            for j_seg, sig in np_[i_b]:
+                np_basis_list.append(i_b)
+                np_seg_list.append(j_seg)
+                np_sigma_list.append(sig)
+        nm_basis = np.asarray(nm_basis_list, dtype=np.int64)
+        nm_seg = np.asarray(nm_seg_list, dtype=np.int64)
+        nm_sigma = np.asarray(nm_sigma_list, dtype=np.int8)
+        np_basis = np.asarray(np_basis_list, dtype=np.int64)
+        np_seg = np.asarray(np_seg_list, dtype=np.int64)
+        np_sigma = np.asarray(np_sigma_list, dtype=np.int8)
+        # Per-seg neighbour counts (== counts[s] - 1 with the self entry).
+        nm_count = np.zeros(n_segs, dtype=np.int64)
+        np_count = np.zeros(n_segs, dtype=np.int64)
+        for i_b in range(n_segs):
+            nm_count[i_b] = len(nm[i_b])
+            np_count[i_b] = len(np_[i_b])
+
         self._cached_geometry = {
             "seg_l": seg_l,
             "seg_r": seg_r,
@@ -310,6 +343,14 @@ class SinusoidalPySim:
             "n_segs": n_segs,
             "nm": nm,
             "np": np_,
+            "nm_basis": nm_basis,
+            "nm_seg": nm_seg,
+            "nm_sigma": nm_sigma,
+            "np_basis": np_basis,
+            "np_seg": np_seg,
+            "np_sigma": np_sigma,
+            "nm_count": nm_count,
+            "np_count": np_count,
             "wire_first": wire_first_seg,
             "wire_last": wire_last_seg,
             "feed_seg": feed_seg,
@@ -361,166 +402,153 @@ class SinusoidalPySim:
             return cached[3]
         seg_h = geom["seg_h"]
         n_segs = geom["n_segs"]
-        nm = geom["nm"]
-        np_ = geom["np"]
+        nm_basis = geom["nm_basis"]
+        nm_seg = geom["nm_seg"]
+        nm_sigma = geom["nm_sigma"]
+        np_basis = geom["np_basis"]
+        np_seg = geom["np_seg"]
+        np_sigma = geom["np_sigma"]
+        nm_count = geom["nm_count"]
+        np_count = geom["np_count"]
 
         ka = k * a
         # a_i± from Eq 25 (same value for both ends since wire radius is
         # uniform; we name it a_const).
         a_const = 1.0 / (np.log(2.0 / ka) - _EULER_GAMMA)
 
-        # Pre-allocate the seg-major flat arrays. counts[s] = 1 (self) +
-        # len(nm[s]) + len(np_[s]) by reciprocity (see docstring).
-        counts = np.empty(n_segs, dtype=np.int64)
-        for s in range(n_segs):
-            counts[s] = 1 + len(nm[s]) + len(np_[s])
-        starts = np.empty(n_segs + 1, dtype=np.int64)
-        starts[0] = 0
-        np.cumsum(counts, out=starts[1:])
-        total = int(starts[-1])
-        jbasis_flat = np.empty(total, dtype=np.int64)
-        A_flat = np.empty(total, dtype=np.complex128)
-        B_flat = np.empty(total, dtype=np.complex128)
-        C_flat = np.empty(total, dtype=np.complex128)
-        sigma_flat = np.empty(total, dtype=np.int8)
-        cursor = starts[:-1].copy()  # write head per segment
-
-        # Pre-compute every per-segment trig used inside the main loop in
-        # one vectorized pass. Replacing ~10 np.sin/np.cos ufunc calls per
-        # iter (171 iters → ~1700 dispatches × ~2 µs) with array lookups
-        # was the biggest remaining Python win at N=21 — py-spy attributed
-        # ~25% of samples here. Also pre-compute the (1∓cos)/sin ratios
-        # used by P_minus / P_plus accumulation.
+        # Pre-compute every per-segment trig in one vectorized pass.
         kd_arr = k * np.asarray(seg_h, dtype=np.float64)
         sin_kd = np.sin(kd_arr)
         cos_kd = np.cos(kd_arr)
         sin_kd_2 = np.sin(0.5 * kd_arr)
         cos_kd_2 = np.cos(0.5 * kd_arr)
         # P-sum atoms: (1-cos(kd_j))/sin(kd_j) * a_const for N⁻; flip sign
-        # for N⁺. Same regardless of which basis i references segment j as
-        # a neighbour, so we cache per-segment.
+        # for N⁺.
         P_minus_atom = (1.0 - cos_kd) / sin_kd * a_const
-        P_plus_atom = -P_minus_atom  # (cos(kd_j) - 1)/sin(kd_j) * a_const
 
-        for i in range(n_segs):
-            sin_kdi = sin_kd[i]
-            cos_kdi = cos_kd[i]
-            sin_kdi_2 = sin_kd_2[i]
-            cos_kdi_2 = cos_kd_2[i]
+        # Per-basis P_minus[i] = Σ_{j ∈ N⁻(i)} atom[j], via scatter-sum on
+        # the flat nm arrays. Same for P_plus[i] over N⁺.
+        P_minus_arr = np.zeros(n_segs, dtype=np.float64)
+        np.add.at(P_minus_arr, nm_basis, P_minus_atom[nm_seg])
+        P_plus_arr = np.zeros(n_segs, dtype=np.float64)
+        np.add.at(P_plus_arr, np_basis, -P_minus_atom[np_seg])
 
-            N_minus = nm[i]
-            N_plus = np_[i]
-            has_minus = len(N_minus) > 0
-            has_plus = len(N_plus) > 0
+        # Per-basis (A_i0, B_i0, C_i0, Q_minus, Q_plus) as N-vectors,
+        # following Eqs 43-64. The 4-way branch on (has_minus, has_plus)
+        # is masked: compute the interior formula everywhere, then patch
+        # the rare end / isolated branches via boolean masks. For a
+        # hentenna (closed loop) every segment is interior; for a dipole
+        # the wire-tip segments hit only_minus / only_plus.
+        has_minus = nm_count > 0
+        has_plus = np_count > 0
+        both = has_minus & has_plus
 
-            # P_i± via Eqs 62, 63. With uniform a these sums are pure
-            # geometric ratios times a_const — atom precomputed above.
-            P_minus = 0.0
-            for j, sig in N_minus:
-                P_minus += P_minus_atom[j]
-            P_plus = 0.0
-            for j, sig in N_plus:
-                P_plus += P_plus_atom[j]
+        # Interior branch (Eqs 49-53). Compute everywhere using a_minus =
+        # a_plus = a_const; mask out below where the branch doesn't apply.
+        D = (P_minus_arr * P_plus_arr + a_const * a_const) * sin_kd + (
+            P_minus_arr - P_plus_arr
+        ) * a_const * cos_kd
+        # Guard the denominator: replace 0 with 1 so the (masked-away)
+        # bogus result is finite. Real divide-by-zero in the interior
+        # branch would be a degenerate geometry (kd_i = nπ) we don't
+        # support anyway.
+        D_safe = np.where(D != 0, D, 1.0)
+        sin_kd_safe = np.where(sin_kd != 0, sin_kd, 1.0)
+        Q_minus_arr = (a_const * (1.0 - cos_kd) - P_plus_arr * sin_kd) / D_safe
+        Q_plus_arr = (a_const * (cos_kd - 1.0) - P_minus_arr * sin_kd) / D_safe
+        A_i0_arr = np.full(n_segs, -1.0)
+        B_i0_arr = a_const * (Q_minus_arr + Q_plus_arr) * sin_kd_2 / sin_kd_safe
+        C_i0_arr = a_const * (Q_minus_arr - Q_plus_arr) * cos_kd_2 / sin_kd_safe
 
-            a_minus = a_const
-            a_plus = a_const
+        # Only-plus / only-minus / isolated branches: skip the work
+        # entirely when none of them apply (the common case).
+        only_plus = has_plus & ~has_minus
+        only_minus = has_minus & ~has_plus
+        iso = ~has_minus & ~has_plus
+        if only_plus.any() or only_minus.any() or iso.any():
+            # End segment with free end at end-1 (Eqs 54-57). X = 0.
+            denom_x = cos_kd
+            denom_x_safe = np.where(denom_x != 0, denom_x, 1.0)
+            qpe1_denom = a_const * sin_kd - P_plus_arr * cos_kd
+            qpe1_denom_safe = np.where(qpe1_denom != 0, qpe1_denom, 1.0)
+            Q_plus_e1 = (cos_kd - 1.0) / qpe1_denom_safe
+            B_e1 = (sin_kd_2 + a_const * Q_plus_e1 * cos_kd_2) / denom_x_safe
+            C_e1 = (cos_kd_2 + a_const * Q_plus_e1 * sin_kd_2) / denom_x_safe
 
-            if has_minus and has_plus:
-                # Interior basis (Eqs 49-53).
-                D = (P_minus * P_plus + a_minus * a_plus) * sin_kdi + (
-                    P_minus * a_plus - P_plus * a_minus
-                ) * cos_kdi
-                Q_minus = (a_plus * (1 - cos_kdi) - P_plus * sin_kdi) / D
-                Q_plus = (a_minus * (cos_kdi - 1) - P_minus * sin_kdi) / D
-                A_i0 = -1.0
-                B_i0 = (a_minus * Q_minus + a_plus * Q_plus) * sin_kdi_2 / sin_kdi
-                C_i0 = (a_minus * Q_minus - a_plus * Q_plus) * cos_kdi_2 / sin_kdi
-            elif has_plus and not has_minus:
-                # End segment with free wire end at end-1 (Eqs 54-57).
-                # Zero-current free-end convention → X_i = 0.
-                X_i = 0.0
-                denom_x = cos_kdi - X_i * sin_kdi
-                Q_plus = (cos_kdi - 1 - X_i * sin_kdi) / (
-                    (a_plus + X_i * P_plus) * sin_kdi
-                    + (a_plus * X_i - P_plus) * cos_kdi
-                )
-                Q_minus = 0.0  # no end-1 segments
-                A_i0 = -1.0
-                B_i0 = (
-                    sin_kdi_2 / denom_x
-                    + a_plus * Q_plus * (cos_kdi_2 - X_i * sin_kdi_2) / denom_x
-                )
-                C_i0 = (
-                    cos_kdi_2 / denom_x
-                    + a_plus * Q_plus * (sin_kdi_2 + X_i * cos_kdi_2) / denom_x
-                )
-            elif has_minus and not has_plus:
-                # End segment with free wire end at end-2 (Eqs 58-61).
-                X_i = 0.0
-                denom_x = cos_kdi - X_i * sin_kdi
-                Q_minus = (1 - cos_kdi + X_i * sin_kdi) / (
-                    (a_minus - X_i * P_minus) * sin_kdi
-                    + (P_minus + X_i * a_minus) * cos_kdi
-                )
-                Q_plus = 0.0
-                A_i0 = -1.0
-                B_i0 = (
-                    -sin_kdi_2 / denom_x
-                    + a_minus * Q_minus * (cos_kdi_2 - X_i * sin_kdi_2) / denom_x
-                )
-                C_i0 = (
-                    cos_kdi_2 / denom_x
-                    - a_minus * Q_minus * (sin_kdi_2 + X_i * cos_kdi_2) / denom_x
-                )
-            else:
-                # Isolated single segment (both ends free); Eq 64.
-                # f_i^0(s) = cos(k(s-s_i))/(cos(kΔ_i/2) - X_i sin(kΔ_i/2)) - 1.
-                # → A_i0 = -1, B_i0 = 0, C_i0 = 1/(cos kΔ/2 - X sin kΔ/2)
-                X_i = 0.0
-                A_i0 = -1.0
-                B_i0 = 0.0
-                C_i0 = 1.0 / (cos_kdi_2 - X_i * sin_kdi_2)
-                Q_minus = 0.0
-                Q_plus = 0.0
+            # End segment with free end at end-2 (Eqs 58-61). X = 0.
+            qme2_denom = a_const * sin_kd + P_minus_arr * cos_kd
+            qme2_denom_safe = np.where(qme2_denom != 0, qme2_denom, 1.0)
+            Q_minus_e2 = (1.0 - cos_kd) / qme2_denom_safe
+            B_e2 = (-sin_kd_2 + a_const * Q_minus_e2 * cos_kd_2) / denom_x_safe
+            C_e2 = (cos_kd_2 - a_const * Q_minus_e2 * sin_kd_2) / denom_x_safe
 
-            # Self entry of basis i — lands at seg i.
-            p = cursor[i]
-            jbasis_flat[p] = i
-            A_flat[p] = A_i0
-            B_flat[p] = B_i0
-            C_flat[p] = C_i0
-            sigma_flat[p] = +1
-            cursor[i] = p + 1
+            # Isolated single segment (Eq 64). X = 0 → A = -1, B = 0,
+            # C = 1/cos(kΔ/2).
+            cos_kd_2_safe = np.where(cos_kd_2 != 0, cos_kd_2, 1.0)
+            C_iso = 1.0 / cos_kd_2_safe
 
-            # N^- neighbours: Eqs 43-45. σ records the arc-flip relative
-            # to the segment's natural tangent; coefficients are NEC's
-            # (computed in the NEC-arc frame).
-            for j, sig in N_minus:
-                p = cursor[j]
-                jbasis_flat[p] = i
-                A_flat[p] = a_plus * Q_minus / sin_kd[j]
-                B_flat[p] = a_plus * Q_minus / (2.0 * cos_kd_2[j])
-                C_flat[p] = -a_plus * Q_minus / (2.0 * sin_kd_2[j])
-                sigma_flat[p] = sig
-                cursor[j] = p + 1
+            Q_minus_arr = np.where(only_plus | iso, 0.0, Q_minus_arr)
+            Q_minus_arr = np.where(only_minus, Q_minus_e2, Q_minus_arr)
+            Q_plus_arr = np.where(only_minus | iso, 0.0, Q_plus_arr)
+            Q_plus_arr = np.where(only_plus, Q_plus_e1, Q_plus_arr)
+            B_i0_arr = np.where(only_plus, B_e1, B_i0_arr)
+            B_i0_arr = np.where(only_minus, B_e2, B_i0_arr)
+            B_i0_arr = np.where(iso, 0.0, B_i0_arr)
+            C_i0_arr = np.where(only_plus, C_e1, C_i0_arr)
+            C_i0_arr = np.where(only_minus, C_e2, C_i0_arr)
+            C_i0_arr = np.where(iso, C_iso, C_i0_arr)
+            # A_i0 = -1 in every branch — no patch needed.
+        # `both` mask is unused: the interior formula already lives there.
+        del both
 
-            # N^+ neighbours: Eqs 46-48.
-            for j, sig in N_plus:
-                p = cursor[j]
-                jbasis_flat[p] = i
-                A_flat[p] = -a_minus * Q_plus / sin_kd[j]
-                B_flat[p] = a_minus * Q_plus / (2.0 * cos_kd_2[j])
-                C_flat[p] = a_minus * Q_plus / (2.0 * sin_kd_2[j])
-                sigma_flat[p] = sig
-                cursor[j] = p + 1
+        # Build the flat entry arrays. Three blocks (self, N⁻, N⁺), each
+        # produced with one set of vectorized array ops:
+        #
+        # Self entries: basis = arange(n_segs), seg = arange(n_segs).
+        self_seg = np.arange(n_segs, dtype=np.int64)
+
+        # N⁻ neighbour entries (Eqs 43-45). Basis i contributes at seg j
+        # (the j-side neighbour) using Q_minus[i] for the magnitude.
+        nm_Q = Q_minus_arr[nm_basis]
+        nm_A = a_const * nm_Q / sin_kd[nm_seg]
+        nm_B = a_const * nm_Q / (2.0 * cos_kd_2[nm_seg])
+        nm_C = -a_const * nm_Q / (2.0 * sin_kd_2[nm_seg])
+
+        # N⁺ neighbour entries (Eqs 46-48).
+        np_Q = Q_plus_arr[np_basis]
+        np_A = -a_const * np_Q / sin_kd[np_seg]
+        np_B = a_const * np_Q / (2.0 * cos_kd_2[np_seg])
+        np_C = a_const * np_Q / (2.0 * sin_kd_2[np_seg])
+
+        # Concatenate the three blocks and sort by seg-target to get CSR.
+        # Within-seg ordering is unconstrained — every downstream consumer
+        # (M_{A,B,C} scatter assignment, I_feed reduction,
+        # _evaluate_basis_at_points scatter-add) is order-invariant
+        # because each (basis, seg) coordinate pair is unique (a basis
+        # contributes to a given seg at most once: as self, as N⁻
+        # neighbour, or as N⁺ neighbour, never two of those).
+        all_seg = np.concatenate([self_seg, nm_seg, np_seg])
+        all_basis = np.concatenate([self_seg, nm_basis, np_basis])
+        all_A = np.concatenate([A_i0_arr, nm_A, np_A]).astype(np.complex128)
+        all_B = np.concatenate([B_i0_arr, nm_B, np_B]).astype(np.complex128)
+        all_C = np.concatenate([C_i0_arr, nm_C, np_C]).astype(np.complex128)
+        # Self entries have σ=+1; neighbour σ comes from geometry.
+        self_sigma = np.ones(n_segs, dtype=np.int8)
+        all_sigma = np.concatenate([self_sigma, nm_sigma, np_sigma])
+
+        order = np.argsort(all_seg, kind="stable")
+        counts = np.ones(n_segs, dtype=np.int64) + nm_count + np_count
+        starts = np.empty(n_segs + 1, dtype=np.int64)
+        starts[0] = 0
+        np.cumsum(counts, out=starts[1:])
 
         seg_view = {
             "starts": starts,
-            "jbasis": jbasis_flat,
-            "A": A_flat,
-            "B": B_flat,
-            "C": C_flat,
-            "sigma": sigma_flat,
+            "jbasis": all_basis[order],
+            "A": all_A[order],
+            "B": all_B[order],
+            "C": all_C[order],
+            "sigma": all_sigma[order],
         }
         self._cached_basis = (geom, k, a, seg_view)
         return seg_view
