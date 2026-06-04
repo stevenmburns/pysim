@@ -18,6 +18,7 @@ Scope (deliberately narrow):
 
 import numpy as np
 import scipy.linalg
+import scipy.sparse
 
 try:
     from pysim import _accelerators as _acc
@@ -27,6 +28,12 @@ except ImportError:
     _HAVE_FIELD_TENSOR = False
 
 _EULER_GAMMA = 0.5772156649015329
+
+# Threshold for dense vs sparse assembly in `_assemble_Z`. Below this N
+# the BLAS overhead on a tiny matrix loses to dense matmul; above it the
+# O(N³) zgemm cost on a mostly-zero matrix loses to CSC sparse matmul.
+# Measured crossover on Kaby Lake R / OpenBLAS-pthreads ≈ 60.
+_DENSE_ASSEMBLY_THRESHOLD = 60
 
 
 class SinusoidalPySim:
@@ -659,22 +666,48 @@ class SinusoidalPySim:
 
         basis = self._basis_coefs(geom, k)
         N = geom["n_segs"]
-        G = np.zeros((N, N), dtype=np.complex128)
+        # Build (N, N) coefficient matrices M_{A,B,C}[n, j] = effective
+        # coefficient that basis j contributes at source segment n. With
+        #   A_eff = σ * A, B_eff = B, C_eff = σ * C
+        # (see docs/sinusoidal_basis_design.md), the per-basis loop reduces
+        # to three N×N matmuls G = Phi_c @ M_A + Phi_s @ M_B + Phi_co @ M_C.
+        #
+        # Each basis has only ~3 entries (self + N⁻ + N⁺ neighbour), so M
+        # is very sparse (~3N nonzeros). Two regimes:
+        #   N < _DENSE_ASSEMBLY_THRESHOLD: dense matmul wins because the
+        #     scipy.sparse constructor overhead dominates the BLAS call.
+        #   N ≥ threshold: sparse matmul wins because BLAS zgemm pays the
+        #     full O(N³) cost on a mostly-zero matrix, while CSC matmul
+        #     pays O(N · 3N) = O(N²).
+        # Crossover measured ≈ N=60 on Kaby Lake R / OpenBLAS-pthreads.
+        n_entries = sum(len(e) for e in basis)
+        n_idx_arr = np.empty(n_entries, dtype=np.int64)
+        j_idx_arr = np.empty(n_entries, dtype=np.int64)
+        A_eff = np.empty(n_entries, dtype=np.complex128)
+        B_eff = np.empty(n_entries, dtype=np.complex128)
+        C_eff = np.empty(n_entries, dtype=np.complex128)
+        idx = 0
         for j_basis, entries in enumerate(basis):
             for n_seg, A_jn, B_jn, C_jn, sigma in entries:
-                # In natural-arc convention on segment n:
-                #   A_eff = σ A_jn   (current direction follows σ)
-                #   B_eff = B_jn     (sin(σ·k·s) → σ-fold into B already)
-                #   C_eff = σ C_jn   (cos symmetric; σ from current dir)
-                # See docs/sinusoidal_basis_design.md for the derivation.
-                A_eff = sigma * A_jn
-                B_eff = B_jn
-                C_eff = sigma * C_jn
-                G[:, j_basis] += (
-                    A_eff * Phi_c[:, n_seg]
-                    + B_eff * Phi_s[:, n_seg]
-                    + C_eff * Phi_co[:, n_seg]
-                )
+                n_idx_arr[idx] = n_seg
+                j_idx_arr[idx] = j_basis
+                A_eff[idx] = sigma * A_jn
+                B_eff[idx] = B_jn
+                C_eff[idx] = sigma * C_jn
+                idx += 1
+        if N < _DENSE_ASSEMBLY_THRESHOLD:
+            M_A = np.zeros((N, N), dtype=np.complex128)
+            M_B = np.zeros((N, N), dtype=np.complex128)
+            M_C = np.zeros((N, N), dtype=np.complex128)
+            M_A[n_idx_arr, j_idx_arr] = A_eff
+            M_B[n_idx_arr, j_idx_arr] = B_eff
+            M_C[n_idx_arr, j_idx_arr] = C_eff
+            G = Phi_c @ M_A + Phi_s @ M_B + Phi_co @ M_C
+        else:
+            M_A = scipy.sparse.csc_matrix((A_eff, (n_idx_arr, j_idx_arr)), shape=(N, N))
+            M_B = scipy.sparse.csc_matrix((B_eff, (n_idx_arr, j_idx_arr)), shape=(N, N))
+            M_C = scipy.sparse.csc_matrix((C_eff, (n_idx_arr, j_idx_arr)), shape=(N, N))
+            G = (Phi_c @ M_A) + (Phi_s @ M_B) + (Phi_co @ M_C)
         return G, basis
 
     def compute_impedance(self):
@@ -710,10 +743,11 @@ class SinusoidalPySim:
 
     def compute_impedance_swept(self, k_array):
         """Loop over wavenumbers. Per-call work that doesn't depend on k
-        (geometry build) is lifted out of the loop so the per-k cost at
-        small N reduces to field-tensor + basis-coefs + assembly + solve,
-        and shaves ~25% off the n=21 sweep that was bottlenecked on
-        repeated `_build_geometry` calls in the prior naive loop.
+        (geometry build, source-vector index, the set of bases that touch
+        the feed segment) is lifted out of the loop so the per-k cost
+        reduces to field-tensor + basis-coefs + assembly + solve. Together
+        with the assemble_Z vectorization and the C++ field-tensor
+        accelerator, this brings the n=21 sweep from ~70 ms to ~30 ms.
         """
         k_array = np.asarray(k_array, dtype=float)
         z_out = np.zeros(k_array.shape[0], dtype=np.complex128)
@@ -721,16 +755,20 @@ class SinusoidalPySim:
         wl_save = self.wavelength
         omega_save = self.omega
         geom = self._build_geometry()
+        feed = geom["feed_seg"]
+        h_feed = geom["seg_h"][feed]
+        n_segs = geom["n_segs"]
+        v = np.zeros(n_segs, dtype=np.complex128)
+        v[feed] = -1.0 / h_feed
         for i, kk in enumerate(k_array):
             self.k = float(kk)
             self.omega = self.k * self.c
             self.wavelength = self.c / (self.omega / (2 * np.pi))
             G, basis = self._assemble_Z(geom, self.k)
-            feed = geom["feed_seg"]
-            h_feed = geom["seg_h"][feed]
-            v = np.zeros(geom["n_segs"], dtype=np.complex128)
-            v[feed] = -1.0 / h_feed
             alpha = scipy.linalg.solve(G, v)
+            # Sum α_j · σ · (A + C) over basis entries on the feed segment.
+            # Each basis j has one entry per segment in its support; only
+            # the ones with n_seg == feed contribute.
             I_feed = 0.0 + 0.0j
             for j_basis, entries in enumerate(basis):
                 for n_seg, A_jn, B_jn, C_jn, sigma in entries:
