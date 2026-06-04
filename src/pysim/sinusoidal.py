@@ -385,13 +385,28 @@ class SinusoidalPySim:
         sigma_flat = np.empty(total, dtype=np.int8)
         cursor = starts[:-1].copy()  # write head per segment
 
+        # Pre-compute every per-segment trig used inside the main loop in
+        # one vectorized pass. Replacing ~10 np.sin/np.cos ufunc calls per
+        # iter (171 iters → ~1700 dispatches × ~2 µs) with array lookups
+        # was the biggest remaining Python win at N=21 — py-spy attributed
+        # ~25% of samples here. Also pre-compute the (1∓cos)/sin ratios
+        # used by P_minus / P_plus accumulation.
+        kd_arr = k * np.asarray(seg_h, dtype=np.float64)
+        sin_kd = np.sin(kd_arr)
+        cos_kd = np.cos(kd_arr)
+        sin_kd_2 = np.sin(0.5 * kd_arr)
+        cos_kd_2 = np.cos(0.5 * kd_arr)
+        # P-sum atoms: (1-cos(kd_j))/sin(kd_j) * a_const for N⁻; flip sign
+        # for N⁺. Same regardless of which basis i references segment j as
+        # a neighbour, so we cache per-segment.
+        P_minus_atom = (1.0 - cos_kd) / sin_kd * a_const
+        P_plus_atom = -P_minus_atom  # (cos(kd_j) - 1)/sin(kd_j) * a_const
+
         for i in range(n_segs):
-            d_i = seg_h[i]
-            kd_i = k * d_i
-            sin_kdi = np.sin(kd_i)
-            cos_kdi = np.cos(kd_i)
-            sin_kdi_2 = np.sin(0.5 * kd_i)
-            cos_kdi_2 = np.cos(0.5 * kd_i)
+            sin_kdi = sin_kd[i]
+            cos_kdi = cos_kd[i]
+            sin_kdi_2 = sin_kd_2[i]
+            cos_kdi_2 = cos_kd_2[i]
 
             N_minus = nm[i]
             N_plus = np_[i]
@@ -399,17 +414,13 @@ class SinusoidalPySim:
             has_plus = len(N_plus) > 0
 
             # P_i± via Eqs 62, 63. With uniform a these sums are pure
-            # geometric ratios times a_const.
+            # geometric ratios times a_const — atom precomputed above.
             P_minus = 0.0
             for j, sig in N_minus:
-                d_j = seg_h[j]
-                kd_j = k * d_j
-                P_minus += (1 - np.cos(kd_j)) / np.sin(kd_j) * a_const
+                P_minus += P_minus_atom[j]
             P_plus = 0.0
             for j, sig in N_plus:
-                d_j = seg_h[j]
-                kd_j = k * d_j
-                P_plus += (np.cos(kd_j) - 1) / np.sin(kd_j) * a_const
+                P_plus += P_plus_atom[j]
 
             a_minus = a_const
             a_plus = a_const
@@ -485,31 +496,21 @@ class SinusoidalPySim:
             # to the segment's natural tangent; coefficients are NEC's
             # (computed in the NEC-arc frame).
             for j, sig in N_minus:
-                d_j = seg_h[j]
-                kd_j = k * d_j
-                sin_kdj = np.sin(kd_j)
-                cos_kdj_2 = np.cos(0.5 * kd_j)
-                sin_kdj_2 = np.sin(0.5 * kd_j)
                 p = cursor[j]
                 jbasis_flat[p] = i
-                A_flat[p] = a_plus * Q_minus / sin_kdj
-                B_flat[p] = a_plus * Q_minus / (2.0 * cos_kdj_2)
-                C_flat[p] = -a_plus * Q_minus / (2.0 * sin_kdj_2)
+                A_flat[p] = a_plus * Q_minus / sin_kd[j]
+                B_flat[p] = a_plus * Q_minus / (2.0 * cos_kd_2[j])
+                C_flat[p] = -a_plus * Q_minus / (2.0 * sin_kd_2[j])
                 sigma_flat[p] = sig
                 cursor[j] = p + 1
 
             # N^+ neighbours: Eqs 46-48.
             for j, sig in N_plus:
-                d_j = seg_h[j]
-                kd_j = k * d_j
-                sin_kdj = np.sin(kd_j)
-                cos_kdj_2 = np.cos(0.5 * kd_j)
-                sin_kdj_2 = np.sin(0.5 * kd_j)
                 p = cursor[j]
                 jbasis_flat[p] = i
-                A_flat[p] = -a_minus * Q_plus / sin_kdj
-                B_flat[p] = a_minus * Q_plus / (2.0 * cos_kdj_2)
-                C_flat[p] = a_minus * Q_plus / (2.0 * sin_kdj_2)
+                A_flat[p] = -a_minus * Q_plus / sin_kd[j]
+                B_flat[p] = a_minus * Q_plus / (2.0 * cos_kd_2[j])
+                C_flat[p] = a_minus * Q_plus / (2.0 * sin_kd_2[j])
                 sigma_flat[p] = sig
                 cursor[j] = p + 1
 
