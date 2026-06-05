@@ -452,6 +452,37 @@ Ordered by what I'd actually do next, not by what's most ambitious.
 
     None of these are urgent — "raw" with the slot-B `useSingularEnrichment=false` default already ships a working answer for all current UI presets. **Recommendation for users running custom geometries with enrichment on: switch to `enrichment_variant="auto"`** — it's the only variant that's geometry-aware. One extra solve pass; skipped entirely if no junction qualifies.
 
+### BSpline ↔ Triangular feature parity (may-never-do)
+
+These are gaps `BSplinePySim(degree=1, ...)` has relative to `TriangularPySim`, even though d=1 is mathematically the same tent basis. None are blocking — the bspline solver works correctly on every geometry the triangular solver handles. They're listed so we know what'd be involved if performance ever turned out to matter on the bspline path, and so the asymmetry doesn't get forgotten.
+
+19. **Batched swept assembly path for `BSplinePySim`.** Triangular's `compute_impedance_swept(k_array)` builds the full `(n_k, M, M)` Z stack in one shot via batched C++ kernels and a batched Schur-complement KCL solve (PR #11, #12, #13, #37). BSpline's swept literally says "Loop over wavenumbers (no batched assembly here yet)" in `compute_impedance_swept` (`src/pysim/bspline.py:1284`) — it just rebinds `self.k`/`self.omega` per k and re-runs single-frequency `compute_impedance()`. So an n_k=41 sweep pays the J-build + Z-assembly + factorization setup 41× instead of once.
+
+    Estimated speedup gap on the bspline d=1 path vs triangular's swept path: 2–3× on geometries without junctions (where the per-k overhead is mostly arithmetic) and 3–5× on K=3-junction geometries like fan dipole (where assembly + Schur + dispatch glue compound). Not measured precisely — no one's complained.
+
+    **Memory caveat — the gap is not all upside.** Triangular's batched path holds 4 J tensors of shape `(n_k, N, N)` complex128 plus the assembly intermediates `S` and `I_A` of the same shape — peak around 7× n_k × N² × 16 bytes during assembly. At UI scale (n_k=41, N=80) that's ~30 MB; at fan-dipole sweep scale (n_k=41, N=400) it climbs to ~800 MB. The UI's `/sweep` endpoint already manages this by **adaptively chunking** the sweep into ~8-freq batches that retune to `_CHUNK_TARGET_MS` per chunk (`web/server.py:1595–1648`); per-chunk peak is ~5× less. BSpline's loop-per-k swept path is effectively `n_k=1` chunking — same memory profile as the UI chunker would target at very small chunks. So porting triangular's batched assembly to bspline doesn't strictly dominate; it's a memory-vs-time trade-off where the UI's existing chunker already covers the interactive use case.
+
+    Sub-items, ranked roughly by leverage (mirrors item 6's ordering):
+
+    - **19a. Batched J-build with k-axis.** Triangular has `_build_J_blocks_batch` calling `seg_seg_quad_batch_3d` and `seg_seg_reg_quad_batch_1d` with a `k_array` argument; each kernel produces `(n_k, N, N)` output and reuses the `R[q, r]` quadrature-point distance table across all k (PR #11 / #12). BSpline's `_seg_seg_full_moments_offedge` and friends are single-k. Largest single chunk of work in the port — the C++ kernels' template structure would need a `n_k` dimension added in the same way triangular's kernels do.
+
+    - **19b. Batched `assemble_Z_bspline` with k-axis.** Mirror of triangular's PR #13 `assemble_Z` — a leading k-axis on the J tensors and the matching `parallel for collapse(2)` over `(k, m)`. BSpline's `assemble_Z_bspline` is single-k; bumping to batched is mostly a templated loop change. Same parity test pattern as the existing `test_bspline_cpp_assemble_z_matches_numpy` would apply (toggle `_HAVE_BSPLINE_ASSEMBLE_ACCEL`, compare against a swept-numpy reference).
+
+    - **19c. `assemble_Z_bspline_general` accelerator + J-build fusion for junction geometries.** Mirror of triangular's PR #37 6g + 6h. Junction geometries currently go through the same single-k C++ path (`assemble_Z_bspline` handles the general case via `supp_seg_poly` / `polys_poly`), but a batched-with-k-axis version doesn't exist. Bigger payoff per LOC than 19b because fan-dipole-class junction geometries are exactly where the swept loop is slowest.
+
+    - **19d. Batched Schur-complement KCL solve.** Mirror of triangular's PR #37 6i. BSpline already has Schur in single-k (`_solve_with_kcl`, `src/pysim/bspline.py:834`) — the augmented `[Z A^T; A 0]` system is reduced to a Z-solve plus a small `(n_c × n_c)` correction. Triangular extends the same trick to the batch by solving `Z [w | X] = [v | A^T]` with `(1 + n_c)` RHS columns simultaneously. The math ports directly; what's needed is a batched `scipy.linalg.solve` call and the surrounding glue.
+
+    - **19e. Enrichment kernel with k-axis.** `assemble_Z_enrich` is single-k. A swept version would let the entire `compute_impedance_swept` path stay on the batched accelerators when enrichment is on. Lowest priority of the five — enrichment is rarely combined with sweeps in practice, and the auto variant's pass-1-needs-no-kernel optimization already mitigates worst case.
+
+    Even if 19a–19d landed, BSpline d=2 would still pay an inherent cost that d=1 doesn't: the closed-form static-moment tables (`_bspline_static_moments.py`) get re-evaluated symbolically with each h, which is single-k by design. Refactoring that to be k-vectorized is its own subproject — file under 19f if anyone ever asks.
+
+    **What bspline has that triangular doesn't** (the asymmetry runs both ways, so this section is honest about it):
+    - Higher-order d=2 basis (the closed-form static-moment derivation in `scripts/derive_bspline_static_moments.py`)
+    - Singular-basis enrichment with four variants (raw / stable / tikhonov / auto, PR #45 / #47 / #65 / current branch)
+    - Smoothed delta-gap source (`feed_smoothing_factor`, PR #48) — triangular only has the sharp delta-gap; its magnetic-frill experiment was reverted (item 5)
+
+    So porting triangular's batched machinery to bspline isn't strictly "make bspline faster"; it's "stop having two independent assembly pipelines for the same basis at d=1." The maintenance burden of carrying both is probably worse than the perf delta — which is why this section is the may-never-do part of the doc.
+
 ## Key locations
 
 - `src/pysim/triangular.py` — the active solver. `_build_geometry` builds the per-basis support arrays (segments, level-at-left, level-at-right); `_add_junction_bases` (PR #36) appends K directional bases per junction and the KCL constraint matrix `kcl_A`; `_assemble_Z_single` is the fast path used for non-junction geometries (calls the C++ `assemble_Z` accelerator), `_assemble_Z_general_single` is the general path used when junctions exist. The Lagrange-augmented solve lives in `_solve_with_kcl` (single) and `_solve_with_kcl_batch` (swept).
