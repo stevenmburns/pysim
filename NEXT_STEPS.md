@@ -400,32 +400,43 @@ Ordered by what I'd actually do next, not by what's most ambitious.
 
     **Postscript (`fandipole-even-ring` branch, item 8 update)**: after fixing the lopsided pentagon `_FANDIPOLE_RING_5` to evenly distribute K bands at 360°/K, the ~15 Ω X-part of what was being called "the fan-dipole disagreement" turned out to be a *geometry* artifact (lopsided ring) that had been incorrectly attributed to junction/formulation effects. The original PR #36 cone-angle sweep (~7 Ω tracking inter-arm angle) was also partly contaminated by the same ring asymmetry — when n_bands varied while still using the pentagon prefix, the inter-arm angle changes mixed with ring-position bias. The remaining real-part disagreement (~5–17 Ω growing with K and N) is what's left after that contamination is removed; it sits in the same family as item 8's "NEC2 outlier" conclusion. No new actions — item stays closed.
 
-18. **Stable / XFEM-style enrichment basis to make `use_singular_enrichment=True` safe at small N on dominant-pair K=3 junctions.** Background: PR #52 + the slot-B-default-flip PR established that on hentenna-class geometries (where the K=3 current split has a dominant in/out pair with the third wire as a small tap — `scripts/probe_k3_junction_imbalance.py`), enrichment-on at small N introduces a ~0.26 Ω X offset that decays away by n=41. The offset is from the 6 enrichment DOFs (2 K=3 junctions × 3 wings) absorbing small-N polynomial-basis discretization error rather than representing real cusp physics — they're not constrained well enough by the data at N=21 to settle at their physically-correct near-zero values.
+18. ~~**Stable / XFEM-style enrichment basis to make `use_singular_enrichment=True` safe at small N on dominant-pair K=3 junctions.**~~ — **implemented as opt-in (`enrichment_variant="stable"`) on the `stable-xfem-enrichment` branch; doesn't deliver the predicted universal safety, so default remains `"raw"`.** Background as previously stated: hentenna-class K=3 geometries (dominant in/out pair + small tap, per `scripts/probe_k3_junction_imbalance.py`) get a ~0.26 Ω X offset at small N from the 6 enrichment DOFs absorbing polynomial-basis discretization error rather than representing real cusp physics.
 
-    The XFEM/GFEM literature solves this with a **stable enrichment basis**: L²-orthogonalize the singular shape against the local polynomial basis on each segment *before* assembly, so the orthogonalized basis represents *only* what the polynomial space can't. Concretely, replace Φ_sing(u) = (u/h)·log(u/h) with
+    **Implementation.** `BSplinePySim` grew an `enrichment_variant` kwarg (`"raw"` | `"stable"`, default `"raw"`):
 
     ```
-    Φ_sing_stable(u) = Φ_sing(u) − P_poly(Φ_sing)(u)
+    Φ_sing_stable(t) = t·log(t) − P_bubble(t·log(t))
     ```
 
-    where P_poly is the L²-orthogonal projection onto the local polynomial basis `{1, u/h, (u/h)²}` on the segment. Then α_enrich = 0 *exactly* when the truth lives in the polynomial subspace — no tuning parameter, principled.
+    where `P_bubble` is the L²-orthogonal projection onto the polynomial **bubble subspace** of P_d on [0,1] — the polynomials that vanish at both t=0 and t=1. For d=2 that's `span{t(1−t)}` (1D); for d=1 it's `{0}` (empty), so the "stable" variant reduces to "raw" bit-exact at d=1 — consistent with item 15(b)'s "d=1 enrichment is a no-op" finding. The projection coefficients are pure constants per degree (h-independent, geometry-independent); the C++ kernel takes them as an extra `proj_coeffs` argument and subtracts inline at every quadrature point.
 
-    Work involved (estimated ~1-2 days):
-    - Re-derive the static-moment integrals J_pq against the new shape Φ_sing_stable in `scripts/derive_bspline_static_moments.py` (sympy already has everything we need; the new integrals are linear combinations of the existing ones).
-    - Dump to `_bspline_static_moments.py` alongside the existing tables.
-    - Update `_assemble_Z_enrich` (and the C++ accelerator) to use the new shape.
-    - Re-run the convergence sweeps in `scripts/compare_hentenna_solvers.py`, `probe_y_fixture_enrichment.py`, `probe_fandipole_enrichment.py`. Expected outcomes:
-      - **Hentenna**: b2e converges to the same place as b2 at every N (the small-N offset vanishes — that's the whole point).
-      - **Y-fixture**: b2e still wins (~0.08 Ω R correction) — the cusp is real and Φ_sing_stable still represents it.
-      - **Fan dipole**: b2 ↔ b2e gap shrinks from 0.012 Ω X to noise floor.
-    - If the expected outcomes land, flip slot-B's `useSingularEnrichment` default back to `true` (the stable variant is universally safe).
+    **Why project against the bubble subspace, not full P_d.** The full-P_d projection breaks Φ_sing's u=0 boundary condition (Φ_sing_stable(0) = +0.125 for d=2 instead of 0), which violates the finite-current condition at the K-wire junction — the KCL constraint only sees polynomial bases, so an enrichment that doesn't self-zero at the junction node carries uncompensated current there. Measured: full-P_d projection gives ~42.98 R at n=81 on hentenna (drift of 0.1 Ω from the asymptote). Projecting against the BC-preserving bubble subspace preserves both Φ_sing(0)=Φ_sing(1)=0 and the cusp shape at t=0+.
 
-    Alternatives briefly considered and rejected (notes for future-us):
-    - **Tikhonov regularization** (add λ·I to the enrichment-block diagonal of the Galerkin matrix): simpler — one line in the solve step — but introduces a tuning parameter λ that needs to be picked per-geometry or via L-curve/GCV. Cheaper to ship but not principled.
-    - **Posteriori threshold** (solve, check |α_enrich,k|, zero small ones, re-solve): also tunable, also adds an iteration in the solver.
-    - **Stable XFEM** is the principled fix used in the actual XFEM literature for exactly this problem, and has the orthogonality guarantee that the simpler options lack.
+    **Measured outcomes (vs the predicted ones):**
 
-    **When to do this**: not urgent. The slot-B-default-flip PR already ships a working fix for the immediate user-visible issue. This is the right follow-up if (a) a new UI antenna preset gets added that has genuinely balanced K=3 junctions, OR (b) we want the BSpline backend to be "safe by default" with enrichment on for users running their own custom geometries.
+    | geometry | n | b2 (no enr) | b2e raw | b2e stable | predicted | actual |
+    |---|---|---|---|---|---|---|
+    | hentenna | 21 | j38.87 | j39.13 | j39.66 | small-N transient vanishes | **transient WORSE** (+0.79 vs raw's +0.26) |
+    | hentenna | 81 | j38.87 | j38.87 | j38.88 | matches at every N | matches at large N ✓ |
+    | Y-fixture | 161 | 50.339 | 50.42 (d=1 value) | 50.341 | still wins ~0.08 Ω R correction | **cusp benefit LOST** |
+    | fan dipole | 81 | j−4.435 | j−4.435 | j−4.437 | gap shrinks to noise floor | noise floor ✓ |
+    | bent-dipole k2 enr=2 | 81 | (no-enr) | ΔR=−469 Ω (PR #51 era) | ΔR=−30 Ω | (alternative not predicted) | misuse-harm reduced 15× ✓ |
+
+    Stable X-rate on hentenna in the (41,81,161) window is p ≈ 4.10 (vs raw's ~2.7 vs no-enr b2's 2.53) — so it does converge faster *once past the small-N transient*.
+
+    **Root cause of mixed result.** The bubble subspace `span{t(1−t)}` is only 1-dimensional for d=2, so the orthogonalization is partial — Φ_sing_stable can still couple to the 2D of P_d that has non-zero endpoint values. Meanwhile, the BC constraint shrinks Φ_sing_stable's peak magnitude from ~0.37 to ~0.018, so the same physical cusp requires a much larger enrichment coefficient α (amplifying numerical sensitivity) and the stable variant can't absorb the polynomial-bubble mass that the raw variant was using to capture the Y-fixture cusp.
+
+    The literature's "stable GFEM" projects against the full polynomial space — which works in problems where the singular function doesn't have endpoint BCs to preserve. Adapting it cleanly to this K-wire-junction setting where Φ_sing has both vanishing endpoint values + a log-divergent slope at one end appears to be open research, not a 1-day port.
+
+    **Disposition.** "raw" stays default in `BSplinePySim`, `web/server.py`'s allowlist, and the slot-B UI default (`useSingularEnrichment=false`). The "stable" variant is exposed as an opt-in via the slot's gear menu for users who want faster large-N convergence and don't care about the n≤21 transient. Tests: `test_bspline_d2_hentenna_enrichment_stable_variant` pins the stable n=81 hentenna value and the d=1-equivalence-to-raw property.
+
+    Alternatives still on the table (notes for future-us):
+    - **Tikhonov regularization** (add λ·I to the enrichment-block diagonal): one-line solve-step change but tuning parameter λ.
+    - **Posteriori threshold** (solve → zero small |α_enrich,k| → resolve): also tunable.
+    - **Two-pass tap_ratio auto-toggle**: solve raw once, measure tap_ratio at each K≥3 junction, re-solve enabling enrichment only where the split is genuinely 3-way (~0.50). Threshold-based; no basis change.
+    - **Blending / partition-of-unity XFEM**: multiply Φ_sing by a partition-of-unity that decays smoothly from the junction; literature suggests this captures the right physics with better conditioning. More implementation effort.
+
+    None of these are urgent — "raw" with the slot-B `useSingularEnrichment=false` default already ships a working answer for all current UI presets.
 
 ## Key locations
 

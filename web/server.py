@@ -125,6 +125,7 @@ _PYSIM_MODEL_KEYS = {
         "use_singular_enrichment",
         "n_qp_sing",
         "enrichment_min_k",
+        "enrichment_variant",
     ),
 }
 _PYSIM_MODELS = {

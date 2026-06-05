@@ -1202,7 +1202,8 @@ assemble_Z_enrich(
     double eps_,
     double mu_,
     py::array_t<double, py::array::c_style | py::array::forcecast> gl_t01,
-    py::array_t<double, py::array::c_style | py::array::forcecast> gl_w01
+    py::array_t<double, py::array::c_style | py::array::forcecast> gl_w01,
+    py::array_t<double, py::array::c_style | py::array::forcecast> proj_coeffs
 ) {
     auto specs_v   = spec_seg.unchecked<1>();
     auto origin_v  = spec_origin.unchecked<1>();
@@ -1214,6 +1215,7 @@ assemble_Z_enrich(
     auto polys_v   = polys_poly.unchecked<3>();
     auto t01_v     = gl_t01.unchecked<1>();
     auto w01_v     = gl_w01.unchecked<1>();
+    auto pc_v      = proj_coeffs.unchecked<1>();
 
     size_t n_enrich = (size_t)spec_seg.shape(0);
     size_t n_poly   = (size_t)supp_seg_poly.shape(0);
@@ -1233,6 +1235,9 @@ assemble_Z_enrich(
     }
     if (sl_v.shape(1) != 3 || sr_v.shape(1) != 3) {
         throw std::runtime_error("seg_l/seg_r must have shape (N_seg, 3)");
+    }
+    if ((size_t)proj_coeffs.shape(0) != d_plus_1) {
+        throw std::runtime_error("proj_coeffs length must equal d+1 (degree + 1)");
     }
 
     py::array_t<std::complex<double>> Z_pe({n_poly, n_enrich});
@@ -1285,8 +1290,25 @@ assemble_Z_enrich(
             double u_norm = (orig == 0) ? t : (1.0 - t);
             double u_safe = u_norm > eps_tiny ? u_norm : eps_tiny;
             double log_u = std::log(u_safe);
-            sing_val_all[e * n_qp + q] = u_norm * log_u;
-            sing_dval_all[e * n_qp + q] = dphi_sign * (log_u + 1.0) / he;
+            // Stable XFEM: Φ_sing_stable(t) = t·log(t) − Σ c_p t^p, so the
+            // enrichment basis is L²-orthogonal to the local polynomial
+            // space {1, t, …, t^d} on the segment. The projection is in
+            // u_norm — the segment's natural orientation-aware coordinate
+            // — so it carries through both orientations unchanged.
+            // dΦ/du_arc = (dΦ/du_norm) · (du_norm/du_arc) = (...) · sign/h.
+            double poly_val = 0.0;
+            double poly_dval = 0.0;
+            // Horner on Σ c_p t^p and its derivative Σ p·c_p t^(p-1).
+            poly_val  = pc_v(d_plus_1 - 1);
+            poly_dval = (double)(d_plus_1 - 1) * pc_v(d_plus_1 - 1);
+            for (size_t pp = d_plus_1 - 1; pp-- > 0; ) {
+                poly_val = poly_val * u_norm + pc_v(pp);
+                if (pp >= 1) {
+                    poly_dval = poly_dval * u_norm + (double)pp * pc_v(pp);
+                }
+            }
+            sing_val_all[e * n_qp + q] = u_norm * log_u - poly_val;
+            sing_dval_all[e * n_qp + q] = dphi_sign * (log_u + 1.0 - poly_dval) / he;
             w_e_all[e * n_qp + q] = w * he;
             double *pe = &pos_e_all[(e * n_qp + q) * 3];
             pe[0] = (1.0 - t) * sl_v(se, 0) + t * sr_v(se, 0);
@@ -1893,18 +1915,22 @@ PYBIND11_MODULE(_accelerators, m) {
           py::arg("omega"), py::arg("eps"), py::arg("mu"),
           py::arg("max_d"));
     m.def("assemble_Z_enrich", &assemble_Z_enrich,
-          "Assemble (Z_pe, Z_ep, Z_ee) for the singular basis enrichment at "
-          "K≥3 junctions. Each enrichment basis is Φ_sing(u) = (u/h)·log(u/h) "
-          "on the segment adjacent to a junction, with u measured from the "
-          "junction node (origin=0 → u=t·h, origin=1 → u=(1-t)·h). Z_ep is "
-          "computed independently from Z_pe (no .T shortcut). Single-k.",
+          "Assemble (Z_pe, Z_ep, Z_ee) for the stable XFEM singular basis "
+          "enrichment at K≥3 junctions. Each enrichment basis is "
+          "Φ_sing_stable(t) = t·log(t) − Σ_p proj_coeffs[p]·t^p with "
+          "t = u_norm = u/h (origin=0) or 1 − u/h (origin=1), so the "
+          "enrichment is L²-orthogonal to the local polynomial space on "
+          "each segment. proj_coeffs must have length degree+1 and match "
+          "the polys_poly third dim. Z_ep is computed independently from "
+          "Z_pe (no .T shortcut). Single-k.",
           py::arg("spec_seg"), py::arg("spec_origin"),
           py::arg("seg_l"), py::arg("seg_r"),
           py::arg("h_per_seg"), py::arg("td_all"),
           py::arg("supp_seg_poly"), py::arg("polys_poly"),
           py::arg("a_squared"), py::arg("k"),
           py::arg("omega"), py::arg("eps"), py::arg("mu"),
-          py::arg("gl_t01"), py::arg("gl_w01"));
+          py::arg("gl_t01"), py::arg("gl_w01"),
+          py::arg("proj_coeffs"));
     m.def("sinusoidal_field_tensor", &sinusoidal_field_tensor,
           "Tangential field tensor for the NEC2 three-term basis. Returns "
           "(Phi_const, Phi_sin, Phi_cos), each (M, N) complex. obs_*/src_* "

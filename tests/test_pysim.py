@@ -900,6 +900,90 @@ def test_bspline_d2_hentenna_singular_enrichment():
     assert p > 2.5, f"X convergence rate p={p:.2f} below the 2.5 floor (Xs={Xs})"
 
 
+def test_bspline_d2_hentenna_enrichment_stable_variant():
+    """Pin the stable-XFEM hentenna asymptote and verify that:
+      (a) at n=81 it lands within ~0.005 Ω of the raw variant — the two
+          variants must converge to the same Z, only with different
+          small-N transients;
+      (b) at d=1 the stable variant is bit-exact to raw — the BC-preserving
+          polynomial bubble subspace is empty for d=1 (P_1 ∩ {p(0)=p(1)=0}
+          = {0}), so projection coeffs are all zero and Φ_sing_stable
+          identically equals Φ_sing. This pins the "d=1 enrichment is a
+          no-op" symmetry between variants.
+
+    Reference values (productized C++ path, this branch, n=81):
+      stable: 43.0864 + j38.8757
+      raw   : 43.0866 + j38.8740
+      diff  : ~0.0002 Ω R, ~0.0017 Ω X
+    """
+    C_LIGHT = 299_792_458.0
+    freq_mhz = 28.47
+    wavelength = C_LIGHT / (freq_mhz * 1e6)
+    width_factor = 0.1378
+    top_height_factor = 0.5081
+    mid_height_factor = 0.1094
+    eps_feed = 0.05
+    half_w = wavelength * width_factor / 2
+    z_mid = wavelength * (mid_height_factor - top_height_factor)
+    z_bot = -wavelength * top_height_factor
+    A = (0.0, half_w, 0.0)
+    B_ = (0.0, half_w, z_mid)
+    F = (0.0, half_w, z_bot)
+    S = (0.0, eps_feed, z_mid)
+    C_ = (0.0, -half_w, 0.0)
+    D = (0.0, -half_w, z_mid)
+    E_ = (0.0, -half_w, z_bot)
+    T = (0.0, -eps_feed, z_mid)
+    wires = [
+        np.array([T, S], dtype=float),
+        np.array([S, B_], dtype=float),
+        np.array([B_, A, C_, D], dtype=float),
+        np.array([T, D], dtype=float),
+        np.array([D, E_, F, B_], dtype=float),
+    ]
+    junctions = [
+        [(0, "end"), (1, "start")],
+        [(0, "start"), (3, "start")],
+        [(1, "end"), (2, "start"), (4, "end")],
+        [(2, "end"), (3, "end"), (4, "start")],
+    ]
+    n = 81
+    npe = [[3], [n], [n, n, n], [n], [n, n, n]]
+    common = dict(
+        wires=wires,
+        n_per_edge_per_wire=npe,
+        feed_wire_index=0,
+        feed_arclength=eps_feed,
+        wavelength=wavelength,
+        wire_radius=0.0005,
+        nsegs=n,
+        junctions=junctions,
+        use_singular_enrichment=True,
+    )
+    z_raw, _ = BSplinePySim(
+        degree=2, enrichment_variant="raw", **common
+    ).compute_impedance()
+    z_stb, _ = BSplinePySim(
+        degree=2, enrichment_variant="stable", **common
+    ).compute_impedance()
+    # (a) Both variants converge to the same Z; pin stable's value and the
+    # raw-stable agreement so any future projection-coefficient drift fails
+    # loudly. The tighter check is the raw-stable diff: 0.005 Ω covers
+    # rounding noise but catches any sign / shape regression.
+    assert abs(z_stb.real - 43.0864) < 5e-3
+    assert abs(z_stb.imag - 38.8757) < 5e-3
+    assert abs(z_raw - z_stb) < 5e-3
+
+    # (b) At d=1 the bubble subspace is empty → stable = raw bit-exact.
+    z1_raw, _ = BSplinePySim(
+        degree=1, enrichment_variant="raw", **common
+    ).compute_impedance()
+    z1_stb, _ = BSplinePySim(
+        degree=1, enrichment_variant="stable", **common
+    ).compute_impedance()
+    assert z1_raw == z1_stb
+
+
 def test_bspline_hentenna_enrichment_left_right_symmetry():
     """Hentenna is mirror-symmetric about y=0, so the BSpline+enrichment solve
     must produce mirror-symmetric per-knot currents on the upper and lower
