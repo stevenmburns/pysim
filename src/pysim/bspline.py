@@ -57,6 +57,60 @@ except ImportError:
 _BSPLINE_ASSEMBLE_ACCEL_MAX_D = 2
 
 
+def _xfem_projection_coeffs(d):
+    """Coefficients c such that P_bubble Φ_sing (t) = Σ_p c_p t^p, where
+    P_bubble is the L²-orthogonal projection of Φ_sing(t) = t·log(t) onto
+    the subspace of P_d on [0, 1] whose elements vanish at t=0 and t=1.
+
+    Returns an array of length d+1, the monomial coefficients of the
+    projection. Pure constants — h-independent and geometry-independent.
+
+    Used to build the "stable" XFEM enrichment basis
+        Φ_sing_stable(t) = t·log(t) − Σ_p c_p t^p
+    Φ_sing_stable retains both endpoint BCs of Φ_sing — vanishing at
+    t=0 (the junction node, required for finite-current KCL at the
+    K-wire junction — the KCL constraint only sees polynomial bases,
+    so enrichment must self-zero there) and at t=1 (the segment's far
+    end, required for current continuity with the adjacent non-enriched
+    segment). And on the BC-compatible bubble subspace, the enrichment
+    is L²-orthogonal: α_enrich = 0 exactly when the truth's
+    BC-compatible-bubble part lives in the polynomial subspace — the
+    small-N transient where the original Φ_sing absorbs polynomial
+    discretization error is eliminated.
+
+    Bubble basis: b_k(t) = t^(k+1) − t^(k+2) = t·(1−t)·t^k for k = 0..d−2.
+    Dimension is d−1 (for d=2 it's 1D = span{t(1−t)}; for d=1 it's empty,
+    matching the empirical "d=1 enrichment is a no-op" finding in
+    NEXT_STEPS item 15(b)).
+    """
+    if d < 2:
+        return np.zeros(d + 1)
+    n_b = d - 1
+    # Bubble Gram matrix: ⟨b_i, b_j⟩ = ∫₀¹ (t^(i+1)-t^(i+2))(t^(j+1)-t^(j+2)) dt
+    #                  = 1/(i+j+3) − 2/(i+j+4) + 1/(i+j+5)
+    G = np.array(
+        [
+            [
+                1.0 / (i + j + 3) - 2.0 / (i + j + 4) + 1.0 / (i + j + 5)
+                for j in range(n_b)
+            ]
+            for i in range(n_b)
+        ]
+    )
+    # Moment vector: ⟨Φ_sing, b_i⟩ = ∫₀¹ t·log(t)·(t^(i+1)-t^(i+2)) dt
+    #              = ∫ t^(i+2) log(t) dt − ∫ t^(i+3) log(t) dt
+    #              = −1/(i+3)² + 1/(i+4)²    [using ∫₀¹ t^n log(t) dt = −1/(n+1)²]
+    m = np.array([-1.0 / (i + 3) ** 2 + 1.0 / (i + 4) ** 2 for i in range(n_b)])
+    alpha = np.linalg.solve(G, m)
+    # Bubble-coefficient α → monomial coefficients c:
+    # P(t) = Σ_k α_k · (t^(k+1) − t^(k+2))  ⇒  c[k+1] += α_k, c[k+2] −= α_k.
+    coeffs = np.zeros(d + 1)
+    for k in range(n_b):
+        coeffs[k + 1] += alpha[k]
+        coeffs[k + 2] -= alpha[k]
+    return coeffs
+
+
 class BSplinePySim:
     """Degree-d B-spline Galerkin MoM, multi-wire polylines with junctions.
 
@@ -105,6 +159,7 @@ class BSplinePySim:
         use_singular_enrichment=False,
         n_qp_sing=32,
         enrichment_min_k=3,
+        enrichment_variant="raw",
     ):
         if degree < 1:
             raise ValueError(f"degree must be >= 1, got {degree}")
@@ -189,6 +244,32 @@ class BSplinePySim:
         self.use_singular_enrichment = bool(use_singular_enrichment)
         self.n_qp_sing = int(n_qp_sing)
         self.enrichment_min_k = int(enrichment_min_k)
+        # `enrichment_variant` picks the singular basis shape:
+        #   "raw"    → Φ_sing(t) = t·log(t), the unmodified PR #47 shape.
+        #             Mixed behavior: captures real cusps where they exist
+        #             (balanced K=3 like Y-fixture: ~0.08 Ω R correction)
+        #             but also absorbs polynomial discretization error at
+        #             small N (hentenna n=21: ~0.26 Ω X transient post-#51
+        #             sign fix). PR #45 / #47 default.
+        #   "stable" → Φ_sing_stable(t) = t·log(t) − P_bubble(t·log(t)) where
+        #             P_bubble is the L²-orthogonal projection onto the
+        #             polynomial bubble subspace of P_d that vanishes at
+        #             both t=0 and t=1 (preserves Φ_sing's endpoint BCs;
+        #             required because the KCL constraint only sees the
+        #             polynomial bases). Trade-offs measured on probe
+        #             scripts: hentenna large-N converges faster
+        #             (X-rate p≈4.10 vs raw's 2.7); fan-dipole gap closes
+        #             to noise floor; **hentenna small-N gets a larger
+        #             transient (~0.79 Ω X at n=21)**; Y-fixture loses
+        #             its 0.08 Ω R cusp benefit. Not "universally safe."
+        #             For d=1 the bubble subspace is empty so "stable"
+        #             reduces to "raw" identically.
+        if enrichment_variant not in ("raw", "stable"):
+            raise ValueError(
+                f"enrichment_variant must be 'raw' or 'stable', got "
+                f"{enrichment_variant!r}"
+            )
+        self.enrichment_variant = enrichment_variant
 
         self.junctions = []
         if junctions is not None:
@@ -806,6 +887,15 @@ class BSplinePySim:
         t01 = 0.5 * (gl_xi + 1.0)
         w01 = 0.5 * gl_w
 
+        # "stable" variant subtracts the L²-projection of Φ_sing onto
+        # the BC-preserving polynomial bubble subspace; "raw" sends zero
+        # coefficients so the C++ kernel evaluates the unmodified
+        # Φ_sing(t) = t·log(t).
+        if self.enrichment_variant == "stable":
+            proj_coeffs = _xfem_projection_coeffs(self.degree)
+        else:
+            proj_coeffs = np.zeros(self.degree + 1)
+
         from pysim._accelerators import assemble_Z_enrich
 
         Z_pe, Z_ep, Z_ee = assemble_Z_enrich(
@@ -824,6 +914,7 @@ class BSplinePySim:
             float(self.mu),
             np.ascontiguousarray(t01, dtype=np.float64),
             np.ascontiguousarray(w01, dtype=np.float64),
+            np.ascontiguousarray(proj_coeffs, dtype=np.float64),
         )
 
         return {
@@ -984,10 +1075,15 @@ class BSplinePySim:
                     else:
                         u_from_junc = seg_r_arc - s_eval[mask]
                     u_norm = u_from_junc / h_seg
-                    # Φ_sing(u) = (u/h)·log(u/h); the limit at u=0 is 0.
+                    # Match the solver's variant: "raw" subtracts nothing,
+                    # "stable" subtracts the bubble-subspace projection.
+                    # Both variants preserve Φ_sing(0)=Φ_sing(1)=0.
                     phi = np.zeros_like(u_norm)
                     pos = u_norm > 0.0
                     phi[pos] = u_norm[pos] * np.log(u_norm[pos])
+                    if self.enrichment_variant == "stable":
+                        proj_coeffs = _xfem_projection_coeffs(self.degree)
+                        phi = phi - np.polyval(proj_coeffs[::-1], u_norm)
                     I_out[mask] += coeffs[n_poly + spec_idx] * phi
             out.append(I_out)
         return out

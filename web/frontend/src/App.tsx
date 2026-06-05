@@ -97,6 +97,11 @@ type BSplineOpts = CommonOpts & {
   nQpPair: number;
   feedSmoothingFactor: number | null; // null = sharp delta-gap
   useSingularEnrichment: boolean;
+  // "raw"    → Φ_sing(t) = t·log(t), PR #45/#47 original shape.
+  // "stable" → Φ_sing − bubble-subspace L²-projection: faster large-N
+  //            convergence on hentenna; larger small-N transient; loses
+  //            Y-fixture cusp benefit. d=1 collapses to raw bit-exact.
+  enrichmentVariant: "raw" | "stable";
   nQpSing: number;
   enrichmentMinK: number;
   nQpSource: number;
@@ -120,6 +125,7 @@ const DEFAULT_BACKEND_OPTS: BackendOptsMap = {
     nQpPair: 4,
     feedSmoothingFactor: null,
     useSingularEnrichment: false,
+    enrichmentVariant: "raw",
     nQpSing: 32,
     enrichmentMinK: 3,
     nQpSource: 16,
@@ -180,6 +186,7 @@ function modelOptionsForRequest(
       n_qp_source: o.nQpSource,
       feed_smoothing_factor: o.feedSmoothingFactor,
       use_singular_enrichment: o.useSingularEnrichment,
+      enrichment_variant: o.enrichmentVariant,
       n_qp_sing: o.nQpSing,
       enrichment_min_k: o.enrichmentMinK,
     };
@@ -2233,6 +2240,23 @@ function BSplineFields({
               step={1}
               onChange={(v) => onPatch({ enrichmentMinK: v })}
             />
+            <label
+              className="link-toggle"
+              title="raw = original Φ_sing = (u/h)·log(u/h); stable = Φ_sing minus L²-projection on the polynomial bubble subspace (faster large-N hentenna convergence, larger small-N transient, loses Y-fixture cusp benefit)."
+            >
+              variant:
+              <select
+                value={opts.enrichmentVariant}
+                onChange={(e) =>
+                  onPatch({
+                    enrichmentVariant: e.target.value as "raw" | "stable",
+                  })
+                }
+              >
+                <option value="raw">raw</option>
+                <option value="stable">stable</option>
+              </select>
+            </label>
           </>
         )}
       </div>
