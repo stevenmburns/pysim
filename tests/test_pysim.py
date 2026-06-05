@@ -1198,6 +1198,13 @@ def test_bspline_assemble_z_enrich_cpp_matches_numpy():
     """
     import pysim.bspline as bmod
 
+    # If the C++ extension wasn't built (Windows wheel, or local build
+    # without pybind11), there's no C++ kernel to compare against. The
+    # numpy reference is the only path; the parity sweep below would
+    # NameError trying to call into the missing _acc.
+    if not bmod._HAVE_ENRICH_ACCEL:
+        pytest.skip("C++ assemble_Z_enrich not available — numpy-only build")
+
     C_LIGHT = 299_792_458.0
     freq_mhz = 28.47
     wavelength = C_LIGHT / (freq_mhz * 1e6)
