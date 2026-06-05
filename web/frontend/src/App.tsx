@@ -105,8 +105,15 @@ type BSplineOpts = CommonOpts & {
   //              λ→0 is raw; λ→∞ kills enrichment. λ=0.1 preserves
   //              Y-fixture cusp; λ=1.0 fully suppresses hentenna small-N
   //              transient but loses Y cusp.
-  enrichmentVariant: "raw" | "stable" | "tikhonov";
+  // "auto"     → two-pass: solve once without enrichment, measure
+  //              tap_ratio at each K≥3 junction, apply raw enrichment
+  //              only where tap_ratio > autoTapRatioThreshold. Cleanly
+  //              separates dominant-pair K=3 (hentenna ≈ 0.16) from
+  //              balanced 3-way (Y ≈ 0.50). The selectivity that
+  //              raw/stable/tikhonov can't deliver algebraically.
+  enrichmentVariant: "raw" | "stable" | "tikhonov" | "auto";
   tikhonovLambda: number;
+  autoTapRatioThreshold: number;
   nQpSing: number;
   enrichmentMinK: number;
   nQpSource: number;
@@ -132,6 +139,7 @@ const DEFAULT_BACKEND_OPTS: BackendOptsMap = {
     useSingularEnrichment: false,
     enrichmentVariant: "raw",
     tikhonovLambda: 0.1,
+    autoTapRatioThreshold: 0.3,
     nQpSing: 32,
     enrichmentMinK: 3,
     nQpSource: 16,
@@ -194,6 +202,7 @@ function modelOptionsForRequest(
       use_singular_enrichment: o.useSingularEnrichment,
       enrichment_variant: o.enrichmentVariant,
       tikhonov_lambda: o.tikhonovLambda,
+      auto_tap_ratio_threshold: o.autoTapRatioThreshold,
       n_qp_sing: o.nQpSing,
       enrichment_min_k: o.enrichmentMinK,
     };
@@ -2249,7 +2258,7 @@ function BSplineFields({
             />
             <label
               className="link-toggle"
-              title="raw = original Φ_sing = (u/h)·log(u/h); stable = Φ_sing minus bubble-subspace L²-projection (faster large-N hentenna convergence, larger small-N transient, loses Y cusp); tikhonov = raw + λ·s·I penalty on Z_ee (λ=0.1 keeps Y cusp; λ=1 suppresses hentenna transient but loses Y cusp)."
+              title="raw = original Φ_sing = (u/h)·log(u/h); stable = Φ_sing minus bubble-subspace L²-projection (loses Y cusp); tikhonov = raw + λ·s·I penalty on Z_ee (shrinks all α uniformly); auto = two-pass per-junction selectivity via tap_ratio (dominant-pair K=3 → off, balanced 3-way → on)."
             >
               variant:
               <select
@@ -2259,13 +2268,15 @@ function BSplineFields({
                     enrichmentVariant: e.target.value as
                       | "raw"
                       | "stable"
-                      | "tikhonov",
+                      | "tikhonov"
+                      | "auto",
                   })
                 }
               >
                 <option value="raw">raw</option>
                 <option value="stable">stable</option>
                 <option value="tikhonov">tikhonov</option>
+                <option value="auto">auto</option>
               </select>
             </label>
             {opts.enrichmentVariant === "tikhonov" && (
@@ -2276,6 +2287,16 @@ function BSplineFields({
                 max={10}
                 step={0.05}
                 onChange={(v) => onPatch({ tikhonovLambda: v })}
+              />
+            )}
+            {opts.enrichmentVariant === "auto" && (
+              <NumberField
+                label="auto_tap_ratio_threshold"
+                value={opts.autoTapRatioThreshold}
+                min={0}
+                max={1}
+                step={0.05}
+                onChange={(v) => onPatch({ autoTapRatioThreshold: v })}
               />
             )}
           </>

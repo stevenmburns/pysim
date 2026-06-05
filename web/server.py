@@ -127,6 +127,7 @@ _PYSIM_MODEL_KEYS = {
         "enrichment_min_k",
         "enrichment_variant",
         "tikhonov_lambda",
+        "auto_tap_ratio_threshold",
     ),
 }
 _PYSIM_MODELS = {

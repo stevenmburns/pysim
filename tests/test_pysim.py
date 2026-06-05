@@ -1069,6 +1069,118 @@ def test_bspline_d2_hentenna_enrichment_tikhonov_variant():
     assert abs(z_tik_big - z_off) / abs(z_off) < 1e-6
 
 
+def test_bspline_enrichment_auto_two_pass_selects_correctly():
+    """The 'auto' variant runs a two-pass solve: pass 1 without enrichment
+    measures tap_ratio = min(|I_wire|)/max(|I_wire|) at each K≥enrichment_min_k
+    junction; pass 2 applies raw enrichment only at junctions where
+    tap_ratio > auto_tap_ratio_threshold.
+
+    Two canonical geometries pin the per-junction decision:
+      (a) **Hentenna** — dominant-pair K=3 (tap_ratio ≈ 0.16): auto must
+          select no junctions and the result must equal no-enrichment
+          bit-exact (the +0.25 Ω X small-N transient that raw introduces
+          is the regression this is meant to prevent).
+      (b) **Y-fixture** — balanced 3-way K=3 (tap_ratio ≈ 0.50): auto
+          must select the K=3 junction (index 1; the K=2 at index 0 is
+          correctly excluded by enrichment_min_k=3) and the result must
+          equal raw bit-exact (preserves the legitimate cusp).
+    """
+    C_LIGHT = 299_792_458.0
+    freq_mhz = 28.47
+    wavelength = C_LIGHT / (freq_mhz * 1e6)
+    eps_feed = 0.05
+
+    # --- (a) Hentenna ---
+    width_factor = 0.1378
+    top_height_factor = 0.5081
+    mid_height_factor = 0.1094
+    half_w = wavelength * width_factor / 2
+    z_mid = wavelength * (mid_height_factor - top_height_factor)
+    z_bot = -wavelength * top_height_factor
+    A = (0.0, half_w, 0.0)
+    B_ = (0.0, half_w, z_mid)
+    F = (0.0, half_w, z_bot)
+    S = (0.0, eps_feed, z_mid)
+    C_ = (0.0, -half_w, 0.0)
+    D = (0.0, -half_w, z_mid)
+    E_ = (0.0, -half_w, z_bot)
+    T = (0.0, -eps_feed, z_mid)
+    h_wires = [
+        np.array([T, S], dtype=float),
+        np.array([S, B_], dtype=float),
+        np.array([B_, A, C_, D], dtype=float),
+        np.array([T, D], dtype=float),
+        np.array([D, E_, F, B_], dtype=float),
+    ]
+    h_juncs = [
+        [(0, "end"), (1, "start")],
+        [(0, "start"), (3, "start")],
+        [(1, "end"), (2, "start"), (4, "end")],
+        [(2, "end"), (3, "end"), (4, "start")],
+    ]
+    n = 21
+    h_kw = dict(
+        degree=2,
+        wires=h_wires,
+        n_per_edge_per_wire=[[3], [n], [n, n, n], [n], [n, n, n]],
+        feed_wire_index=0,
+        feed_arclength=eps_feed,
+        wavelength=wavelength,
+        wire_radius=0.0005,
+        nsegs=n,
+        junctions=h_juncs,
+    )
+    z_h_off, _ = BSplinePySim(**h_kw, use_singular_enrichment=False).compute_impedance()
+    sim_h_auto = BSplinePySim(
+        **h_kw, use_singular_enrichment=True, enrichment_variant="auto"
+    )
+    z_h_auto, _ = sim_h_auto.compute_impedance()
+    assert sim_h_auto._auto_active_junctions == []
+    assert z_h_auto == z_h_off
+
+    # --- (b) Y-fixture ---
+    L = wavelength / 4.0
+    T_ = (-eps_feed, 0.0, 0.0)
+    S_ = (+eps_feed, 0.0, 0.0)
+    a1 = (T_[0] - L, 0.0, 0.0)
+    c60 = float(np.cos(np.pi / 3.0))
+    s60 = float(np.sin(np.pi / 3.0))
+    a2 = (S_[0] + L * c60, +L * s60, 0.0)
+    a3 = (S_[0] + L * c60, -L * s60, 0.0)
+    y_wires = [
+        np.array([T_, S_], dtype=float),
+        np.array([T_, a1], dtype=float),
+        np.array([S_, a2], dtype=float),
+        np.array([S_, a3], dtype=float),
+    ]
+    y_juncs = [
+        [(0, "start"), (1, "start")],  # K=2 at T (skipped by enrichment_min_k=3)
+        [(0, "end"), (2, "start"), (3, "start")],  # K=3 at S (the probe junction)
+    ]
+    n_y = 41
+    y_kw = dict(
+        degree=2,
+        wires=y_wires,
+        n_per_edge_per_wire=[[2], [n_y], [n_y], [n_y]],
+        feed_wire_index=0,
+        feed_arclength=eps_feed,
+        wavelength=wavelength,
+        wire_radius=0.0005,
+        nsegs=n_y,
+        junctions=y_juncs,
+        enrichment_min_k=3,
+    )
+    z_y_raw, _ = BSplinePySim(
+        **y_kw, use_singular_enrichment=True, enrichment_variant="raw"
+    ).compute_impedance()
+    sim_y_auto = BSplinePySim(
+        **y_kw, use_singular_enrichment=True, enrichment_variant="auto"
+    )
+    z_y_auto, _ = sim_y_auto.compute_impedance()
+    assert sim_y_auto._auto_active_junctions == [1]
+    assert z_y_auto == z_y_raw
+
+
 def test_bspline_hentenna_enrichment_left_right_symmetry():
     """Hentenna is mirror-symmetric about y=0, so the BSpline+enrichment solve
     must produce mirror-symmetric per-knot currents on the upper and lower

@@ -161,6 +161,7 @@ class BSplinePySim:
         enrichment_min_k=3,
         enrichment_variant="raw",
         tikhonov_lambda=1e-3,
+        auto_tap_ratio_threshold=0.3,
     ):
         if degree < 1:
             raise ValueError(f"degree must be >= 1, got {degree}")
@@ -271,13 +272,27 @@ class BSplinePySim:
         # knob). Penalizes ||α_enr||² in the augmented objective; shrinks
         # spurious-large α at small N without re-deriving the basis.
         # λ → 0 ⇒ raw; λ → ∞ ⇒ enrichment effectively off.
-        if enrichment_variant not in ("raw", "stable", "tikhonov"):
+        # "auto" → two-pass selectivity. Solve once without enrichment,
+        # measure tap_ratio = min|I_wire|/max|I_wire| over wires meeting
+        # at each K≥enrichment_min_k junction (the same diagnostic as
+        # scripts/probe_k3_junction_imbalance.py), and apply raw
+        # enrichment only at junctions where tap_ratio exceeds
+        # `auto_tap_ratio_threshold`. Cleanly separates dominant-pair
+        # K=3 (hentenna ≈ 0.16, fan-dipole ≈ 0.03) from balanced 3-way
+        # (Y-fixture ≈ 0.50). One extra solve per compute_impedance
+        # call; second solve skipped if no junction qualifies.
+        if enrichment_variant not in ("raw", "stable", "tikhonov", "auto"):
             raise ValueError(
-                f"enrichment_variant must be 'raw', 'stable', or 'tikhonov', "
-                f"got {enrichment_variant!r}"
+                f"enrichment_variant must be one of 'raw', 'stable', "
+                f"'tikhonov', 'auto', got {enrichment_variant!r}"
             )
         self.enrichment_variant = enrichment_variant
         self.tikhonov_lambda = float(tikhonov_lambda)
+        self.auto_tap_ratio_threshold = float(auto_tap_ratio_threshold)
+        # Populated by compute_impedance when variant="auto" runs the
+        # two-pass solve so currents_at_knots can index the enrichment
+        # block consistently. None means "ignore auto-selection".
+        self._auto_active_junctions = None
 
         self.junctions = []
         if junctions is not None:
@@ -841,15 +856,25 @@ class BSplinePySim:
     # Singular basis enrichment at K≥3 junctions
     # ------------------------------------------------------------------
 
-    def _enrichment_specs(self, geom):
+    def _enrichment_specs(self, geom, active_junction_indices=None):
         """For each (wire, end_pos) at a K≥enrichment_min_k junction, return
         the global segment index of the adjacent segment and the "orientation"
         flag: u_local from junction = u_seg_left if end_pos == "start",
         h - u_seg_left if end_pos == "end".
+
+        When `active_junction_indices` is provided (a container of indices
+        into self.junctions), only those junctions get specs — for the
+        "auto" variant's per-junction enrichment selectivity. None means
+        all qualifying junctions enrich (raw / stable / tikhonov path).
         """
         specs = []  # list of (junction_idx, wire_w, end_pos, seg_idx, u_origin)
+        active_set = (
+            None if active_junction_indices is None else set(active_junction_indices)
+        )
         for j_idx, jw in enumerate(self.junctions):
             if len(jw) < self.enrichment_min_k:
+                continue
+            if active_set is not None and j_idx not in active_set:
                 continue
             for wire_w, end_pos in jw:
                 if end_pos == "start":
@@ -861,7 +886,44 @@ class BSplinePySim:
                 specs.append((j_idx, wire_w, end_pos, seg_idx, u_origin))
         return specs
 
-    def _enrichment_Z_assemble(self, geom, supp_seg_poly, polys_poly):
+    def _junction_tap_ratios(self, coeffs_poly):
+        """Compute tap_ratio = min(|I_wire|) / max(|I_wire|) at each
+        junction node, using the polynomial-only coefficient vector from
+        a no-enrichment solve. Returns a list of length len(self.junctions);
+        entries are None for junctions with K < enrichment_min_k.
+
+        At a junction node only the bspline directional bases are nonzero
+        (one per wire end), so the wire-by-wire current magnitudes can be
+        read directly out of `currents_at_knots` at the junction-side knot.
+        Per-wire |I| values at a K-junction sum to zero by KCL (vector
+        sum), but individual magnitudes need not be equal — the ratio
+        captures how lopsided the split is.
+        """
+        # Temporarily disable enrichment so currents_at_knots doesn't try
+        # to index past the polynomial block.
+        saved = self.use_singular_enrichment
+        self.use_singular_enrichment = False
+        try:
+            I_per_wire = self.currents_at_knots(coeffs_poly)
+        finally:
+            self.use_singular_enrichment = saved
+
+        ratios = []
+        for jw in self.junctions:
+            if len(jw) < self.enrichment_min_k:
+                ratios.append(None)
+                continue
+            mags = []
+            for wire_w, end_pos in jw:
+                knot_idx = 0 if end_pos == "start" else -1
+                mags.append(abs(I_per_wire[wire_w][knot_idx]))
+            m_max = max(mags)
+            ratios.append(0.0 if m_max == 0.0 else min(mags) / m_max)
+        return ratios
+
+    def _enrichment_Z_assemble(
+        self, geom, supp_seg_poly, polys_poly, active_junction_indices=None
+    ):
         """Assemble the (Z_pe, Z_ep, Z_ee) enrichment blocks via the C++
         accelerator (`pysim._accelerators.assemble_Z_enrich`).
 
@@ -876,7 +938,9 @@ class BSplinePySim:
         path computes both halves so a future quadrature change can't
         silently break symmetry.
         """
-        specs = self._enrichment_specs(geom)
+        specs = self._enrichment_specs(
+            geom, active_junction_indices=active_junction_indices
+        )
         n_enrich = len(specs)
         if n_enrich == 0:
             return None  # no qualifying junctions → no-op
@@ -961,8 +1025,37 @@ class BSplinePySim:
             geom, wire_knots, wire_basis_global, n_basis_total
         )
 
+        # Clear any leftover per-junction selection from a prior solve
+        # (variant="auto" repopulates this below; everything else leaves
+        # it as None so the standard "all qualifying junctions" path
+        # runs in _enrichment_specs).
+        self._auto_active_junctions = None
+
+        active_junctions = None
+        if self.use_singular_enrichment and self.enrichment_variant == "auto":
+            # Pass 1: solve raw (no enrichment) to read tap_ratio at each
+            # K≥enrichment_min_k junction. Below the threshold ⇒ dominant-
+            # pair geometry, enrichment would absorb spurious polynomial-
+            # discretization error — skip. Above ⇒ genuinely balanced
+            # K-way split, enrichment captures real cusp physics — keep.
+            coeffs_p1 = self._solve_with_kcl(Z, v, kcl_A)
+            ratios = self._junction_tap_ratios(coeffs_p1)
+            active_junctions = [
+                j
+                for j, r in enumerate(ratios)
+                if r is not None and r > self.auto_tap_ratio_threshold
+            ]
+            self._auto_active_junctions = active_junctions
+            if not active_junctions:
+                # No junction qualifies → pass-1 result is the final answer.
+                I_at_feed = v @ coeffs_p1
+                self.z = Z
+                return 1.0 / I_at_feed, coeffs_p1
+
         if self.use_singular_enrichment:
-            enrich = self._enrichment_Z_assemble(geom, supp_seg, polys)
+            enrich = self._enrichment_Z_assemble(
+                geom, supp_seg, polys, active_junction_indices=active_junctions
+            )
             if enrich is not None:
                 n_p = n_basis_total
                 n_e = enrich["n_enrich"]
@@ -1044,7 +1137,11 @@ class BSplinePySim:
 
         enrich_specs = None
         if self.use_singular_enrichment:
-            specs = self._enrichment_specs(geom)
+            # Match the active-junction subset that compute_impedance used
+            # so the spec list lines up with the enrichment block of coeffs.
+            specs = self._enrichment_specs(
+                geom, active_junction_indices=self._auto_active_junctions
+            )
             if specs:
                 enrich_specs = specs
 
