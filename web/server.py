@@ -1398,6 +1398,11 @@ def _solve_bowtie(req: dict) -> dict:
         "slope": args["slope"],
         "del_y_m": args["del_y_m"],
         "phase_lr_deg": args["phase_lr_deg"],
+        # The bowtie 1×2 array is designed for 100 Ω feedlines per element
+        # (matched via a 2:1 transformer to a 50 Ω line, or fed as a 100 Ω
+        # parallel pair). Surface that as the Smith-chart / SWR reference
+        # impedance instead of the default 50 Ω.
+        "z0_ohms": 100.0,
         "solve_ms": solve_ms,
         "ground": ground_on,
         "height_m": z_offset,

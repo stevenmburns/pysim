@@ -83,6 +83,10 @@ type SolveResponse = {
   length_m?: number;
   del_y_m?: number;
   phase_lr_deg?: number;
+  /** Per-geometry SWR / Smith chart reference impedance. Falls back to
+   *  50 Ω when the server doesn't supply one. Bowtie array returns 100 Ω
+   *  because each element is designed for a 100 Ω feedline. */
+  z0_ohms?: number;
 };
 
 // Backend selector — three PySim model variants + PyNEC. Per-backend
@@ -2020,8 +2024,12 @@ export function App() {
             <span className="val">{result ? `${result.solve_ms.toFixed(1)} ms` : "—"}</span>
           </div>
           <div className="row">
-            <span>SWR (50 Ω)</span>
-            <span className="val">{result ? formatSwr(result.z_in_re, result.z_in_im, 50) : "—"}</span>
+            <span>SWR ({(result?.z0_ohms ?? 50).toFixed(0)} Ω)</span>
+            <span className="val">
+              {result
+                ? formatSwr(result.z_in_re, result.z_in_im, result.z0_ohms ?? 50)
+                : "—"}
+            </span>
           </div>
           <div className="row">
             <span>rtt</span>
@@ -2578,7 +2586,7 @@ function ViewPanel({
     <SmithChart
       r={result?.z_in_re ?? 0}
       x={result?.z_in_im ?? 0}
-      z0={50}
+      z0={result?.z0_ohms ?? 50}
       size={size}
       sweep={sweep}
       converge={converge}
