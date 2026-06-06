@@ -3047,15 +3047,27 @@ function FarFieldChart({
 // unchanged; subsequent feeds use distinct hues that read well on the
 // dark background. Indices beyond this list wrap, but that's only
 // reachable on >4-feed geometries (none exist yet).
-const FEED_COLORS = [
-  "rgba(118, 208, 255, 0.85)",  // blue (primary)
-  "rgba(255, 196, 102, 0.85)",  // amber
-  "rgba(140, 230, 140, 0.85)",  // green
-  "rgba(255, 130, 200, 0.85)",  // pink
+const FEED_COLORS: [number, number, number][] = [
+  [118, 208, 255],  // blue (primary)
+  [255, 196, 102],  // amber
+  [140, 230, 140],  // green
+  [255, 130, 200],  // pink
 ];
 
-function feedColor(i: number): string {
-  return FEED_COLORS[i % FEED_COLORS.length];
+function feedColor(i: number, alpha = 0.85): string {
+  const [r, g, b] = FEED_COLORS[i % FEED_COLORS.length];
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+// Sweep trail uses a darkened variant of each feed's primary color so the
+// current-Z marker reads as "you are here" against a dimmer "trail". With
+// two feeds at identical Z (e.g. the in-phase symmetric case) the two
+// primary markers stack on top of each other but stay distinguishable from
+// the sweep cloud underneath — without this they were indistinguishable.
+function feedSweepColor(i: number, alpha = 0.85): string {
+  const [r, g, b] = FEED_COLORS[i % FEED_COLORS.length];
+  const f = 0.55; // darken factor — empirically readable on the #0d1015 bg
+  return `rgba(${Math.round(r * f)}, ${Math.round(g * f)}, ${Math.round(b * f)}, ${alpha})`;
 }
 
 function SmithChart({
@@ -3195,7 +3207,9 @@ function SmithChart({
       ctx.arc(cx, cy, R, 0, 2 * Math.PI);
       ctx.clip();
       for (let fi = 0; fi < nFeeds; fi++) {
-        ctx.fillStyle = feedColor(fi);
+        // Darkened color so the sweep cloud reads as a trail underneath
+        // the bright current-Z primary marker (drawn later, full color).
+        ctx.fillStyle = hasMulti ? feedSweepColor(fi) : feedColor(fi);
         for (let i = 0; i < sweep.freqs_mhz.length; i++) {
           const z = zAt(fi, i);
           const g = reflectionCoefficient(z.re, z.im, z0);
@@ -3208,13 +3222,15 @@ function SmithChart({
       }
       ctx.restore();
 
-      // Endpoint markers per feed (low-freq filled, high-freq hollow).
+      // Endpoint markers per feed (low-freq filled, high-freq hollow) —
+      // also drawn in the darkened sweep color so they stay part of the
+      // trail and don't compete with the bright current-Z marker.
       const drawEndpoint = (fi: number, idx: number, filled: boolean) => {
         const z = zAt(fi, idx);
         const g = reflectionCoefficient(z.re, z.im, z0);
         const px = cx + g.gRe * R;
         const py = cy - g.gIm * R;
-        const col = feedColor(fi);
+        const col = hasMulti ? feedSweepColor(fi) : feedColor(fi);
         ctx.lineWidth = 1.2;
         ctx.strokeStyle = col;
         ctx.fillStyle = filled ? col : "rgba(13, 16, 21, 0.95)";
@@ -3236,17 +3252,24 @@ function SmithChart({
       const txt = `${fLoTxt} → ${fHiTxt} MHz`;
       ctx.fillText(txt, size - 6 - ctx.measureText(txt).width, size - 6);
 
-      // Per-feed legend swatches (only when multi-feed).
+      // Per-feed legend swatches (only when multi-feed). Two dots per
+      // entry — bright = current-Z marker, dark = sweep trail — so the
+      // user can map the chart's two shades back to the same feed at a
+      // glance.
       if (hasMulti) {
         ctx.font = "10px ui-monospace, monospace";
         for (let fi = 0; fi < nFeeds; fi++) {
           const ly = 12 + fi * 14;
-          ctx.fillStyle = feedColor(fi);
+          ctx.fillStyle = feedSweepColor(fi);
           ctx.beginPath();
           ctx.arc(12, ly, 3, 0, 2 * Math.PI);
           ctx.fill();
+          ctx.fillStyle = feedColor(fi);
+          ctx.beginPath();
+          ctx.arc(20, ly, 3, 0, 2 * Math.PI);
+          ctx.fill();
           ctx.fillStyle = "#cdd5e0";
-          ctx.fillText(`feed ${fi}`, 20, ly + 3);
+          ctx.fillText(`feed ${fi}`, 28, ly + 3);
         }
       }
     }
