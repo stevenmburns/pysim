@@ -2018,12 +2018,14 @@ async def sweep_endpoint(req: dict, request: Request):
     return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
-def _solve_z_only(req: dict) -> complex:
+def _solve_z_only(req: dict) -> tuple[complex, list[complex] | None]:
     """Run the geometry-specific solver and return only the input impedance.
 
-    Skips the directivity-norm integral that `solve()` would otherwise tack
-    on — for the /converge sweep we only need Z(N), and at N ≳ 60 the
-    directivity step adds non-negligible cost.
+    Returns (primary_z, feeds_z) where feeds_z is the per-feed Z list for
+    multi-feed geometries (bowtie 1×2 array) and None for single-feed
+    geometries. Skips the directivity-norm integral that `solve()` would
+    otherwise tack on — for the /converge sweep we only need Z(N), and
+    at N ≳ 60 the directivity step adds non-negligible cost.
     """
     geometry = req.get("geometry", "inverted_v")
     use_pynec = req.get("solver") == "pynec" and pynec_backend.HAVE_PYNEC
@@ -2043,7 +2045,14 @@ def _solve_z_only(req: dict) -> complex:
         res = _solve_bowtie(req)
     else:
         res = _solve_inverted_v(req)
-    return complex(res["z_in_re"], res["z_in_im"])
+    primary = complex(res["z_in_re"], res["z_in_im"])
+    feeds_list = res.get("feeds")
+    feeds_z: list[complex] | None = (
+        [complex(f["z_re"], f["z_im"]) for f in feeds_list]
+        if feeds_list and len(feeds_list) > 1
+        else None
+    )
+    return primary, feeds_z
 
 
 @app.post("/converge")
@@ -2071,7 +2080,7 @@ async def converge_endpoint(req: dict, request: Request):
             req_n = dict(req)
             req_n["n_per_wire"] = n
             try:
-                z = await run_in_threadpool(_solve_z_only, req_n)
+                z, feeds_z = await run_in_threadpool(_solve_z_only, req_n)
             except Exception as e:
                 # One-off solver failures (e.g. degenerate geometry at very
                 # small N) shouldn't abort the whole sweep — note the error
@@ -2087,17 +2096,19 @@ async def converge_endpoint(req: dict, request: Request):
                     + "\n"
                 )
                 continue
-            yield (
-                json.dumps(
-                    {
-                        "n_per_wire": n,
-                        "z_re": float(z.real),
-                        "z_im": float(z.imag),
-                        "solver": solver_name,
-                    }
-                )
-                + "\n"
-            )
+            record: dict = {
+                "n_per_wire": n,
+                "z_re": float(z.real),
+                "z_im": float(z.imag),
+                "solver": solver_name,
+            }
+            # Multi-feed geometries (bowtie 1×2 array) ship per-feed Z so
+            # the frontend can plot one convergence trail per port. Single-
+            # feed geometries omit the field; the stream shape is unchanged.
+            if feeds_z is not None:
+                record["feeds_z_re"] = [float(z_.real) for z_ in feeds_z]
+                record["feeds_z_im"] = [float(z_.imag) for z_ in feeds_z]
+            yield json.dumps(record) + "\n"
         yield json.dumps({"done": True, "solver": solver_name}) + "\n"
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
