@@ -1921,21 +1921,33 @@ async def sweep_endpoint(req: dict, request: Request):
         if use_pynec:
             # Per-point loop with disconnect check; lets us bail before the
             # next ~100 ms PyNEC ground solve when the user moves a slider.
+            # Multi-feed geometries (bowtie) take the multifeed sweep so
+            # per-feed Z streams alongside the primary z_re / z_im.
+            is_multifeed = geometry == "bowtie"
             for f in freqs:
                 if await request.is_disconnected():
                     return
-                z = await run_in_threadpool(pynec_backend._sweep_at, req, f)
-                yield (
-                    json.dumps(
-                        {
-                            "freq_mhz": f,
-                            "z_re": float(z.real),
-                            "z_im": float(z.imag),
-                            "solver": solver_name,
-                        }
+                if is_multifeed:
+                    primary, feeds_z = await run_in_threadpool(
+                        pynec_backend._sweep_at_multifeed, req, f
                     )
-                    + "\n"
-                )
+                    record = {
+                        "freq_mhz": f,
+                        "z_re": float(primary.real),
+                        "z_im": float(primary.imag),
+                        "feeds_z_re": [float(z_.real) for z_ in feeds_z],
+                        "feeds_z_im": [float(z_.imag) for z_ in feeds_z],
+                        "solver": solver_name,
+                    }
+                else:
+                    z = await run_in_threadpool(pynec_backend._sweep_at, req, f)
+                    record = {
+                        "freq_mhz": f,
+                        "z_re": float(z.real),
+                        "z_im": float(z.imag),
+                        "solver": solver_name,
+                    }
+                yield json.dumps(record) + "\n"
         else:
             # pysim's batched sweep is ~10x faster per-call than per-point,
             # but a 5-band fan dipole sweep at n_per_wire=21, 41 freqs takes

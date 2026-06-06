@@ -957,6 +957,290 @@ def solve_hentenna(req: dict) -> dict:
     }
 
 
+_BOWTIE_EPS = 0.05  # meters; half-gap at the feed and at the top pinch,
+# matches the pysim/web/server.py side so the two backends solve the same
+# geometry on the bowtie 1×2 array.
+
+
+def _bowtie_element_polylines(
+    slope: float, length: float, y_offset: float, z_offset: float
+):
+    """Return the 4 polylines of one bowtie element in the y-z plane (x=0)
+    at the given y_offset / z_offset. Same shapes as the pysim helper.
+    """
+    eps_b = _BOWTIE_EPS
+    y = 0.5 * length / (slope + math.sqrt(1.0 + slope * slope))
+    z = slope * y
+
+    def P(yy, zz):
+        return (0.0, yy + y_offset, zz + z_offset)
+
+    w0 = [P(-y, 0), P(-y, z), P(-eps_b, eps_b), P(eps_b, eps_b), P(y, z), P(y, 0)]
+    w1 = [P(-y, 0), P(-y, -z), P(-eps_b, -eps_b)]
+    w2 = [P(eps_b, -eps_b), P(y, -z), P(y, 0)]
+    w3 = [P(-eps_b, -eps_b), P(eps_b, -eps_b)]
+    return w0, w1, w2, w3, y, z
+
+
+def _build_bowtie(req: dict):
+    """Build the PyNEC context + geometry for the bowtie 1×2 phased array.
+
+    Two bowtie elements at y = ±del_y_m. Per element: 10 NEC wire cards
+    (one per polyline edge — 5 + 2 + 2 + 1), tags grouped per polyline so
+    the per-polyline current concatenation matches the pysim wire shape
+    the frontend already renders. Two EX cards apply the multi-feed
+    voltage drive: V_0 = 1+0j on element 0's feed wire, V_1 =
+    exp(j·π·phase_lr_deg/180) on element 1's feed wire.
+
+    Returns the same per-element metadata for both elements so
+    solve_bowtie can pack wires + feeds for the response.
+    """
+    n_per_wire = int(req.get("n_per_wire", 21))
+    design_freq_mhz = float(req.get("design_freq_mhz", 28.47))
+    slope = float(req.get("slope", 0.5376))
+    length_factor = float(req.get("length_factor", 0.515))
+    del_y_m = float(req.get("del_y_m", 4.0))
+    phase_lr_deg = float(req.get("phase_lr_deg", 0.0))
+    wire_radius = float(req.get("wire_radius", 0.0005))
+    ground = bool(req.get("ground", False))
+    ground_fast = bool(req.get("ground_fast", False))
+    height_m = float(req.get("height_m", 0.0))
+
+    wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
+    length_m = length_factor * wavelength_design
+    z_offset = height_m if ground else 0.0
+
+    # Segment counts: long edges get n_per_wire; short eps-scale edges (top
+    # pinch and feed gap) get a small odd count so the NEC EX card lands
+    # on the segment whose centre is at the gap's geometric centre.
+    n_long = max(2, n_per_wire)
+    n_short_even = max(2, n_long // 7)
+    n_short_odd = n_short_even if n_short_even % 2 == 1 else n_short_even + 1
+    # `n_short_odd` is odd so the feed-gap card has a single centre segment;
+    # the top-pinch card also uses an odd count for visual symmetry.
+    feed_seg_local = (n_short_odd + 1) // 2  # 1-indexed middle of feed wire
+
+    c = nec.nec_context()
+    geo = c.get_geometry()
+
+    elements = []
+    tag = 0
+    for elem_idx, (y_off, v_complex) in enumerate(
+        [
+            (-del_y_m, complex(1.0, 0.0)),
+            (
+                +del_y_m,
+                complex(
+                    math.cos(math.pi * phase_lr_deg / 180.0),
+                    math.sin(math.pi * phase_lr_deg / 180.0),
+                ),
+            ),
+        ]
+    ):
+        w0, w1, w2, w3, y, z = _bowtie_element_polylines(
+            slope, length_m, y_off, z_offset
+        )
+
+        # Per-polyline segment counts and tag groupings. Each polyline
+        # produces one NEC wire card per edge — same tag for each edge of
+        # the polyline isn't possible (NEC tags are per-card), so we group
+        # by polyline in `tag_groups` and concatenate currents at response
+        # time.
+        polyline_specs = [
+            ("top_arc", w0, [n_long, n_long, n_short_odd, n_long, n_long]),
+            ("bot_left_arc", w1, [n_long, n_long]),
+            ("bot_right_arc", w2, [n_long, n_long]),
+            ("feed", w3, [n_short_odd]),
+        ]
+        polyline_meta = []
+        feed_tag_for_elem: int | None = None
+        for label, path, npe in polyline_specs:
+            tag_group = []
+            for i in range(len(npe)):
+                tag += 1
+                p0, p1 = path[i], path[i + 1]
+                geo.wire(tag, npe[i], *p0, *p1, wire_radius, 1.0, 1.0)
+                tag_group.append(tag)
+            polyline_meta.append((label, path, npe, tag_group))
+            if label == "feed":
+                feed_tag_for_elem = tag_group[0]  # single-edge polyline
+
+        elements.append(
+            {
+                "y_offset": y_off,
+                "v_complex": v_complex,
+                "polylines": polyline_meta,
+                "feed_tag": feed_tag_for_elem,
+                "feed_seg": feed_seg_local,
+                "y_m": y,
+                "z_m": z,
+            }
+        )
+    c.geometry_complete(0)
+
+    n_seg_total = tag  # each tag carries its own segments — sum below
+    n_seg_total = sum(
+        npe_i
+        for elem in elements
+        for (_label, _path, npe, _tg) in elem["polylines"]
+        for npe_i in npe
+    )
+
+    return {
+        "context": c,
+        "elements": elements,
+        "n_per_wire": n_per_wire,
+        "n_seg_total": n_seg_total,
+        "wavelength_design": wavelength_design,
+        "design_freq_mhz": design_freq_mhz,
+        "length_m": length_m,
+        "del_y_m": del_y_m,
+        "phase_lr_deg": phase_lr_deg,
+        "slope": slope,
+        "ground": ground,
+        "ground_fast": ground_fast,
+        "z_offset": z_offset,
+    }
+
+
+def _run_solve_bowtie(
+    c,
+    n_seg_total: int,
+    elements: list[dict],
+    freq_mhz: float,
+    ground: bool,
+    ground_fast: bool,
+):
+    """Multi-feed NEC2 solve. Each element gets one EX card at its feed
+    tag's centre segment with its prescribed complex voltage. NEC
+    superposes the excitations; the returned current vector reflects the
+    combined drive.
+    """
+    if ground:
+        itype = 0 if ground_fast else 2
+        c.gn_card(itype, 0, GROUND_DIELECTRIC, GROUND_CONDUCTIVITY, 0, 0, 0, 0)
+    else:
+        c.gn_card(-1, 0, 0, 0, 0, 0, 0, 0)
+    for elem in elements:
+        v = elem["v_complex"]
+        c.ex_card(0, elem["feed_tag"], elem["feed_seg"], 0, v.real, v.imag, 0, 0, 0, 0)
+    c.fr_card(0, 1, freq_mhz, 0)
+    c.xq_card(0)
+    sc = c.get_structure_currents(0)
+    cur_arr = np.asarray(sc.get_current(), dtype=np.complex128)
+    tag_arr = np.asarray(sc.get_current_segment_tag())
+    return cur_arr, tag_arr
+
+
+def _bowtie_per_element_wires(
+    elem: dict, cur_arr: np.ndarray, tag_arr: np.ndarray, half_label: str
+) -> list[dict]:
+    """Pack one element's polylines into wire records the frontend renders.
+    Concatenates segment currents across each polyline's tag group and maps
+    them onto knot positions; every bowtie polyline endpoint is at a K=2
+    junction so junction_at_start/end are True throughout.
+    """
+    out = []
+    for label, path, npe, tag_group in elem["polylines"]:
+        knots = _polyline_knots(path, npe)
+        cur_wire = np.concatenate(
+            [cur_arr[np.where(tag_arr == tg)[0]] for tg in tag_group]
+        )
+        knot_cur = _segment_centers_to_knot_currents(
+            cur_wire,
+            knots.shape[0],
+            junction_at_start=True,
+            junction_at_end=True,
+        )
+        out.append(
+            {
+                "label": f"{half_label}_{label}",
+                "knot_positions": knots.tolist(),
+                "knot_currents_re": knot_cur.real.tolist(),
+                "knot_currents_im": knot_cur.imag.tolist(),
+            }
+        )
+    return out
+
+
+def solve_bowtie(req: dict) -> dict:
+    """Bowtie 1×2 phased array via PyNEC."""
+    meas_freq_mhz = float(
+        req.get("measurement_freq_mhz", req.get("design_freq_mhz", 28.47))
+    )
+    b = _build_bowtie(req)
+
+    t0 = time.perf_counter()
+    cur_arr, tag_arr = _run_solve_bowtie(
+        b["context"],
+        b["n_seg_total"],
+        b["elements"],
+        meas_freq_mhz,
+        ground=b["ground"],
+        ground_fast=b["ground_fast"],
+    )
+    solve_ms = (time.perf_counter() - t0) * 1e3
+
+    wire_records: list[dict] = []
+    feeds: list[dict] = []
+    for elem_idx, (elem, half_label) in enumerate(zip(b["elements"], ("L", "R"))):
+        wires_before = len(wire_records)
+        wire_records.extend(
+            _bowtie_per_element_wires(elem, cur_arr, tag_arr, half_label)
+        )
+        # Feed wire is always the 4th polyline (index 3) of each element.
+        feed_wire_global = wires_before + 3
+        # Single-edge polyline with n_short_odd segments → middle segment
+        # carries the EX source; its right-side knot is the feed marker
+        # (index = feed_seg, since knot k sits between segments k-1 and k).
+        feed_seg = elem["feed_seg"]
+        feed_knot_index = feed_seg
+        # Per-feed current at the fed segment, taken from this element's
+        # feed_tag at feed_seg (1-indexed within the tag).
+        feed_idx_in_tag = np.where(tag_arr == elem["feed_tag"])[0]
+        i_feed = complex(cur_arr[feed_idx_in_tag[feed_seg - 1]])
+        v = elem["v_complex"]
+        z_i = v / i_feed
+        feeds.append(
+            {
+                "wire_index": feed_wire_global,
+                "knot_index": feed_knot_index,
+                "z_re": float(z_i.real),
+                "z_im": float(z_i.imag),
+                "v_re": float(v.real),
+                "v_im": float(v.imag),
+            }
+        )
+
+    primary = feeds[0]
+    return {
+        "geometry": "bowtie",
+        "wires": wire_records,
+        "feeds": feeds,
+        "feed_wire_index": primary["wire_index"],
+        "feed_knot_index": primary["knot_index"],
+        "z_in_re": primary["z_re"],
+        "z_in_im": primary["z_im"],
+        "design_freq_mhz": b["design_freq_mhz"],
+        "measurement_freq_mhz": meas_freq_mhz,
+        "lambda_design_m": b["wavelength_design"],
+        "y_m": b["elements"][0]["y_m"],
+        "z_m": b["elements"][0]["z_m"],
+        "length_m": b["length_m"],
+        "slope": b["slope"],
+        "del_y_m": b["del_y_m"],
+        "phase_lr_deg": b["phase_lr_deg"],
+        "z0_ohms": 100.0,
+        "solve_ms": solve_ms,
+        "solver": "pynec",
+        "ground": b["ground"],
+        "ground_fast": b["ground_fast"],
+        "height_m": b["z_offset"],
+        "ground_eps_r": GROUND_DIELECTRIC,
+        "ground_sigma": GROUND_CONDUCTIVITY,
+    }
+
+
 _FANDIPOLE_FEED_GAP = 0.01  # meters; half-gap, matches antenna_designer eps
 
 
@@ -1216,6 +1500,8 @@ def solve(req: dict) -> dict:
         return solve_fandipole(req)
     if geometry == "hentenna":
         return solve_hentenna(req)
+    if geometry == "bowtie":
+        return solve_bowtie(req)
     return solve_inverted_v(req)
 
 
@@ -1238,26 +1524,41 @@ def pattern(req: dict) -> dict:
         b = _build_fandipole(req)
     elif geometry == "hentenna":
         b = _build_hentenna(req)
+    elif geometry == "bowtie":
+        b = _build_bowtie(req)
     else:
         b = _build_inverted_v(req)
     c = b["context"]
-    feed_seg = b["feed_seg"]
-    n_per_wire = b["n_per_wire"]
-    feed_tag = b.get("feed_tag", 1)
     meas_freq_mhz = float(
         req.get("measurement_freq_mhz", req.get("design_freq_mhz", 14.3))
     )
 
     t0 = time.perf_counter()
-    _run_solve(
-        c,
-        2 * n_per_wire,
-        feed_seg,
-        meas_freq_mhz,
-        ground=b["ground"],
-        feed_tag=feed_tag,
-        ground_fast=b["ground_fast"],
-    )
+    if geometry == "bowtie":
+        # Multi-feed solve path: 2 EX cards, one per element. The pattern
+        # then reflects the combined-excitation radiation, matching what
+        # the bowtie's `feeds` were prescribed in `solve_bowtie`.
+        _run_solve_bowtie(
+            c,
+            b["n_seg_total"],
+            b["elements"],
+            meas_freq_mhz,
+            ground=b["ground"],
+            ground_fast=b["ground_fast"],
+        )
+    else:
+        feed_seg = b["feed_seg"]
+        n_per_wire = b["n_per_wire"]
+        feed_tag = b.get("feed_tag", 1)
+        _run_solve(
+            c,
+            2 * n_per_wire,
+            feed_seg,
+            meas_freq_mhz,
+            ground=b["ground"],
+            feed_tag=feed_tag,
+            ground_fast=b["ground_fast"],
+        )
 
     # 2°×5° grid: 46 thetas (0..90), 73 phis (0..360 inclusive). At ~3.4k
     # rays this runs in tens of ms — fine for a debounced overlay request.
@@ -1286,11 +1587,31 @@ def pattern(req: dict) -> dict:
 
 
 def _sweep_at(req: dict, freq_mhz: float) -> complex:
-    """Single-frequency Z via PyNEC, used to build the swept Z array."""
+    """Single-frequency Z via PyNEC, used to build the swept Z array.
+
+    Returns the primary feed's Z for back-compat. Multi-feed callers that
+    need per-feed data should use `_sweep_at_multifeed`.
+    """
     req2 = dict(req)
     req2["measurement_freq_mhz"] = freq_mhz
     res = solve(req2)
     return complex(res["z_in_re"], res["z_in_im"])
+
+
+def _sweep_at_multifeed(req: dict, freq_mhz: float):
+    """Single-frequency multi-feed sweep point. Returns (primary_z,
+    feeds_z_list) — feeds_z_list is the per-feed driving-point Z list
+    matching the multi-feed `feeds[]` order.
+
+    Used for the bowtie 1×2 array sweep so the streamed NDJSON can carry
+    per-feed Z alongside the legacy `z_re` / `z_im` (primary) fields.
+    """
+    req2 = dict(req)
+    req2["measurement_freq_mhz"] = freq_mhz
+    res = solve(req2)
+    primary = complex(res["z_in_re"], res["z_in_im"])
+    feeds_z = [complex(f["z_re"], f["z_im"]) for f in res.get("feeds", [])]
+    return primary, feeds_z
 
 
 def sweep(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[float]]:
