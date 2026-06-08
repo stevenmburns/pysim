@@ -74,6 +74,12 @@ type ResultFieldSpec = {
   unit: string | null;
 };
 
+type SweepPolicy = {
+  anchor: "design_freq" | "meas_freq";
+  lo_factor: number;
+  hi_factor: number;
+};
+
 type BandSpec = {
   key: string;
   label: string;
@@ -92,6 +98,7 @@ type ExampleDescriptor = {
   bands: BandSpec[];
   meas_freq_range_mhz: [number, number] | null;
   default_view: Projection;
+  sweep_policy: SweepPolicy;
 };
 
 function applyVisibility(spec: SchemaParamSpec, values: ParamValueBag): boolean {
@@ -1187,7 +1194,7 @@ export function App() {
     designFreq,
     groundEnabled, groundFast, heightM,
     sweepEnabled,
-    geometry === "fan_dipole" ? measFreq : null,
+    currentExample?.sweep_policy.anchor === "meas_freq" ? measFreq : null,
   ]);
 
   // Debounced convergence sweep over segments-per-wire. Independent of the
@@ -1252,22 +1259,14 @@ export function App() {
     // near free-space cost. Fast (reflection-coefficient) ground and pysim
     // PEC ground are cheap enough for full resolution.
     //
-    // Anchor: single-band geometries sweep around designFreq; fan_dipole is
-    // multi-band, so we sweep around measFreq instead — that's where the
-    // user is currently probing.
-    //
-    // Span: multi-band antennas use ±5% (narrow, centered on the band the
-    // user is tuning) — wider would cross into neighbouring band tuning
-    // and clutter the Smith trajectory. Single-band antennas keep the
-    // broader 0.8x..1.25x for the resonance / out-of-band picture.
+    // Anchor + span come from the active example's sweep_policy. See
+    // SweepPolicy in web/examples/_base.py for the meaning of the fields.
     const slowGround = backend === "pynec" && groundEnabled && !groundFast;
     const N = slowGround ? 21 : 41;
-    const sweepAnchor = geometry === "fan_dipole" ? measFreq : designFreq;
-    const multiband = geometry === "fan_dipole";
-    const loFactor = multiband ? 0.95 : 0.8;
-    const hiFactor = multiband ? 1.05 : 1.25;
-    const fLo = Math.max(0.5, sweepAnchor * loFactor);
-    const fHi = Math.min(60, sweepAnchor * hiFactor);
+    const policy = currentExample?.sweep_policy;
+    const sweepAnchor = policy?.anchor === "meas_freq" ? measFreq : designFreq;
+    const fLo = Math.max(0.5, sweepAnchor * (policy?.lo_factor ?? 0.8));
+    const fHi = Math.min(60, sweepAnchor * (policy?.hi_factor ?? 1.25));
     const freqs = Array.from({ length: N }, (_, i) =>
       Math.exp(Math.log(fLo) + (i / (N - 1)) * (Math.log(fHi) - Math.log(fLo))),
     );

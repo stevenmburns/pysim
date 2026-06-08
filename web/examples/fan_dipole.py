@@ -14,7 +14,7 @@ import time
 import numpy as np
 
 from . import register
-from ._base import AntennaExample, ParamGroupSpec, ParamSpec, ResultFieldSpec  # noqa: F401
+from ._base import AntennaExample, ParamGroupSpec, ParamSpec, ResultFieldSpec, SweepPolicy  # noqa: F401
 
 _FEED_GAP = 0.01  # meters; half-gap, matches antenna_designer eps
 
@@ -538,9 +538,12 @@ EXAMPLE = register(
         # Multi-band antenna: its design frequency comes from the
         # per-band schema, not from the global band-tabs row, so suppress
         # the row entirely. The measurement-freq slider spans every
-        # amateur HF band so users can probe any of them.
+        # amateur HF band so users can probe any of them. The sweep
+        # anchors on measFreq (the band the user is currently tuning)
+        # with a narrow ±5% window to avoid crossing band boundaries.
         bands=(),
         meas_freq_range_mhz=(13.5, 30.2),
+        sweep_policy=SweepPolicy(anchor="meas_freq", lo_factor=0.95, hi_factor=1.05),
         param_schema=(
             ParamSpec(
                 name="n_bands",

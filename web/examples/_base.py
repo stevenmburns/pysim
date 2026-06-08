@@ -171,6 +171,32 @@ class BandSpec:
     max_mhz: float
 
 
+@dataclass(frozen=True)
+class SweepPolicy:
+    """Where to centre the freq sweep and how wide to make it.
+
+    `anchor` picks which scalar the sweep range is anchored to:
+      - "design_freq": sweep around the antenna's design frequency
+        (the wider out-of-band picture; default for single-band antennas).
+      - "meas_freq":   sweep around the current measurement frequency
+        (multi-band antennas like fan_dipole — keeps the trace focused
+        on the band the user is currently tuning, since the design
+        frequency stays pinned to band 0).
+
+    `lo_factor` / `hi_factor` are multiplicative bounds applied to the
+    anchor. Defaults give a broad resonance/out-of-band view; multi-band
+    antennas narrow to ±5% so the trace doesn't cross into neighbouring
+    bands the user isn't tuning.
+    """
+
+    anchor: str = "design_freq"  # "design_freq" | "meas_freq"
+    lo_factor: float = 0.8
+    hi_factor: float = 1.25
+
+
+DEFAULT_SWEEP_POLICY = SweepPolicy()
+
+
 DEFAULT_HF_BANDS: tuple[BandSpec, ...] = (
     BandSpec("20m", "20m", 14.300, 14.000, 14.350),
     BandSpec("17m", "17m", 18.1575, 18.068, 18.168),
@@ -233,6 +259,11 @@ class AntennaExample:
     # Multi-band examples that span the whole HF range set this to e.g.
     # (13.5, 30.2) so the slider can reach every band.
     meas_freq_range_mhz: Optional[tuple[float, float]] = None
+    # Sweep range + anchor for the live freq sweep. Defaults to
+    # design-freq-anchored ±20%/+25%; multi-band examples override
+    # to meas-freq-anchored ±5% so the trace stays on the band the
+    # user is tuning.
+    sweep_policy: SweepPolicy = DEFAULT_SWEEP_POLICY
     # Initial 2D-view projection the wire-render canvas picks when the
     # user first selects this example. "xy" = top-down (beam-in-xy
     # antennas like yagi/moxon/hexbeam); "yz" = side (antennas whose

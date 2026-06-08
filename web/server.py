@@ -736,6 +736,11 @@ def examples_endpoint():
                     else None
                 ),
                 "default_view": ex.default_view,
+                "sweep_policy": {
+                    "anchor": ex.sweep_policy.anchor,
+                    "lo_factor": ex.sweep_policy.lo_factor,
+                    "hi_factor": ex.sweep_policy.hi_factor,
+                },
             }
         )
     out.sort(key=lambda e: e["label"])
