@@ -104,187 +104,6 @@ def _polyline_knots(path, npe_list) -> np.ndarray:
 
 
 
-_HENTENNA_FEED_GAP = 0.05  # meters; half-gap (eps) between feed knots T and S
-
-
-def _build_hentenna(req: dict):
-    """Build the PyNEC context + geometry for a single-band hentenna.
-
-    Five logical wires (9 NEC wire cards total) following the pysim layout:
-      tag 1: feed gap T->S                    (3 segs, EX on middle seg)
-      tag 2: cross-bar right S->B             (n_per_wire)
-      tags 3..5: upper rectangle B->A->C->D   (n_per_wire each)
-      tag 6: cross-bar left T->D              (n_per_wire)
-      tags 7..9: lower rectangle D->E->F->B   (n_per_wire each)
-    NEC connects wire ends by coordinate match, so the K=2 (S,T) and K=3
-    (B,D) junctions are implicit.
-    """
-    n_per_wire = int(req.get("n_per_wire", 21))
-    design_freq_mhz = float(req.get("design_freq_mhz", 28.47))
-    width_factor = float(req.get("width_factor", 0.1378))
-    top_height_factor = float(req.get("top_height_factor", 0.5081))
-    mid_height_factor = float(req.get("mid_height_factor", 0.1094))
-    wire_radius = float(req.get("wire_radius", 0.0005))
-    ground = bool(req.get("ground", False))
-    ground_fast = bool(req.get("ground_fast", False))
-    height_m = float(req.get("height_m", 0.0))
-
-    wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
-    half_w = wavelength_design * width_factor / 2.0
-    eps_feed = _HENTENNA_FEED_GAP
-    z_offset = height_m if ground else 0.0
-    z_mid = wavelength_design * (mid_height_factor - top_height_factor) + z_offset
-    z_top = z_offset
-    z_bot = -wavelength_design * top_height_factor + z_offset
-
-    A = (0.0, half_w, z_top)
-    B = (0.0, half_w, z_mid)
-    F = (0.0, half_w, z_bot)
-    S = (0.0, eps_feed, z_mid)
-    Cc = (0.0, -half_w, z_top)
-    D = (0.0, -half_w, z_mid)
-    E = (0.0, -half_w, z_bot)
-    T = (0.0, -eps_feed, z_mid)
-
-    # NEC2's pulse basis puts the source as a delta-gap at a segment
-    # *centre*, so an ODD count is required to place the source at the
-    # gap's geometric centre. Even n_feed offsets the source by half a
-    # segment length, biasing the impedance by ~1 Ω on R.
-    nf = max(1, n_per_wire // 7)
-    n_feed = nf if nf % 2 == 1 else nf + 1
-    feed_seg = (n_feed + 1) // 2  # middle segment, 1-indexed in NEC
-
-    feed_path = [T, S]
-    cross_r_path = [S, B]
-    upper_path = [B, A, Cc, D]
-    cross_l_path = [T, D]
-    lower_path = [D, E, F, B]
-
-    npe_feed = [n_feed]
-    npe_cross_r = [n_per_wire]
-    npe_upper = [n_per_wire, n_per_wire, n_per_wire]
-    npe_cross_l = [n_per_wire]
-    npe_lower = [n_per_wire, n_per_wire, n_per_wire]
-
-    c = nec.nec_context()
-    geo = c.get_geometry()
-    # Tag 1: feed gap T->S
-    geo.wire(1, n_feed, *T, *S, wire_radius, 1.0, 1.0)
-    # Tag 2: cross-bar right S->B
-    geo.wire(2, n_per_wire, *S, *B, wire_radius, 1.0, 1.0)
-    # Tags 3..5: upper rectangle B->A->C->D
-    for i, (p0, p1) in enumerate(zip(upper_path[:-1], upper_path[1:])):
-        geo.wire(3 + i, n_per_wire, *p0, *p1, wire_radius, 1.0, 1.0)
-    # Tag 6: cross-bar left T->D
-    geo.wire(6, n_per_wire, *T, *D, wire_radius, 1.0, 1.0)
-    # Tags 7..9: lower rectangle D->E->F->B
-    for i, (p0, p1) in enumerate(zip(lower_path[:-1], lower_path[1:])):
-        geo.wire(7 + i, n_per_wire, *p0, *p1, wire_radius, 1.0, 1.0)
-    c.geometry_complete(0)
-
-    return {
-        "context": c,
-        "feed_tag": 1,
-        "feed_seg": feed_seg,
-        "n_per_wire": n_per_wire,
-        "n_feed": n_feed,
-        "wires_meta": [
-            ("feed", feed_path, npe_feed, [(1,)]),
-            ("cross_right", cross_r_path, npe_cross_r, [(2,)]),
-            ("upper", upper_path, npe_upper, [(3,), (4,), (5,)]),
-            ("cross_left", cross_l_path, npe_cross_l, [(6,)]),
-            ("lower", lower_path, npe_lower, [(7,), (8,), (9,)]),
-        ],
-        "wavelength_design": wavelength_design,
-        "design_freq_mhz": design_freq_mhz,
-        "half_width_m": half_w,
-        "top_height_m": wavelength_design * top_height_factor,
-        "mid_offset_m": z_mid - z_top,
-        "ground": ground,
-        "ground_fast": ground_fast,
-        "z_offset": z_offset,
-    }
-
-
-def solve_hentenna(req: dict) -> dict:
-    """Single-band hentenna via PyNEC."""
-    meas_freq_mhz = float(
-        req.get("measurement_freq_mhz", req.get("design_freq_mhz", 28.47))
-    )
-    b = _build_hentenna(req)
-    c = b["context"]
-
-    n_seg_total = b["n_feed"] + 7 * b["n_per_wire"]
-
-    t0_clock = time.perf_counter()
-    cur_arr, tag_arr = _run_solve(
-        c,
-        n_seg_total,
-        b["feed_seg"],
-        meas_freq_mhz,
-        ground=b["ground"],
-        feed_tag=b["feed_tag"],
-        ground_fast=b["ground_fast"],
-    )
-    solve_ms = (time.perf_counter() - t0_clock) * 1e3
-
-    feed_idx_in_tag = np.where(tag_arr == b["feed_tag"])[0]
-    fed_global = feed_idx_in_tag[b["feed_seg"] - 1]
-    z_in = complex(1.0 / cur_arr[fed_global])
-
-    # Every wire end in this topology is at a junction (K=2 or K=3), so
-    # current is continuous at all boundary knots — carry the adjacent
-    # segment-center value onto the boundary instead of zeroing it.
-    wire_records = []
-    for label, path, npe, tag_groups in b["wires_meta"]:
-        knots = _polyline_knots(path, npe)
-        # Concatenate per-segment currents in path order across this wire's
-        # NEC tags. Each tag_group is a (tag,) tuple — one NEC card per edge.
-        cur_wire = np.concatenate(
-            [cur_arr[np.where(tag_arr == tg[0])[0]] for tg in tag_groups]
-        )
-        knot_cur = _segment_centers_to_knot_currents(
-            cur_wire,
-            knots.shape[0],
-            junction_at_start=True,
-            junction_at_end=True,
-        )
-        wire_records.append(
-            {
-                "label": label,
-                "knot_positions": knots.tolist(),
-                "knot_currents_re": knot_cur.real.tolist(),
-                "knot_currents_im": knot_cur.imag.tolist(),
-            }
-        )
-
-    # feed_knot_index on wire 0: the knot immediately after the fed segment.
-    # With n_feed segments the fed segment is feed_seg (1-indexed), so the
-    # right-side knot is feed_seg (0-indexed) — interior so long as n_feed >= 2.
-    feed_knot_index = b["feed_seg"]
-
-    return {
-        "geometry": "hentenna",
-        "wires": wire_records,
-        "feed_wire_index": 0,
-        "feed_knot_index": feed_knot_index,
-        "z_in_re": float(z_in.real),
-        "z_in_im": float(z_in.imag),
-        "design_freq_mhz": b["design_freq_mhz"],
-        "measurement_freq_mhz": meas_freq_mhz,
-        "lambda_design_m": b["wavelength_design"],
-        "half_width_m": b["half_width_m"],
-        "top_height_m": b["top_height_m"],
-        "mid_offset_m": b["mid_offset_m"],
-        "solve_ms": solve_ms,
-        "solver": "pynec",
-        "ground": b["ground"],
-        "ground_fast": b["ground_fast"],
-        "height_m": b["z_offset"],
-        "ground_eps_r": GROUND_DIELECTRIC,
-        "ground_sigma": GROUND_CONDUCTIVITY,
-    }
-
 
 _BOWTIE_EPS = 0.05  # meters; half-gap at the feed and at the top pinch,
 # matches the pysim/web/server.py side so the two backends solve the same
@@ -821,8 +640,6 @@ def solve(req: dict) -> dict:
     geometry = req.get("geometry", "inverted_v")
     if geometry == "fan_dipole":
         return solve_fandipole(req)
-    if geometry == "hentenna":
-        return solve_hentenna(req)
     if geometry == "bowtie":
         return solve_bowtie(req)
     ex = EXAMPLES.get(geometry) or EXAMPLES["inverted_v"]
@@ -842,8 +659,6 @@ def pattern(req: dict) -> dict:
     geometry = req.get("geometry", "inverted_v")
     if geometry == "fan_dipole":
         b = _build_fandipole(req)
-    elif geometry == "hentenna":
-        b = _build_hentenna(req)
     elif geometry == "bowtie":
         b = _build_bowtie(req)
     else:

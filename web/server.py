@@ -413,193 +413,6 @@ def _polyline_knots(polyline: np.ndarray, npe_list: list[int]) -> np.ndarray:
 
 
 
-_HENTENNA_FEED_GAP = 0.05  # meters; half-gap (eps) between feed knots T and S
-
-
-def _hentenna_geometry(
-    width_factor: float,
-    top_height_factor: float,
-    mid_height_factor: float,
-    wavelength_design: float,
-    n_per_long_edge: int,
-    z_offset: float = 0.0,
-) -> dict:
-    """Build hentenna wires + per-edge segment counts + junctions.
-
-    Single-band hentenna: a tall narrow rectangular loop with a horizontal
-    cross-bar near the bottom, sliced into 5 wires that meet at K=2/K=3
-    junctions. The feed sits in a small gap (T,S) at the centre of the
-    cross-bar.
-
-        C----------------------------A
-        |                            |
-        D------------T--S------------B
-        |                            |
-        E----------------------------F
-
-    Five wires:
-      0: T -> S                (feed gap)
-      1: S -> B                (right half of cross-bar)
-      2: B -> A -> C -> D      (upper rectangle perimeter)
-      3: T -> D                (left half of cross-bar)
-      4: D -> E -> F -> B      (lower rectangle perimeter)
-
-    Junctions:
-      at S: K=2 (wires 0,1)
-      at T: K=2 (wires 0,3)
-      at B: K=3 (wires 1,2,4)
-      at D: K=3 (wires 2,3,4)
-    """
-    half_w = wavelength_design * width_factor / 2.0
-    z_mid = wavelength_design * (mid_height_factor - top_height_factor) + z_offset
-    z_top = z_offset
-    z_bot = -wavelength_design * top_height_factor + z_offset
-    eps_feed = _HENTENNA_FEED_GAP
-
-    A = (0.0, half_w, z_top)
-    B = (0.0, half_w, z_mid)
-    F = (0.0, half_w, z_bot)
-    S = (0.0, eps_feed, z_mid)
-    C = (0.0, -half_w, z_top)
-    D = (0.0, -half_w, z_mid)
-    E = (0.0, -half_w, z_bot)
-    T = (0.0, -eps_feed, z_mid)
-
-    wires = [
-        np.array([T, S], dtype=float),
-        np.array([S, B], dtype=float),
-        np.array([B, A, C, D], dtype=float),
-        np.array([T, D], dtype=float),
-        np.array([D, E, F, B], dtype=float),
-    ]
-
-    # Uniform N segments per non-feed edge, matching the antenna_designer
-    # hentenna convention. Edge lengths differ by ~6× (cross-bar half vs
-    # vertical), but length-scaled segmentation would either undersample
-    # the cross-bar or wildly oversample the verticals — uniform-per-edge
-    # avoids both and matches the reference NEC card layout.
-    #
-    # Feed-wire parity: pysim's tent basis carries the source on an
-    # interior knot (the boundary between two adjacent segments). For
-    # that knot to sit exactly on the gap's geometric centre we need an
-    # EVEN segment count — n_feed=2 puts the single interior knot at
-    # z=0; an odd n_feed offsets the feed by half a segment length.
-    # Minimum 2 (n_feed=1 leaves no interior knot to feed on).
-    def npe(anchors: np.ndarray) -> list[int]:
-        out = []
-        for i in range(anchors.shape[0] - 1):
-            edge_len = float(np.linalg.norm(anchors[i + 1] - anchors[i]))
-            if edge_len < 2 * eps_feed * 1.01:
-                nf = max(2, n_per_long_edge // 7)
-                if nf % 2 == 1:
-                    nf += 1
-                out.append(nf)
-            else:
-                out.append(max(2, n_per_long_edge))
-        return out
-
-    n_per_edge_per_wire = [npe(w) for w in wires]
-
-    junctions = [
-        [(0, "end"), (1, "start")],  # at S (K=2)
-        [(0, "start"), (3, "start")],  # at T (K=2)
-        [(1, "end"), (2, "start"), (4, "end")],  # at B (K=3)
-        [(2, "end"), (3, "end"), (4, "start")],  # at D (K=3)
-    ]
-
-    return {
-        "wires": wires,
-        "n_per_edge_per_wire": n_per_edge_per_wire,
-        "junctions": junctions,
-        "feed_wire_index": 0,
-        "feed_arclength": eps_feed,  # midpoint of the 2*eps_feed feed gap
-        "half_width_m": half_w,
-        "top_height_m": wavelength_design * top_height_factor,
-        "mid_offset_m": z_mid - z_top,
-    }
-
-
-def _solve_hentenna(req: dict) -> dict:
-    """Single-band hentenna (narrow rectangular loop with cross-bar feed)."""
-    n_per_wire = int(req.get("n_per_wire", 21))
-    design_freq_mhz = float(req.get("design_freq_mhz", 28.47))
-    meas_freq_mhz = float(req.get("measurement_freq_mhz", design_freq_mhz))
-    width_factor = float(req.get("width_factor", 0.1378))
-    top_height_factor = float(req.get("top_height_factor", 0.5081))
-    mid_height_factor = float(req.get("mid_height_factor", 0.1094))
-    wire_radius = float(req.get("wire_radius", 0.0005))
-    ground_on, height_m, z_offset = _read_ground(req)
-
-    wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
-    wavelength_meas = C_LIGHT / (meas_freq_mhz * 1e6)
-
-    geom = _hentenna_geometry(
-        width_factor,
-        top_height_factor,
-        mid_height_factor,
-        wavelength_design,
-        n_per_wire,
-        z_offset=z_offset,
-    )
-
-    sim = _make_pysim_sim(
-        req,
-        wires=geom["wires"],
-        n_per_edge_per_wire=geom["n_per_edge_per_wire"],
-        feed_wire_index=geom["feed_wire_index"],
-        feed_arclength=geom["feed_arclength"],
-        wavelength=wavelength_meas,
-        nsegs=n_per_wire,
-        ground_z=0.0 if ground_on else None,
-        junctions=geom["junctions"],
-    )
-    sim.wire_radius = wire_radius
-
-    t0_clock = time.perf_counter()
-    z_in, coeffs = sim.compute_impedance()
-    solve_ms = (time.perf_counter() - t0_clock) * 1e3
-
-    knots_per_wire = [
-        _polyline_knots(w, npe)
-        for w, npe in zip(geom["wires"], geom["n_per_edge_per_wire"])
-    ]
-    wire_labels = ["feed", "cross_right", "upper", "cross_left", "lower"]
-    wire_records = _pack_pysim_wires(sim, coeffs, knots_per_wire, wire_labels)
-
-    # Feed knot index on the feed wire: feed_arclength sits at the midpoint
-    # of the single feed-gap edge, so it's the interior knot closest to
-    # eps_feed.
-    feed_knots = knots_per_wire[geom["feed_wire_index"]]
-    arc_at_knot = np.concatenate(
-        [[0.0], np.cumsum(np.linalg.norm(np.diff(feed_knots, axis=0), axis=1))]
-    )
-    interior_arc = arc_at_knot[1:-1]
-    if len(interior_arc) > 0:
-        feed_basis_local = int(np.argmin(np.abs(interior_arc - geom["feed_arclength"])))
-        feed_knot_index = feed_basis_local + 1
-    else:
-        feed_knot_index = 0
-
-    return {
-        "geometry": "hentenna",
-        "wires": wire_records,
-        "feed_wire_index": geom["feed_wire_index"],
-        "feed_knot_index": feed_knot_index,
-        "z_in_re": float(z_in.real),
-        "z_in_im": float(z_in.imag),
-        "design_freq_mhz": design_freq_mhz,
-        "measurement_freq_mhz": meas_freq_mhz,
-        "lambda_design_m": wavelength_design,
-        "half_width_m": geom["half_width_m"],
-        "top_height_m": geom["top_height_m"],
-        "mid_offset_m": geom["mid_offset_m"],
-        "solve_ms": solve_ms,
-        "ground": ground_on,
-        "height_m": z_offset,
-        "ground_eps_r": _PEC_GROUND_EPS_R,
-        "ground_sigma": _PEC_GROUND_SIGMA,
-    }
-
 
 _BOWTIE_EPS = 0.05  # half-gap (m) at the feed and at the top-of-bowtie pinch
 
@@ -1172,8 +985,6 @@ def solve(req: dict) -> dict:
         return out
     if geometry == "fan_dipole":
         out = _solve_fandipole(req)
-    elif geometry == "hentenna":
-        out = _solve_hentenna(req)
     elif geometry == "bowtie":
         out = _solve_bowtie(req)
     elif geometry in EXAMPLES:
@@ -1187,45 +998,6 @@ def solve(req: dict) -> dict:
 
 
 
-
-def _sweep_hentenna(
-    req: dict, freqs_mhz: list[float]
-) -> tuple[list[float], list[float]]:
-    """Batched sweep using TriangularPySim.compute_impedance_swept."""
-    n_per_wire = int(req.get("n_per_wire", 21))
-    design_freq_mhz = float(req.get("design_freq_mhz", 28.47))
-    width_factor = float(req.get("width_factor", 0.1378))
-    top_height_factor = float(req.get("top_height_factor", 0.5081))
-    mid_height_factor = float(req.get("mid_height_factor", 0.1094))
-    wire_radius = float(req.get("wire_radius", 0.0005))
-    ground_on, _, z_offset = _read_ground(req)
-
-    wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
-
-    geom = _hentenna_geometry(
-        width_factor,
-        top_height_factor,
-        mid_height_factor,
-        wavelength_design,
-        n_per_wire,
-        z_offset=z_offset,
-    )
-    sim = _make_pysim_sim(
-        req,
-        wires=geom["wires"],
-        n_per_edge_per_wire=geom["n_per_edge_per_wire"],
-        feed_wire_index=geom["feed_wire_index"],
-        feed_arclength=geom["feed_arclength"],
-        wavelength=wavelength_design,
-        nsegs=n_per_wire,
-        ground_z=0.0 if ground_on else None,
-        junctions=geom["junctions"],
-    )
-    sim.wire_radius = wire_radius
-
-    k_array = np.array([2 * np.pi * f * 1e6 / C_LIGHT for f in freqs_mhz])
-    z_array = sim.compute_impedance_swept(k_array)
-    return z_array.real.tolist(), z_array.imag.tolist()
 
 
 @app.post("/sweep")
@@ -1299,7 +1071,6 @@ async def sweep_endpoint(req: dict, request: Request):
             # size from observed per-freq cost. Converges in ~1 iteration.
             sweep_fn = {
                 "fan_dipole": _sweep_fandipole,
-                "hentenna": _sweep_hentenna,
                 "bowtie": _sweep_bowtie,
             }.get(geometry)
             if sweep_fn is None:
@@ -1363,8 +1134,6 @@ def _solve_z_only(req: dict) -> tuple[complex, list[complex] | None]:
         res = pynec_backend.solve(req)
     elif geometry == "fan_dipole":
         res = _solve_fandipole(req)
-    elif geometry == "hentenna":
-        res = _solve_hentenna(req)
     elif geometry == "bowtie":
         res = _solve_bowtie(req)
     elif geometry in EXAMPLES:

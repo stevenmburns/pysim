@@ -29,6 +29,7 @@ def register(example: AntennaExample) -> AntennaExample:
 # Importing each example module triggers its register() call. Adding a new
 # antenna = create the module + add one import line; removing one = delete
 # the module file + the import line.
+from . import hentenna  # noqa: F401,E402
 from . import hexbeam  # noqa: F401,E402
 from . import inverted_v  # noqa: F401,E402
 from . import moxon  # noqa: F401,E402
