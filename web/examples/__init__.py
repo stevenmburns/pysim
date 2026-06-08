@@ -33,6 +33,7 @@ from . import bowtie_1x2  # noqa: F401,E402
 from . import fan_dipole  # noqa: F401,E402
 from . import hentenna  # noqa: F401,E402
 from . import hexbeam  # noqa: F401,E402
+from . import hexbeam_5band  # noqa: F401,E402
 from . import inverted_v  # noqa: F401,E402
 from . import moxon  # noqa: F401,E402
 from . import yagi  # noqa: F401,E402
