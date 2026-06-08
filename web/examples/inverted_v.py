@@ -98,9 +98,7 @@ def pysim_solve(req: dict) -> dict:
     }
 
 
-def pysim_sweep(
-    req: dict, freqs_mhz: list[float]
-) -> tuple[list[float], list[float]]:
+def pysim_sweep(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[float]]:
     """Batched sweep using the pysim model's compute_impedance_swept."""
     from web.server import C_LIGHT, _make_pysim_sim, _read_ground
 

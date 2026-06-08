@@ -168,9 +168,7 @@ def pysim_solve(req: dict) -> dict:
     }
 
 
-def pysim_sweep(
-    req: dict, freqs_mhz: list[float]
-) -> tuple[list[float], list[float]]:
+def pysim_sweep(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[float]]:
     """Batched sweep using the pysim model's compute_impedance_swept."""
     from web.server import C_LIGHT, _make_pysim_sim, _read_ground
 
@@ -229,18 +227,45 @@ def pynec_build(req: dict) -> dict:
     # x=-spacing, directors (tags 3..) at x = +i·dir_spacing toward the
     # beam direction (+x).
     geo.wire(
-        1, n_per_wire, 0.0, -h_driver, z_offset, 0.0, h_driver, z_offset,
-        wire_radius, 1.0, 1.0,
+        1,
+        n_per_wire,
+        0.0,
+        -h_driver,
+        z_offset,
+        0.0,
+        h_driver,
+        z_offset,
+        wire_radius,
+        1.0,
+        1.0,
     )
     geo.wire(
-        2, n_per_wire, -spacing_m, -h_refl, z_offset, -spacing_m, h_refl, z_offset,
-        wire_radius, 1.0, 1.0,
+        2,
+        n_per_wire,
+        -spacing_m,
+        -h_refl,
+        z_offset,
+        -spacing_m,
+        h_refl,
+        z_offset,
+        wire_radius,
+        1.0,
+        1.0,
     )
     for i in range(n_directors):
         x = (i + 1) * dir_spacing_m
         geo.wire(
-            3 + i, n_per_wire, x, -h_dir, z_offset, x, h_dir, z_offset,
-            wire_radius, 1.0, 1.0,
+            3 + i,
+            n_per_wire,
+            x,
+            -h_dir,
+            z_offset,
+            x,
+            h_dir,
+            z_offset,
+            wire_radius,
+            1.0,
+            1.0,
         )
     c.geometry_complete(0)
 

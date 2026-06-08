@@ -203,9 +203,7 @@ def pysim_solve(req: dict) -> dict:
     }
 
 
-def pysim_sweep(
-    req: dict, freqs_mhz: list[float]
-) -> tuple[list[float], list[float]]:
+def pysim_sweep(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[float]]:
     from web.server import C_LIGHT, _make_pysim_sim, _read_ground
 
     ground_on, _, z_offset = _read_ground(req)
