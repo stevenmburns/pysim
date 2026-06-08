@@ -661,6 +661,7 @@ def examples_endpoint():
                 "max_repeats": item.max_repeats,
                 "params": [_serialize_schema_item(p) for p in item.params],
                 "default_overrides": list(item.default_overrides),
+                "link_meas_freq_to_param": item.link_meas_freq_to_param,
             }
         return {
             "name": item.name,

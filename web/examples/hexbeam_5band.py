@@ -649,6 +649,10 @@ EXAMPLE = register(
                 label_template="band {i}",
                 repeat_count="n_bands",
                 max_repeats=5,
+                # Touching any knob in band i → measFreq follows to
+                # bands[i].freq when linkMeas is on, so the live solve
+                # tracks whichever band the user is currently tuning.
+                link_meas_freq_to_param="freq",
                 default_overrides=(
                     {"band_id": "20m", "freq": 14.300},
                     {"band_id": "10m", "freq": 28.470},

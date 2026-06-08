@@ -139,6 +139,18 @@ class ParamGroupSpec:
     # match max_repeats; missing indices fall back to the ParamSpec
     # default.
     default_overrides: tuple[dict, ...] = ()
+    # When set, names a param inside `params` (e.g. "freq") whose
+    # current per-instance value drives the global measFreq state
+    # *every time any leaf in the touched instance changes*. UX
+    # rationale: tuning any knob of band i (length factor, t0 factor,
+    # ...) signals the user is focused on band i, so the live
+    # simulation should track that band's freq. Distinct from
+    # ParamSpec.linked_to_design_freq, which is a steady-state link
+    # to a single fixed instance (always band 0). This is a
+    # per-interaction "follow the user's focus" link, fan_dipole and
+    # hexbeam_5band both use "freq".
+    # Gated by the frontend's linkMeas toggle.
+    link_meas_freq_to_param: Optional[str] = None
 
 
 @dataclass(frozen=True)

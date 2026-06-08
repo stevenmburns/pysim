@@ -49,6 +49,11 @@ type SchemaParamGroupSpec = {
   max_repeats: number;
   params: SchemaItem[];
   default_overrides: { [param: string]: unknown }[];
+  // When set, names a sibling param inside this group's `params`
+  // (typically "freq") whose per-instance value the frontend pushes
+  // into the global measFreq state on every touch of any leaf inside
+  // that instance. Gated by the linkMeas toggle.
+  link_meas_freq_to_param?: string | null;
 };
 
 type SchemaItem = SchemaParamSpec | SchemaParamGroupSpec;
@@ -846,10 +851,33 @@ export function App() {
       obj[head] = setIn(obj[head], rest);
       return obj;
     };
-    setParamValues((prev) => ({
-      ...prev,
-      [geometry]: setIn(prev[geometry] ?? {}, path) as ParamValueBag,
-    }));
+    let newRoot: ParamValueBag | null = null;
+    setParamValues((prev) => {
+      newRoot = setIn(prev[geometry] ?? {}, path) as ParamValueBag;
+      return { ...prev, [geometry]: newRoot };
+    });
+
+    // Schema-driven meas-freq follow: if the change touched a leaf
+    // inside a group instance, and that group declares
+    // `link_meas_freq_to_param`, push the instance's value of that
+    // sibling param into measFreq. Lets multi-band antennas track
+    // whichever band the user is currently tuning when linkMeas is on.
+    if (!linkMeas || newRoot == null || path.length < 3) return;
+    const groupName = path[0];
+    const instanceIdx = path[1];
+    if (typeof groupName !== "string" || typeof instanceIdx !== "number") return;
+    const ex = currentExample;
+    if (!ex) return;
+    const group = ex.param_schema.find(
+      (s) => isGroup(s) && s.name === groupName,
+    ) as SchemaParamGroupSpec | undefined;
+    if (!group || !group.link_meas_freq_to_param) return;
+    const instances = (newRoot as ParamValueBag)[groupName];
+    if (!Array.isArray(instances)) return;
+    const inst = instances[instanceIdx];
+    if (!inst) return;
+    const freqValue = inst[group.link_meas_freq_to_param];
+    if (typeof freqValue === "number") setMeasFreq(freqValue);
   }
   // Fan_dipole was hand-rolled here pre-PR — fanNBands / fanBandIds /
   // fanBandFreqs / fanHalfdriverFactors / fanSlope / fanConeRadius

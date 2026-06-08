@@ -550,6 +550,10 @@ EXAMPLE = register(
                 label_template="band {i}",
                 repeat_count="n_bands",
                 max_repeats=5,
+                # Touching any knob in band i → measFreq follows to
+                # bands[i].freq when linkMeas is on, so the live solve
+                # tracks whichever band the user is currently tuning.
+                link_meas_freq_to_param="freq",
                 # Per-instance defaults seed the 5 slots with the
                 # historical FAN_BAND_IDS_DEFAULT order from App.tsx so
                 # existing sessions look identical after the cutover.
