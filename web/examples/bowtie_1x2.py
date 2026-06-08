@@ -24,7 +24,7 @@ import time
 import numpy as np
 
 from . import register
-from ._base import AntennaExample
+from ._base import AntennaExample, ParamSpec
 
 # Half-gap (m) at the feed and at the top-of-bowtie pinch.
 _BOWTIE_EPS = 0.05
@@ -639,5 +639,46 @@ EXAMPLE = register(
         pynec_solve=pynec_solve,
         pynec_pattern_excite=pynec_pattern_excite,
         multi_feed=True,
+        param_schema=(
+            ParamSpec(
+                name="length_factor",
+                label="length factor",
+                default=0.515,
+                min=0.30,
+                max=0.80,
+                step=0.0005,
+                precision=4,
+                unit="L/λ",
+            ),
+            ParamSpec(
+                name="slope",
+                label="slope",
+                default=0.5376,
+                min=0.0,
+                max=1.5,
+                step=0.001,
+                precision=4,
+            ),
+            ParamSpec(
+                name="del_y_m",
+                label="element spacing",
+                default=4.0,
+                min=1.0,
+                max=10.0,
+                step=0.05,
+                precision=2,
+                unit="m",
+            ),
+            ParamSpec(
+                name="phase_lr_deg",
+                label="phase L/R",
+                default=0.0,
+                min=-180.0,
+                max=180.0,
+                step=1.0,
+                precision=0,
+                unit="°",
+            ),
+        ),
     )
 )

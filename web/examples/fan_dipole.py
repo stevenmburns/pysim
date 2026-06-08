@@ -452,5 +452,9 @@ EXAMPLE = register(
         pysim_sweep=pysim_sweep,
         pynec_build=pynec_build,
         pynec_solve=pynec_solve,
+        # Per-band UI (a list of bands, each with its own selectors and
+        # sliders) doesn't fit the flat ParamSpec list. Tell the frontend
+        # to fall through to its hardcoded fan_dipole JSX block.
+        legacy_controls=True,
     )
 )

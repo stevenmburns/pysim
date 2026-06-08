@@ -14,15 +14,95 @@ type Wire = {
 
 type Geometry = "inverted_v" | "yagi" | "moxon" | "hexbeam" | "fan_dipole" | "hentenna" | "bowtie";
 
-const GEOMETRY_OPTIONS: { id: Geometry; label: string }[] = [
-  { id: "inverted_v", label: "Inverted V" },
-  { id: "yagi", label: "Yagi" },
-  { id: "moxon", label: "Moxon" },
-  { id: "hexbeam", label: "Hexbeam" },
-  { id: "fan_dipole", label: "Fan dipole" },
-  { id: "hentenna", label: "Hentenna" },
-  { id: "bowtie", label: "Bowtie" },
+// Schema served by `GET /examples`. The backend's web/examples/_base.py
+// owns the source of truth; this type just mirrors the JSON shape.
+type SchemaParamSpec = {
+  name: string;
+  label: string;
+  default: number | boolean;
+  kind: "float" | "int" | "bool";
+  min: number | null;
+  max: number | null;
+  step: number | null;
+  precision: number;
+  unit: string | null;
+  visible_when: { name: string; op: string; value: number } | null;
+};
+
+type ExampleDescriptor = {
+  name: string;
+  label: string;
+  multi_feed: boolean;
+  legacy_controls: boolean;
+  param_schema: SchemaParamSpec[];
+};
+
+// Fallback list used until /examples resolves on mount. Matches the
+// backend's registered names so the initial render doesn't show an empty
+// dropdown when the page first paints.
+const EXAMPLES_FALLBACK: ExampleDescriptor[] = [
+  { name: "inverted_v", label: "Inverted V", multi_feed: false, legacy_controls: false, param_schema: [] },
+  { name: "yagi", label: "Yagi", multi_feed: false, legacy_controls: false, param_schema: [] },
+  { name: "moxon", label: "Moxon", multi_feed: false, legacy_controls: false, param_schema: [] },
+  { name: "hexbeam", label: "Hexbeam", multi_feed: false, legacy_controls: false, param_schema: [] },
+  { name: "fan_dipole", label: "Fan Dipole", multi_feed: false, legacy_controls: true, param_schema: [] },
+  { name: "hentenna", label: "Hentenna", multi_feed: false, legacy_controls: false, param_schema: [] },
+  { name: "bowtie", label: "Bowtie 1×2 array", multi_feed: true, legacy_controls: false, param_schema: [] },
 ];
+
+function applyVisibility(
+  spec: SchemaParamSpec,
+  values: Record<string, number>,
+): boolean {
+  const v = spec.visible_when;
+  if (!v) return true;
+  const cur = values[v.name];
+  if (cur == null) return true;
+  switch (v.op) {
+    case "eq": return cur === v.value;
+    case "ne": return cur !== v.value;
+    case "gt": return cur > v.value;
+    case "ge": return cur >= v.value;
+    case "lt": return cur < v.value;
+    case "le": return cur <= v.value;
+    default: return true;
+  }
+}
+
+function ParamForm({
+  schema,
+  values,
+  onChange,
+}: {
+  schema: SchemaParamSpec[];
+  values: Record<string, number>;
+  onChange: (name: string, value: number) => void;
+}) {
+  return (
+    <>
+      {schema.filter((s) => applyVisibility(s, values)).map((s) => {
+        const current = values[s.name] ?? Number(s.default);
+        const shown = s.kind === "int" ? String(Math.round(current)) : current.toFixed(s.precision);
+        return (
+          <div key={s.name} className="field">
+            <label>
+              <span>{s.label}</span>
+              <span>{shown}{s.unit ?? ""}</span>
+            </label>
+            <input
+              type="range"
+              min={s.min ?? 0}
+              max={s.max ?? 1}
+              step={s.step ?? 0.001}
+              value={current}
+              onInput={(e) => onChange(s.name, Number((e.target as HTMLInputElement).value))}
+            />
+          </div>
+        );
+      })}
+    </>
+  );
+}
 
 type FeedEntry = {
   wire_index: number;
@@ -498,42 +578,64 @@ const FAN_HALFDRIVER_FACTOR_DEFAULT = 0.962;
 
 export function App() {
   const [geometry, setGeometry] = useState<Geometry>("inverted_v");
-  // V controls
-  const [angle, setAngle] = useState(30);
-  const [halfdriverFactor, setHalfdriverFactor] = useState(0.962);
-  // Yagi controls
-  const [driverLengthFactor, setDriverLengthFactor] = useState(0.962);
-  const [reflectorLengthFactor, setReflectorLengthFactor] = useState(1.01);
-  const [spacingWavelengths, setSpacingWavelengths] = useState(0.15);
-  const [nDirectors, setNDirectors] = useState(0);
-  const [directorSpacingWavelengths, setDirectorSpacingWavelengths] = useState(0.2);
-  const [directorSizeFactor, setDirectorSizeFactor] = useState(0.95);
-  // Moxon controls (matching antenna_designer's canonical 28.57 MHz design).
-  const [moxonHalfdriverFactor, setMoxonHalfdriverFactor] = useState(0.962);
-  const [moxonAspectRatio, setMoxonAspectRatio] = useState(0.3646);
-  const [moxonTipspacerFactor, setMoxonTipspacerFactor] = useState(0.0773);
-  const [moxonT0Factor, setMoxonT0Factor] = useState(0.4078);
-  // Hexbeam controls (matching antenna_designer's canonical 28.47 MHz design).
-  // halfdriver_factor is >1 here because the hexagonal driver path is longer
-  // than a straight λ/4 driver of the same resonance.
-  const [hexbeamHalfdriverFactor, setHexbeamHalfdriverFactor] = useState(1.071);
-  const [hexbeamTipspacerFactor, setHexbeamTipspacerFactor] = useState(0.1312);
-  const [hexbeamT0Factor, setHexbeamT0Factor] = useState(0.1243);
-  // Hentenna controls (antenna_designer params_50, tuned for ~50 Ω at 28.47 MHz).
-  // width_factor: cross-bar half-length / lambda.
-  // top_height_factor: vertical rectangle height (top to bottom edge) / lambda.
-  // mid_height_factor: vertical position of cross-bar above bottom / lambda.
-  const [hentennaWidthFactor, setHentennaWidthFactor] = useState(0.1378);
-  const [hentennaTopHeightFactor, setHentennaTopHeightFactor] = useState(0.5081);
-  const [hentennaMidHeightFactor, setHentennaMidHeightFactor] = useState(0.1094);
-  // Bowtie 1×2 array controls (matching antenna_designer's bowtiearray1x2
-  // 28.47 MHz design). The geometry always builds a phased 1×2 array; set
-  // del_y_m to control the element spacing and phase_lr_deg to control the
-  // relative phase of the +y element. phase_lr_deg = 0 is in-phase.
-  const [bowtieSlope, setBowtieSlope] = useState(0.5376);
-  const [bowtieLengthFactor, setBowtieLengthFactor] = useState(0.515);
-  const [bowtieDelY, setBowtieDelY] = useState(4.0);
-  const [bowtiePhaseLrDeg, setBowtiePhaseLrDeg] = useState(0.0);
+
+  // Schema-driven parameter controls for the 6 simple antennas (inverted_v,
+  // yagi, moxon, hexbeam, hentenna, bowtie). Each example bundles its own
+  // parameter schema in web/examples/<name>.py; the backend serves them on
+  // GET /examples and we render generic sliders from the result.
+  //
+  // Fan_dipole still has hand-written per-band JSX (its per-band selectors
+  // don't fit a flat ParamSpec list); the dropdown for it falls through to
+  // the legacy block via `legacy_controls=true` on the descriptor.
+  const [examples, setExamples] = useState<ExampleDescriptor[]>(EXAMPLES_FALLBACK);
+  // values[antennaName][paramName] = current slider value. Initialized from
+  // the schema's defaults when /examples arrives, then mutated by ParamForm.
+  const [paramValues, setParamValues] = useState<Record<string, Record<string, number>>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/examples")
+      .then((r) => r.json())
+      .then((j) => {
+        if (cancelled) return;
+        const list: ExampleDescriptor[] = j.examples ?? [];
+        setExamples(list);
+        // Seed paramValues with each schema's defaults so the sliders have
+        // something to render against on first show, even before the user
+        // touches a knob.
+        setParamValues((prev) => {
+          const next = { ...prev };
+          for (const ex of list) {
+            if (next[ex.name]) continue;
+            const seed: Record<string, number> = {};
+            for (const p of ex.param_schema) seed[p.name] = Number(p.default);
+            next[ex.name] = seed;
+          }
+          return next;
+        });
+      })
+      .catch(() => {
+        // Network failure: stay on EXAMPLES_FALLBACK; the schema-driven
+        // sliders will be empty but legacy controls (fan_dipole) still work.
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const currentExample = examples.find((e) => e.name === geometry);
+  const currentValues = paramValues[geometry] ?? {};
+  // Stable, primitive-only signature of the active antenna's params for
+  // useEffect dependency arrays. Object identity isn't reliable because
+  // setParamValues replaces the inner object on every onChange.
+  const currentValuesKey = useMemo(
+    () => JSON.stringify(currentValues),
+    [currentValues],
+  );
+  function setParam(name: string, value: number) {
+    setParamValues((prev) => ({
+      ...prev,
+      [geometry]: { ...(prev[geometry] ?? {}), [name]: value },
+    }));
+  }
   // Fan dipole. Per-band state is sized at 5 so changing nBands preserves
   // inactive sliders' values when the user dials it back up.
   const [fanNBands, setFanNBands] = useState(2);
@@ -783,41 +885,19 @@ export function App() {
       }
       base.model_options = opts;
     }
-    if (geometry === "inverted_v") {
-      base.angle_deg = angle;
-      base.halfdriver_factor = halfdriverFactor;
-    } else if (geometry === "yagi") {
-      base.driver_length_factor = driverLengthFactor;
-      base.reflector_length_factor = reflectorLengthFactor;
-      base.spacing_wavelengths = spacingWavelengths;
-      base.n_directors = nDirectors;
-      base.director_spacing_wavelengths = directorSpacingWavelengths;
-      base.director_size_factor = directorSizeFactor;
-    } else if (geometry === "moxon") {
-      base.halfdriver_factor = moxonHalfdriverFactor;
-      base.aspect_ratio = moxonAspectRatio;
-      base.tipspacer_factor = moxonTipspacerFactor;
-      base.t0_factor = moxonT0Factor;
-    } else if (geometry === "fan_dipole") {
+    if (geometry === "fan_dipole") {
+      // Fan_dipole's per-band list doesn't fit the flat ParamSpec shape, so
+      // it stays on hand-rolled state for now (legacy_controls=true on the
+      // descriptor). All other antennas merge their schema-driven values in
+      // directly from paramValues[geometry].
       base.n_bands = fanNBands;
       base.band_lengths_m = fanBandLengths.slice(0, fanNBands);
       base.band_freqs_mhz = fanBandFreqs.slice(0, fanNBands);
       base.band_halfdriver_factors = fanHalfdriverFactors.slice(0, fanNBands);
       base.slope = fanSlope;
       base.cone_radius_m = fanConeRadius;
-    } else if (geometry === "hentenna") {
-      base.width_factor = hentennaWidthFactor;
-      base.top_height_factor = hentennaTopHeightFactor;
-      base.mid_height_factor = hentennaMidHeightFactor;
-    } else if (geometry === "bowtie") {
-      base.slope = bowtieSlope;
-      base.length_factor = bowtieLengthFactor;
-      base.del_y_m = bowtieDelY;
-      base.phase_lr_deg = bowtiePhaseLrDeg;
     } else {
-      base.halfdriver_factor = hexbeamHalfdriverFactor;
-      base.tipspacer_factor = hexbeamTipspacerFactor;
-      base.t0_factor = hexbeamT0Factor;
+      Object.assign(base, currentValues);
     }
     return base;
   }
@@ -859,13 +939,7 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     geometry, backend, backendOptsKey,
-    angle, halfdriverFactor,
-    driverLengthFactor, reflectorLengthFactor, spacingWavelengths,
-    nDirectors, directorSpacingWavelengths, directorSizeFactor,
-    moxonHalfdriverFactor, moxonAspectRatio, moxonTipspacerFactor, moxonT0Factor,
-    hexbeamHalfdriverFactor, hexbeamTipspacerFactor, hexbeamT0Factor,
-    hentennaWidthFactor, hentennaTopHeightFactor, hentennaMidHeightFactor,
-    bowtieSlope, bowtieLengthFactor, bowtieDelY, bowtiePhaseLrDeg,
+    currentValuesKey,
     fanNBands, fanBandLengths, fanSlope, fanConeRadius,
     designFreq, measFreq,
     groundEnabled, groundFast, heightM,
@@ -901,13 +975,7 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     geometry, backend, backendOptsKey,
-    angle, halfdriverFactor,
-    driverLengthFactor, reflectorLengthFactor, spacingWavelengths,
-    nDirectors, directorSpacingWavelengths, directorSizeFactor,
-    moxonHalfdriverFactor, moxonAspectRatio, moxonTipspacerFactor, moxonT0Factor,
-    hexbeamHalfdriverFactor, hexbeamTipspacerFactor, hexbeamT0Factor,
-    hentennaWidthFactor, hentennaTopHeightFactor, hentennaMidHeightFactor,
-    bowtieSlope, bowtieLengthFactor, bowtieDelY, bowtiePhaseLrDeg,
+    currentValuesKey,
     fanNBands, fanBandLengths, fanSlope, fanConeRadius,
     designFreq,
     groundEnabled, groundFast, heightM,
@@ -940,13 +1008,7 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     geometry, backend, backendOptsKey,
-    angle, halfdriverFactor,
-    driverLengthFactor, reflectorLengthFactor, spacingWavelengths,
-    nDirectors, directorSpacingWavelengths, directorSizeFactor,
-    moxonHalfdriverFactor, moxonAspectRatio, moxonTipspacerFactor, moxonT0Factor,
-    hexbeamHalfdriverFactor, hexbeamTipspacerFactor, hexbeamT0Factor,
-    hentennaWidthFactor, hentennaTopHeightFactor, hentennaMidHeightFactor,
-    bowtieSlope, bowtieLengthFactor, bowtieDelY, bowtiePhaseLrDeg,
+    currentValuesKey,
     fanNBands, fanBandLengths, fanSlope, fanConeRadius,
     designFreq, measFreq,
     groundEnabled, groundFast, heightM,
@@ -969,13 +1031,7 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     geometry, backend, backendOptsKey,
-    angle, halfdriverFactor,
-    driverLengthFactor, reflectorLengthFactor, spacingWavelengths,
-    nDirectors, directorSpacingWavelengths, directorSizeFactor,
-    moxonHalfdriverFactor, moxonAspectRatio, moxonTipspacerFactor, moxonT0Factor,
-    hexbeamHalfdriverFactor, hexbeamTipspacerFactor, hexbeamT0Factor,
-    hentennaWidthFactor, hentennaTopHeightFactor, hentennaMidHeightFactor,
-    bowtieSlope, bowtieLengthFactor, bowtieDelY, bowtiePhaseLrDeg,
+    currentValuesKey,
     fanNBands, fanBandLengths, fanSlope, fanConeRadius,
     designFreq, measFreq,
     groundEnabled, groundFast, heightM,
@@ -1287,354 +1343,20 @@ export function App() {
             value={geometry}
             onChange={(e) => setGeometry(e.target.value as Geometry)}
           >
-            {GEOMETRY_OPTIONS.map((opt) => (
-              <option key={opt.id} value={opt.id}>
-                {opt.label}
+            {examples.map((ex) => (
+              <option key={ex.name} value={ex.name}>
+                {ex.label}
               </option>
             ))}
           </select>
         </div>
 
-        {geometry === "inverted_v" && (
-          <>
-            <div className="field">
-              <label>
-                <span>droop angle</span>
-                <span>{angle.toFixed(1)}°</span>
-              </label>
-              <input
-                type="range"
-                min={0}
-                max={80}
-                step={0.5}
-                value={angle}
-                onInput={(e) => setAngle(Number((e.target as HTMLInputElement).value))}
-              />
-            </div>
-            <div className="field">
-              <label>
-                <span>halfdriver factor</span>
-                <span>{halfdriverFactor.toFixed(3)}</span>
-              </label>
-              <input
-                type="range"
-                min={0.5}
-                max={1.2}
-                step={0.001}
-                value={halfdriverFactor}
-                onInput={(e) => setHalfdriverFactor(Number((e.target as HTMLInputElement).value))}
-              />
-            </div>
-          </>
-        )}
-
-        {geometry === "yagi" && (
-          <>
-            <div className="field">
-              <label>
-                <span>driver length factor</span>
-                <span>{driverLengthFactor.toFixed(3)}</span>
-              </label>
-              <input
-                type="range"
-                min={0.5}
-                max={1.2}
-                step={0.001}
-                value={driverLengthFactor}
-                onInput={(e) => setDriverLengthFactor(Number((e.target as HTMLInputElement).value))}
-              />
-            </div>
-            <div className="field">
-              <label>
-                <span>reflector length factor</span>
-                <span>{reflectorLengthFactor.toFixed(3)}</span>
-              </label>
-              <input
-                type="range"
-                min={0.5}
-                max={1.2}
-                step={0.001}
-                value={reflectorLengthFactor}
-                onInput={(e) => setReflectorLengthFactor(Number((e.target as HTMLInputElement).value))}
-              />
-            </div>
-            <div className="field">
-              <label>
-                <span>spacing (λ)</span>
-                <span>{spacingWavelengths.toFixed(3)}</span>
-              </label>
-              <input
-                type="range"
-                min={0.05}
-                max={0.5}
-                step={0.001}
-                value={spacingWavelengths}
-                onInput={(e) => setSpacingWavelengths(Number((e.target as HTMLInputElement).value))}
-              />
-            </div>
-            <div className="field">
-              <label>
-                <span># directors</span>
-                <span>{nDirectors}</span>
-              </label>
-              <input
-                type="range"
-                min={0}
-                max={8}
-                step={1}
-                value={nDirectors}
-                onInput={(e) => setNDirectors(Number((e.target as HTMLInputElement).value))}
-              />
-            </div>
-            {nDirectors > 0 && (
-              <>
-                <div className="field">
-                  <label>
-                    <span>director spacing (λ)</span>
-                    <span>{directorSpacingWavelengths.toFixed(3)}</span>
-                  </label>
-                  <input
-                    type="range"
-                    min={0.05}
-                    max={0.5}
-                    step={0.001}
-                    value={directorSpacingWavelengths}
-                    onInput={(e) => setDirectorSpacingWavelengths(Number((e.target as HTMLInputElement).value))}
-                  />
-                </div>
-                <div className="field">
-                  <label>
-                    <span>director size factor</span>
-                    <span>{directorSizeFactor.toFixed(3)}</span>
-                  </label>
-                  <input
-                    type="range"
-                    min={0.5}
-                    max={1.2}
-                    step={0.001}
-                    value={directorSizeFactor}
-                    onInput={(e) => setDirectorSizeFactor(Number((e.target as HTMLInputElement).value))}
-                  />
-                </div>
-              </>
-            )}
-          </>
-        )}
-
-        {geometry === "moxon" && (
-          <>
-            <div className="field">
-              <label>
-                <span>halfdriver factor</span>
-                <span>{moxonHalfdriverFactor.toFixed(3)}</span>
-              </label>
-              <input
-                type="range"
-                min={0.8}
-                max={1.1}
-                step={0.001}
-                value={moxonHalfdriverFactor}
-                onInput={(e) => setMoxonHalfdriverFactor(Number((e.target as HTMLInputElement).value))}
-              />
-            </div>
-            <div className="field">
-              <label>
-                <span>aspect ratio (short/long)</span>
-                <span>{moxonAspectRatio.toFixed(3)}</span>
-              </label>
-              <input
-                type="range"
-                min={0.2}
-                max={0.6}
-                step={0.001}
-                value={moxonAspectRatio}
-                onInput={(e) => setMoxonAspectRatio(Number((e.target as HTMLInputElement).value))}
-              />
-            </div>
-            <div className="field">
-              <label>
-                <span>tip spacer factor</span>
-                <span>{moxonTipspacerFactor.toFixed(4)}</span>
-              </label>
-              <input
-                type="range"
-                min={0.02}
-                max={0.20}
-                step={0.0005}
-                value={moxonTipspacerFactor}
-                onInput={(e) => setMoxonTipspacerFactor(Number((e.target as HTMLInputElement).value))}
-              />
-            </div>
-            <div className="field">
-              <label>
-                <span>t0 factor (tip length / short)</span>
-                <span>{moxonT0Factor.toFixed(3)}</span>
-              </label>
-              <input
-                type="range"
-                min={0.15}
-                max={0.6}
-                step={0.001}
-                value={moxonT0Factor}
-                onInput={(e) => setMoxonT0Factor(Number((e.target as HTMLInputElement).value))}
-              />
-            </div>
-          </>
-        )}
-
-        {geometry === "hexbeam" && (
-          <>
-            <div className="field">
-              <label>
-                <span>halfdriver factor</span>
-                <span>{hexbeamHalfdriverFactor.toFixed(3)}</span>
-              </label>
-              <input
-                type="range"
-                min={0.9}
-                max={1.25}
-                step={0.001}
-                value={hexbeamHalfdriverFactor}
-                onInput={(e) => setHexbeamHalfdriverFactor(Number((e.target as HTMLInputElement).value))}
-              />
-            </div>
-            <div className="field">
-              <label>
-                <span>tip spacer factor</span>
-                <span>{hexbeamTipspacerFactor.toFixed(4)}</span>
-              </label>
-              <input
-                type="range"
-                min={0.04}
-                max={0.25}
-                step={0.0005}
-                value={hexbeamTipspacerFactor}
-                onInput={(e) => setHexbeamTipspacerFactor(Number((e.target as HTMLInputElement).value))}
-              />
-            </div>
-            <div className="field">
-              <label>
-                <span>t0 factor (tip length / radius)</span>
-                <span>{hexbeamT0Factor.toFixed(3)}</span>
-              </label>
-              <input
-                type="range"
-                min={0.04}
-                max={0.30}
-                step={0.001}
-                value={hexbeamT0Factor}
-                onInput={(e) => setHexbeamT0Factor(Number((e.target as HTMLInputElement).value))}
-              />
-            </div>
-          </>
-        )}
-
-        {geometry === "hentenna" && (
-          <>
-            <div className="field">
-              <label>
-                <span>width factor</span>
-                <span>{hentennaWidthFactor.toFixed(4)}</span>
-              </label>
-              <input
-                type="range"
-                min={0.05}
-                max={0.30}
-                step={0.0005}
-                value={hentennaWidthFactor}
-                onInput={(e) => setHentennaWidthFactor(Number((e.target as HTMLInputElement).value))}
-              />
-            </div>
-            <div className="field">
-              <label>
-                <span>top height factor</span>
-                <span>{hentennaTopHeightFactor.toFixed(4)}</span>
-              </label>
-              <input
-                type="range"
-                min={0.30}
-                max={0.70}
-                step={0.0005}
-                value={hentennaTopHeightFactor}
-                onInput={(e) => setHentennaTopHeightFactor(Number((e.target as HTMLInputElement).value))}
-              />
-            </div>
-            <div className="field">
-              <label>
-                <span>mid height factor</span>
-                <span>{hentennaMidHeightFactor.toFixed(4)}</span>
-              </label>
-              <input
-                type="range"
-                min={0.03}
-                max={0.30}
-                step={0.0005}
-                value={hentennaMidHeightFactor}
-                onInput={(e) => setHentennaMidHeightFactor(Number((e.target as HTMLInputElement).value))}
-              />
-            </div>
-          </>
-        )}
-
-        {geometry === "bowtie" && (
-          <>
-            <div className="field">
-              <label>
-                <span>length factor (L/λ)</span>
-                <span>{bowtieLengthFactor.toFixed(4)}</span>
-              </label>
-              <input
-                type="range"
-                min={0.30}
-                max={0.80}
-                step={0.0005}
-                value={bowtieLengthFactor}
-                onInput={(e) => setBowtieLengthFactor(Number((e.target as HTMLInputElement).value))}
-              />
-            </div>
-            <div className="field">
-              <label>
-                <span>slope (tip droop)</span>
-                <span>{bowtieSlope.toFixed(4)}</span>
-              </label>
-              <input
-                type="range"
-                min={0.0}
-                max={1.5}
-                step={0.001}
-                value={bowtieSlope}
-                onInput={(e) => setBowtieSlope(Number((e.target as HTMLInputElement).value))}
-              />
-            </div>
-            <div className="field">
-              <label>
-                <span>element spacing del_y (m)</span>
-                <span>{bowtieDelY.toFixed(3)}</span>
-              </label>
-              <input
-                type="range"
-                min={1.0}
-                max={10.0}
-                step={0.05}
-                value={bowtieDelY}
-                onInput={(e) => setBowtieDelY(Number((e.target as HTMLInputElement).value))}
-              />
-            </div>
-            <div className="field">
-              <label>
-                <span>phase_lr (deg)</span>
-                <span>{bowtiePhaseLrDeg.toFixed(1)}</span>
-              </label>
-              <input
-                type="range"
-                min={-180}
-                max={180}
-                step={1}
-                value={bowtiePhaseLrDeg}
-                onInput={(e) => setBowtiePhaseLrDeg(Number((e.target as HTMLInputElement).value))}
-              />
-            </div>
-          </>
+        {currentExample && !currentExample.legacy_controls && (
+          <ParamForm
+            schema={currentExample.param_schema}
+            values={currentValues}
+            onChange={setParam}
+          />
         )}
 
         {geometry === "fan_dipole" && (

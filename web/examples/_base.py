@@ -44,19 +44,30 @@ PynecPatternExciteFn = Callable[[dict, float], None]  # (build, freq_mhz)
 class ParamSpec:
     """One UI-exposed parameter for a geometry.
 
-    Reserved for the upcoming `GET /examples` endpoint that lets the
-    frontend render parameter controls generically. The current pilot
-    keeps the field empty; sliders still come from the hand-written
-    `DEFAULT_BACKEND_OPTS` in App.tsx until the schema cutover lands.
+    Served from `GET /examples` so the frontend can render parameter
+    controls generically — one ParamForm component reads the schema and
+    builds the matching <input> elements without per-antenna JSX.
+
+    `visible_when` makes a parameter conditional on another's value:
+    e.g. yagi's director_spacing_wavelengths slider only appears when
+    n_directors > 0. The dict is shaped {name, op, value}; ops include
+    "eq", "ne", "gt", "ge", "lt", "le".
+
+    `kind` switches the input type. "int" renders an integer step slider,
+    "float" a continuous slider, "bool" a checkbox. Bowtie's phase_lr_deg
+    uses a signed range — that's still kind="float" with min/max < 0.
     """
 
     name: str
     label: str
     default: Any
-    kind: str = "float"  # float | int | bool | enum
+    kind: str = "float"  # float | int | bool
     min: Optional[float] = None
     max: Optional[float] = None
     step: Optional[float] = None
+    precision: int = 3  # decimal places shown in the value readout
+    unit: Optional[str] = None  # rendered next to the value: "°", "m", "λ", etc.
+    visible_when: Optional[dict] = None  # {"name": ..., "op": ..., "value": ...}
     sweepable: bool = False
 
 
@@ -77,4 +88,10 @@ class AntennaExample:
     # 2-tuple. Sweep endpoint uses this to dispatch the two response
     # streaming shapes.
     multi_feed: bool = False
+    # When True, the frontend falls through to hardcoded JSX controls
+    # instead of generic ParamForm rendering. Used by fan_dipole, whose
+    # per-band UI (list of bands, each with its own selectors and sliders)
+    # doesn't fit a flat ParamSpec list. Schema-driven examples set it
+    # to False and supply a full param_schema.
+    legacy_controls: bool = False
     param_schema: tuple[ParamSpec, ...] = field(default_factory=tuple)

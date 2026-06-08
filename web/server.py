@@ -636,6 +636,45 @@ def healthz():
     return {"ok": True}
 
 
+@app.get("/examples")
+def examples_endpoint():
+    """Serve the registered antenna examples + their parameter schemas.
+
+    The frontend reads this on mount to populate the geometry dropdown
+    and render the parameter sliders generically. Each example reports
+    its `multi_feed` flag (affects the response handling for arrays of
+    feeds) and a `legacy_controls` flag (when True, the frontend uses
+    hardcoded JSX for that geometry — currently only fan_dipole).
+    """
+    out = []
+    for name, ex in EXAMPLES.items():
+        out.append(
+            {
+                "name": ex.name,
+                "label": ex.label,
+                "multi_feed": ex.multi_feed,
+                "legacy_controls": ex.legacy_controls,
+                "param_schema": [
+                    {
+                        "name": p.name,
+                        "label": p.label,
+                        "default": p.default,
+                        "kind": p.kind,
+                        "min": p.min,
+                        "max": p.max,
+                        "step": p.step,
+                        "precision": p.precision,
+                        "unit": p.unit,
+                        "visible_when": p.visible_when,
+                    }
+                    for p in ex.param_schema
+                ],
+            }
+        )
+    out.sort(key=lambda e: e["label"])
+    return {"examples": out}
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()

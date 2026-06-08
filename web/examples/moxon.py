@@ -13,7 +13,7 @@ import time
 import numpy as np
 
 from . import register
-from ._base import AntennaExample
+from ._base import AntennaExample, ParamSpec
 
 _FEED_GAP = 0.05  # meters; half-gap between feed knots T and S
 
@@ -404,5 +404,43 @@ EXAMPLE = register(
         pysim_sweep=pysim_sweep,
         pynec_build=pynec_build,
         pynec_solve=pynec_solve,
+        param_schema=(
+            ParamSpec(
+                name="halfdriver_factor",
+                label="halfdriver factor",
+                default=0.962,
+                min=0.8,
+                max=1.1,
+                step=0.001,
+                precision=3,
+            ),
+            ParamSpec(
+                name="aspect_ratio",
+                label="aspect ratio",
+                default=0.3646,
+                min=0.2,
+                max=0.6,
+                step=0.001,
+                precision=4,
+            ),
+            ParamSpec(
+                name="tipspacer_factor",
+                label="tip spacer factor",
+                default=0.0773,
+                min=0.02,
+                max=0.20,
+                step=0.0005,
+                precision=4,
+            ),
+            ParamSpec(
+                name="t0_factor",
+                label="t0 factor",
+                default=0.4078,
+                min=0.15,
+                max=0.6,
+                step=0.001,
+                precision=4,
+            ),
+        ),
     )
 )

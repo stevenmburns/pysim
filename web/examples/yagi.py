@@ -12,7 +12,7 @@ import time
 import numpy as np
 
 from . import register
-from ._base import AntennaExample
+from ._base import AntennaExample, ParamSpec
 
 
 def _polylines(
@@ -399,5 +399,66 @@ EXAMPLE = register(
         pysim_sweep=pysim_sweep,
         pynec_build=pynec_build,
         pynec_solve=pynec_solve,
+        param_schema=(
+            ParamSpec(
+                name="driver_length_factor",
+                label="driver length factor",
+                default=0.962,
+                min=0.5,
+                max=1.2,
+                step=0.001,
+                precision=3,
+            ),
+            ParamSpec(
+                name="reflector_length_factor",
+                label="reflector length factor",
+                default=1.01,
+                min=0.5,
+                max=1.2,
+                step=0.001,
+                precision=3,
+            ),
+            ParamSpec(
+                name="spacing_wavelengths",
+                label="spacing",
+                default=0.15,
+                min=0.05,
+                max=0.5,
+                step=0.001,
+                precision=3,
+                unit="λ",
+            ),
+            ParamSpec(
+                name="n_directors",
+                label="# directors",
+                default=0,
+                kind="int",
+                min=0,
+                max=8,
+                step=1,
+                precision=0,
+            ),
+            ParamSpec(
+                name="director_spacing_wavelengths",
+                label="director spacing",
+                default=0.2,
+                min=0.05,
+                max=0.5,
+                step=0.001,
+                precision=3,
+                unit="λ",
+                visible_when={"name": "n_directors", "op": "gt", "value": 0},
+            ),
+            ParamSpec(
+                name="director_size_factor",
+                label="director size factor",
+                default=0.95,
+                min=0.5,
+                max=1.2,
+                step=0.001,
+                precision=3,
+                visible_when={"name": "n_directors", "op": "gt", "value": 0},
+            ),
+        ),
     )
 )

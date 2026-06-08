@@ -18,7 +18,7 @@ import time
 import numpy as np
 
 from . import register
-from ._base import AntennaExample
+from ._base import AntennaExample, ParamSpec
 
 
 def _polyline(arm_len: float, angle_deg: float, z_offset: float = 0.0) -> np.ndarray:
@@ -258,5 +258,26 @@ EXAMPLE = register(
         pysim_sweep=pysim_sweep,
         pynec_build=pynec_build,
         pynec_solve=pynec_solve,
+        param_schema=(
+            ParamSpec(
+                name="angle_deg",
+                label="droop angle",
+                default=30.0,
+                min=0.0,
+                max=80.0,
+                step=0.5,
+                precision=1,
+                unit="°",
+            ),
+            ParamSpec(
+                name="halfdriver_factor",
+                label="halfdriver factor",
+                default=0.962,
+                min=0.5,
+                max=1.2,
+                step=0.001,
+                precision=3,
+            ),
+        ),
     )
 )
