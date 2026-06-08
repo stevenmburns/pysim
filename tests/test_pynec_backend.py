@@ -22,6 +22,7 @@ _solve_yagi = _EXAMPLES["yagi"].pysim_solve
 _sweep_yagi = _EXAMPLES["yagi"].pysim_sweep
 pynec_backend.solve_inverted_v = _EXAMPLES["inverted_v"].pynec_solve
 pynec_backend.solve_yagi = _EXAMPLES["yagi"].pynec_solve
+pynec_backend.solve_fandipole = _EXAMPLES["fan_dipole"].pynec_solve
 
 
 # The two backends use different basis functions (NEC2 pulse basis vs
