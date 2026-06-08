@@ -663,8 +663,8 @@ def examples_endpoint():
     The frontend reads this on mount to populate the geometry dropdown
     and render the parameter sliders generically. Each example reports
     its `multi_feed` flag (affects the response handling for arrays of
-    feeds) and a `legacy_results` flag (when True, the result panel
-    falls through to hardcoded JSX — currently only fan_dipole).
+    feeds) plus a result_schema that may mix scalar ResultFieldSpec
+    rows with ResultGroupSpec repeat groups.
     """
 
     def _serialize_schema_item(item) -> dict:
@@ -709,15 +709,31 @@ def examples_endpoint():
                 "name": ex.name,
                 "label": ex.label,
                 "multi_feed": ex.multi_feed,
-                "legacy_results": ex.legacy_results,
                 "param_schema": [_serialize_schema_item(p) for p in ex.param_schema],
                 "result_schema": [
-                    {
-                        "field": r.field,
-                        "label": r.label,
-                        "precision": r.precision,
-                        "unit": r.unit,
-                    }
+                    (
+                        {
+                            "kind": "group",
+                            "name": r.name,
+                            "label_template": r.label_template,
+                            "fields": [
+                                {
+                                    "field": f.field,
+                                    "label": f.label,
+                                    "precision": f.precision,
+                                    "unit": f.unit,
+                                }
+                                for f in r.fields
+                            ],
+                        }
+                        if hasattr(r, "fields")
+                        else {
+                            "field": r.field,
+                            "label": r.label,
+                            "precision": r.precision,
+                            "unit": r.unit,
+                        }
+                    )
                     for r in ex.result_schema
                 ],
                 "bands": [

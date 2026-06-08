@@ -164,10 +164,10 @@ class BandSpec:
     schema-driven controls own the design frequency).
     """
 
-    key: str        # stable identifier; also used as the visible tab label today
+    key: str  # stable identifier; also used as the visible tab label today
     label: str
     freq_mhz: float  # tab default — slider snaps here when the band is selected
-    min_mhz: float   # slider lower bound while this band is active
+    min_mhz: float  # slider lower bound while this band is active
     max_mhz: float
 
 
@@ -223,6 +223,31 @@ class ResultFieldSpec:
 
 
 @dataclass(frozen=True)
+class ResultGroupSpec:
+    """A repeating result row, one instance per element of a top-level
+    array field on the solve response.
+
+    The number of instances comes from the length of the first inner
+    field's array. Each instance renders one row per inner ResultFieldSpec.
+
+    `label_template` supports three substitutions:
+      - `{i}`         → 0-based index
+      - `{i1}`        → 1-based index
+      - `{name:.Nf}`  → result[name][i] formatted as a fixed-N-decimal
+                        float; lets the label pull values from sibling
+                        arrays (e.g. "band {i1} ({band_freqs_mhz:.2f} MHz)").
+
+    Fan_dipole is the first user: one group over `band_lengths_m`,
+    label_template references `band_freqs_mhz` to show the per-band freq
+    inline with the per-band length.
+    """
+
+    name: str
+    label_template: str
+    fields: tuple[ResultFieldSpec, ...]
+
+
+@dataclass(frozen=True)
 class AntennaExample:
     name: str
     label: str
@@ -239,17 +264,13 @@ class AntennaExample:
     # 2-tuple. Sweep endpoint uses this to dispatch the two response
     # streaming shapes.
     multi_feed: bool = False
-    # When True, the result panel falls through to hardcoded JSX
-    # instead of generic ResultPanel rendering. Used by fan_dipole,
-    # whose per-band repeat group on band_lengths_m / band_freqs_mhz
-    # isn't yet expressible in ResultFieldSpec. Schema-driven examples
-    # set it to False and supply a full result_schema.
-    legacy_results: bool = False
     # Mixed sequence of ParamSpec (scalar) and ParamGroupSpec (repeat).
     # The Any erases the union; runtime discrimination is by presence of
     # `params` (groups have it, scalars don't).
     param_schema: tuple[Any, ...] = field(default_factory=tuple)
-    result_schema: tuple[ResultFieldSpec, ...] = field(default_factory=tuple)
+    # Mixed sequence of ResultFieldSpec (scalar row) and ResultGroupSpec
+    # (repeat group). Runtime discrimination on presence of `fields`.
+    result_schema: tuple[Any, ...] = field(default_factory=tuple)
     # Design-frequency band tabs offered by the UI. Defaults to the HF
     # amateur set; multi-band examples (fan_dipole) set this to () to
     # suppress the row.

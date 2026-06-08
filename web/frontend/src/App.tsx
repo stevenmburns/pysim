@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 
 type Wire = {
   label: string;
@@ -88,13 +88,20 @@ type BandSpec = {
   max_mhz: number;
 };
 
+type ResultGroupItem = {
+  kind: "group";
+  name: string;
+  label_template: string;
+  fields: ResultFieldSpec[];
+};
+type ResultSchemaItem = ResultFieldSpec | ResultGroupItem;
+
 type ExampleDescriptor = {
   name: string;
   label: string;
   multi_feed: boolean;
-  legacy_results: boolean;
   param_schema: SchemaItem[];
-  result_schema: ResultFieldSpec[];
+  result_schema: ResultSchemaItem[];
   bands: BandSpec[];
   meas_freq_range_mhz: [number, number] | null;
   default_view: Projection;
@@ -331,28 +338,69 @@ function ParamForm({
   );
 }
 
+function formatScalar(raw: unknown, precision: number, unit: string | null): string {
+  return typeof raw === "number" ? `${raw.toFixed(precision)}${unit ?? ""}` : "—";
+}
+
+// label_template substitutions for ResultGroupItem:
+//   {i}            → 0-based index
+//   {i1}           → 1-based index
+//   {name:.Nf}     → result[name][i] formatted as a fixed-N-decimal float
+function renderGroupLabel(template: string, i: number, result: Record<string, unknown> | null): string {
+  let out = template.replace(/\{i1\}/g, String(i + 1)).replace(/\{i\}/g, String(i));
+  out = out.replace(/\{(\w+):\.(\d+)f\}/g, (_, name: string, decimals: string) => {
+    const arr = result?.[name];
+    if (!Array.isArray(arr)) return "—";
+    const v = arr[i];
+    return typeof v === "number" ? v.toFixed(Number(decimals)) : "—";
+  });
+  return out;
+}
+
 function ResultPanel({
   schema,
   result,
 }: {
-  schema: ResultFieldSpec[];
+  schema: ResultSchemaItem[];
   result: Record<string, unknown> | null;
 }) {
-  // Render one row per schema entry, reading the field off the response by
-  // name. Missing or non-numeric values get an em-dash so the row layout
-  // doesn't collapse mid-update.
+  // Render one row per schema entry. Scalar items read the field off the
+  // response by name; group items repeat over the first inner field's
+  // top-level array. Missing/non-numeric values render as an em-dash so
+  // the row layout doesn't collapse mid-update.
   return (
     <>
-      {schema.map((s) => {
-        const raw = result?.[s.field];
-        const display =
-          typeof raw === "number"
-            ? `${raw.toFixed(s.precision)}${s.unit ?? ""}`
-            : "—";
+      {schema.map((item) => {
+        if ("kind" in item && item.kind === "group") {
+          const repeatField = item.fields[0]?.field;
+          const arr = repeatField ? result?.[repeatField] : undefined;
+          if (!Array.isArray(arr)) return null;
+          return (
+            <Fragment key={`result-group-${item.name}`}>
+              {arr.map((_, i) => (
+                <div className="row" key={`result-group-${item.name}-${i}`}>
+                  <span>{renderGroupLabel(item.label_template, i, result)}</span>
+                  <span className="val">
+                    {item.fields.map((f, fi) => {
+                      const sub = result?.[f.field];
+                      const v = Array.isArray(sub) ? sub[i] : undefined;
+                      return (
+                        <span key={`${item.name}-${i}-${fi}`}>
+                          {formatScalar(v, f.precision, f.unit)}
+                        </span>
+                      );
+                    })}
+                  </span>
+                </div>
+              ))}
+            </Fragment>
+          );
+        }
+        const s = item as ResultFieldSpec;
         return (
           <div className="row" key={`result-${s.field}`}>
             <span>{s.label}</span>
-            <span className="val">{display}</span>
+            <span className="val">{formatScalar(result?.[s.field], s.precision, s.unit)}</span>
           </div>
         );
       })}
@@ -1792,7 +1840,7 @@ export function App() {
               {result ? `${result.z_in_im.toFixed(2)} Ω` : "—"}
             </span>
           </div>
-          {currentExample && !currentExample.legacy_results && (
+          {currentExample && (
             <ResultPanel
               schema={currentExample.result_schema}
               result={result as Record<string, unknown> | null}
@@ -1813,28 +1861,6 @@ export function App() {
                 </div>
               ))}
             </div>
-          )}
-          {result?.geometry === "fan_dipole" && (
-            <>
-              <div className="row">
-                <span>bands</span>
-                <span className="val">{result.n_bands}</span>
-              </div>
-              {result.band_lengths_m?.map((L, i) => (
-                <div className="row" key={`fan-out-${i}`}>
-                  <span>band {i + 1} ({result.band_freqs_mhz?.[i]?.toFixed(2)} MHz)</span>
-                  <span className="val">{L.toFixed(3)} m</span>
-                </div>
-              ))}
-              <div className="row">
-                <span>cone slope</span>
-                <span className="val">{result.slope?.toFixed(3)}</span>
-              </div>
-              <div className="row">
-                <span>cone radius</span>
-                <span className="val">{result.cone_radius_m?.toFixed(3)} m</span>
-              </div>
-            </>
           )}
           <div className="row">
             <span>|I_feed|</span>

@@ -14,7 +14,14 @@ import time
 import numpy as np
 
 from . import register
-from ._base import AntennaExample, ParamGroupSpec, ParamSpec, ResultFieldSpec, SweepPolicy  # noqa: F401
+from ._base import (
+    AntennaExample,
+    ParamGroupSpec,
+    ParamSpec,
+    ResultFieldSpec,
+    ResultGroupSpec,
+    SweepPolicy,
+)  # noqa: F401
 
 _FEED_GAP = 0.01  # meters; half-gap, matches antenna_designer eps
 
@@ -528,13 +535,6 @@ EXAMPLE = register(
         pysim_sweep=pysim_sweep,
         pynec_build=pynec_build,
         pynec_solve=pynec_solve,
-        # The input controls now fit the schema (the first user of
-        # ParamGroupSpec — per-band repeat group with enum + dynamic
-        # range + on_change side effect). Result panel still uses a
-        # per-band repeat group on band_lengths_m[] / band_freqs_mhz[]
-        # which isn't yet schema-modelled, so the legacy result block
-        # in App.tsx stays for now.
-        legacy_results=True,
         # Multi-band antenna: its design frequency comes from the
         # per-band schema, not from the global band-tabs row, so suppress
         # the row entirely. The measurement-freq slider spans every
@@ -633,6 +633,25 @@ EXAMPLE = register(
                 step=0.005,
                 precision=3,
                 unit=" m",
+            ),
+        ),
+        result_schema=(
+            ResultFieldSpec(field="n_bands", label="bands", precision=0),
+            ResultGroupSpec(
+                name="bands",
+                label_template="band {i1} ({band_freqs_mhz:.2f} MHz)",
+                fields=(
+                    ResultFieldSpec(
+                        field="band_lengths_m",
+                        label="length",
+                        precision=3,
+                        unit=" m",
+                    ),
+                ),
+            ),
+            ResultFieldSpec(field="slope", label="cone slope", precision=3),
+            ResultFieldSpec(
+                field="cone_radius_m", label="cone radius", precision=3, unit=" m"
             ),
         ),
     )
