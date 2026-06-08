@@ -185,9 +185,7 @@ def pysim_solve(req: dict) -> dict:
     }
 
 
-def pysim_sweep(
-    req: dict, freqs_mhz: list[float]
-) -> tuple[list[float], list[float]]:
+def pysim_sweep(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[float]]:
     from web.server import C_LIGHT, _make_pysim_sim, _read_ground
 
     ground_on, _, z_offset = _read_ground(req)
@@ -348,9 +346,7 @@ def pynec_solve(req: dict) -> dict:
     cur_driver = np.concatenate(
         [cur_arr[np.where(tag_arr == t)[0]] for t in range(1, 6)]
     )
-    cur_refl = np.concatenate(
-        [cur_arr[np.where(tag_arr == t)[0]] for t in range(6, 9)]
-    )
+    cur_refl = np.concatenate([cur_arr[np.where(tag_arr == t)[0]] for t in range(6, 9)])
 
     driver_knots = _path_knots(b["driver_path"], b["npe_d"])
     refl_knots = _path_knots(b["reflector_path"], b["npe_r"])
