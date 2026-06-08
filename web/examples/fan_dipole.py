@@ -523,6 +523,7 @@ EXAMPLE = register(
     AntennaExample(
         name="fan_dipole",
         label="Fan Dipole",
+        default_view="yz",
         pysim_solve=pysim_solve,
         pysim_sweep=pysim_sweep,
         pynec_build=pynec_build,

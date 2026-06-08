@@ -92,6 +92,7 @@ type ExampleDescriptor = {
   result_schema: ResultFieldSpec[];
   bands: BandSpec[];
   meas_freq_range_mhz: [number, number] | null;
+  default_view: Projection;
 };
 
 function applyVisibility(spec: SchemaParamSpec, values: ParamValueBag): boolean {
@@ -717,21 +718,6 @@ const PROJECTIONS: { id: Projection; label: string; horizAxis: 0|1|2; vertAxis: 
   { id: "yz", label: "Side (yz)",  horizAxis: 1, vertAxis: 2 },
 ];
 
-function defaultProjection(geometry: string): Projection {
-  // V-and-fan-dipole arms run along y and droop in z, so a side (yz) view is
-  // the natural one. Yagi / moxon / hexbeam are top-down (xy) because the
-  // beam axis lives in the xy plane. Hentenna lives entirely in the yz
-  // plane (vertical rectangular loop), so yz is the only useful view.
-  if (
-    geometry === "inverted_v" ||
-    geometry === "fan_dipole" ||
-    geometry === "hentenna" ||
-    geometry === "bowtie"
-  )
-    return "yz";
-  return "xy";
-}
-
 function useSlideSize(maxSize = 720) {
   const ref = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState(maxSize);
@@ -1000,15 +986,14 @@ export function App() {
   // slider tick. Overlaid on the cuts as a comparison line.
   const [pattern, setPattern] = useState<PatternData | null>(null);
   const [view, setView] = useState<View>("antenna");
-  const [cameraProjection, setCameraProjection] = useState<Projection>(() =>
-    defaultProjection("inverted_v")
-  );
-  // When the user switches antennas, reset the camera to that geometry's
-  // natural view (V/fan_dipole → side; Yagi/moxon/hexbeam → top). Explicit
-  // user override sticks until the next geometry change.
+  const [cameraProjection, setCameraProjection] = useState<Projection>("xy");
+  // When the user switches antennas, reset the camera to that example's
+  // natural starting view (declared on the backend via default_view).
+  // Explicit user override sticks until the next geometry change.
   useEffect(() => {
-    setCameraProjection(defaultProjection(geometry));
-  }, [geometry]);
+    if (currentExample) setCameraProjection(currentExample.default_view);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentExample?.name]);
 
   // Schema-driven design-freq link: when the active example has any
   // leaf marked `linked_to_design_freq` (currently only fan_dipole's

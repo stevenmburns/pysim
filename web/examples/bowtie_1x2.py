@@ -633,6 +633,7 @@ EXAMPLE = register(
     AntennaExample(
         name="bowtie",
         label="Bowtie 1×2 array",
+        default_view="yz",
         pysim_solve=pysim_solve,
         pysim_sweep=pysim_sweep,
         pynec_build=pynec_build,

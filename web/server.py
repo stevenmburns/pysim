@@ -736,6 +736,7 @@ def examples_endpoint():
                     if ex.meas_freq_range_mhz is not None
                     else None
                 ),
+                "default_view": ex.default_view,
             }
         )
     out.sort(key=lambda e: e["label"])

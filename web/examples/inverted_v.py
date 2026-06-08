@@ -254,6 +254,7 @@ EXAMPLE = register(
     AntennaExample(
         name="inverted_v",
         label="Inverted V",
+        default_view="yz",
         pysim_solve=pysim_solve,
         pysim_sweep=pysim_sweep,
         pynec_build=pynec_build,

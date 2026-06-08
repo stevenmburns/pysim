@@ -238,3 +238,10 @@ class AntennaExample:
     # Multi-band examples that span the whole HF range set this to e.g.
     # (13.5, 30.2) so the slider can reach every band.
     meas_freq_range_mhz: Optional[tuple[float, float]] = None
+    # Initial 2D-view projection the wire-render canvas picks when the
+    # user first selects this example. "xy" = top-down (beam-in-xy
+    # antennas like yagi/moxon/hexbeam); "yz" = side (antennas whose
+    # arms run along y and droop in z, like inverted_v / fan_dipole;
+    # also the vertical-loop hentenna). The user can still override
+    # via the projection buttons; this just sets the starting view.
+    default_view: str = "xy"
