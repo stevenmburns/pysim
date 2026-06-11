@@ -315,7 +315,7 @@ def test_triangular_y_matrix_with_junctions_single_feed():
     z, _ = sim.compute_impedance()
     Y = TriangularPySim(**common).compute_y_matrix()
     assert Y.shape == (1, 1)
-    assert abs(Y[0, 0] - 1.0 / z) < 1e-10, f"Y[0,0]={Y[0,0]}, 1/Z={1.0 / z}"
+    assert abs(Y[0, 0] - 1.0 / z) < 1e-10, f"Y[0,0]={Y[0, 0]}, 1/Z={1.0 / z}"
 
 
 def test_triangular_y_matrix_with_junctions_multi_feed():
@@ -378,6 +378,186 @@ def test_triangular_y_matrix_swept_with_junctions_matches_per_freq():
         Y_f = sim_f.compute_y_matrix()
         assert np.allclose(Y_swept[i], Y_f, atol=1e-10), (
             f"f={f}: swept Y differs from per-k Y"
+        )
+
+
+def test_sinusoidal_y_matrix_with_junctions_single_feed():
+    """SinusoidalPySim handles junctions structurally (via the N±(i) neighbour
+    topology with σ=±1 signs) rather than via a Lagrange-augmented KCL, so
+    compute_y_matrix doesn't need a separate junction path. Lock that in:
+    Y[0,0] = 1/Z on a K=2-junction bent dipole."""
+    pl0 = np.array([[0.0, -5.0, 0.0], [0.0, 0.0, -2.0]])
+    pl1 = np.array([[0.0, 0.0, -2.0], [0.0, 5.0, 0.0]])
+    common = dict(
+        wires=[pl0, pl1],
+        n_per_edge_per_wire=[[15], [15]],
+        feed_wire_index=0,
+        feed_arclength=2.5,
+        wavelength=22,
+        wire_radius=0.0005,
+        junctions=[[(0, "end"), (1, "start")]],
+    )
+    z, _ = SinusoidalPySim(**common).compute_impedance()
+    Y = SinusoidalPySim(**common).compute_y_matrix()
+    assert Y.shape == (1, 1)
+    assert abs(Y[0, 0] - 1.0 / z) < 1e-9, f"Y[0,0]={Y[0, 0]}, 1/Z={1.0 / z}"
+
+
+def test_sinusoidal_y_matrix_with_junctions_multi_feed():
+    """Two feeds (one per wire) sharing a K=2 junction. Y should be near-
+    symmetric (sinusoidal's MoM isn't quite as tight as triangular's at
+    fixed segmentation, so use a looser tolerance) and match the N-solve
+    reference."""
+    pl0 = np.array([[0.0, -5.0, 0.0], [0.0, 0.0, -2.0]])
+    pl1 = np.array([[0.0, 0.0, -2.0], [0.0, 5.0, 0.0]])
+    common = dict(
+        wires=[pl0, pl1],
+        n_per_edge_per_wire=[[15], [15]],
+        feeds=[(0, 2.5, 1 + 0j), (1, 2.5, 1 + 0j)],
+        wavelength=22,
+        wire_radius=0.0005,
+        junctions=[[(0, "end"), (1, "start")]],
+    )
+
+    Y = SinusoidalPySim(**common).compute_y_matrix()
+    assert Y.shape == (2, 2)
+    assert abs(Y[0, 1] - Y[1, 0]) < 1e-6, "Y not symmetric within MoM tolerance"
+
+    Y_ref = np.zeros((2, 2), dtype=np.complex128)
+    for j in range(2):
+        feeds_j = [
+            (w, arc, 1.0 + 0j if k == j else 0.0 + 0j)
+            for k, (w, arc, _) in enumerate(common["feeds"])
+        ]
+        ref_kwargs = {**common, "feeds": feeds_j}
+        sim_j = SinusoidalPySim(**ref_kwargs)
+        _z, alpha = sim_j.compute_impedance()
+        geom = sim_j._build_geometry()
+        _G, seg_view = sim_j._assemble_Z(geom, sim_j.k)
+        Y_ref[:, j] = [
+            sim_j._feed_segment_current(alpha, seg_view, fi) for fi in geom["feed_segs"]
+        ]
+    assert np.allclose(Y, Y_ref, atol=1e-10), f"Y - Y_ref:\n{Y - Y_ref}"
+
+
+def test_sinusoidal_y_matrix_swept_with_junctions_matches_per_freq():
+    pl0 = np.array([[0.0, -5.0, 0.0], [0.0, 0.0, -2.0]])
+    pl1 = np.array([[0.0, 0.0, -2.0], [0.0, 5.0, 0.0]])
+    common = dict(
+        wires=[pl0, pl1],
+        n_per_edge_per_wire=[[15], [15]],
+        feeds=[(0, 2.5, 1 + 0j), (1, 2.5, 1 + 0j)],
+        wire_radius=0.0005,
+        junctions=[[(0, "end"), (1, "start")]],
+    )
+    C_LIGHT = 299_792_458.0
+    freqs_mhz = np.array([10.0, 14.0, 20.0])
+    k_array = 2 * np.pi * freqs_mhz * 1e6 / C_LIGHT
+
+    sim_swept = SinusoidalPySim(wavelength=22, **common)
+    Y_swept = sim_swept.compute_y_matrix_swept(k_array)
+    assert Y_swept.shape == (3, 2, 2)
+
+    for i, f in enumerate(freqs_mhz):
+        sim_f = SinusoidalPySim(wavelength=C_LIGHT / (f * 1e6), **common)
+        Y_f = sim_f.compute_y_matrix()
+        assert np.allclose(Y_swept[i], Y_f, atol=1e-10), (
+            f"f={f}: swept Y differs from per-k Y"
+        )
+
+
+@pytest.mark.parametrize("degree", [1, 2])
+def test_bspline_y_matrix_with_junctions_single_feed(degree):
+    """compute_y_matrix on a K=2-junction antenna with a single feed should
+    return [[1/Z]] where Z is what compute_impedance reports. Bspline uses
+    the Lagrange-augmented KCL identically to triangular but with the
+    Galerkin reciprocity Y = B^T X readout. Covers both d=1 (tent-equivalent)
+    and d=2 (the default quadratic) bases."""
+    pl0 = np.array([[0.0, -5.0, 0.0], [0.0, 0.0, -2.0]])
+    pl1 = np.array([[0.0, 0.0, -2.0], [0.0, 5.0, 0.0]])
+    common = dict(
+        wires=[pl0, pl1],
+        n_per_edge_per_wire=[[15], [15]],
+        feed_wire_index=0,
+        feed_arclength=2.5,
+        wavelength=22,
+        wire_radius=0.0005,
+        junctions=[[(0, "end"), (1, "start")]],
+        degree=degree,
+    )
+    z, _ = BSplinePySim(**common).compute_impedance()
+    Y = BSplinePySim(**common).compute_y_matrix()
+    assert Y.shape == (1, 1)
+    assert abs(Y[0, 0] - 1.0 / z) < 1e-10, (
+        f"d={degree}: Y[0,0]={Y[0, 0]}, 1/Z={1.0 / z}"
+    )
+
+
+@pytest.mark.parametrize("degree", [1, 2])
+def test_bspline_y_matrix_with_junctions_multi_feed(degree):
+    """Two feeds on a K=2-junction antenna. Y should be symmetric and match
+    the N-independent-solves reference at both d=1 and d=2."""
+    pl0 = np.array([[0.0, -5.0, 0.0], [0.0, 0.0, -2.0]])
+    pl1 = np.array([[0.0, 0.0, -2.0], [0.0, 5.0, 0.0]])
+    common = dict(
+        wires=[pl0, pl1],
+        n_per_edge_per_wire=[[15], [15]],
+        feeds=[(0, 2.5, 1 + 0j), (1, 2.5, 1 + 0j)],
+        wavelength=22,
+        wire_radius=0.0005,
+        junctions=[[(0, "end"), (1, "start")]],
+        degree=degree,
+    )
+
+    Y = BSplinePySim(**common).compute_y_matrix()
+    assert Y.shape == (2, 2)
+    assert abs(Y[0, 1] - Y[1, 0]) < 1e-10, f"d={degree}: Y not symmetric (reciprocity)"
+
+    # Reference: N independent solves, Y[:, j] = B^T @ coeffs_j.
+    Y_ref = np.zeros((2, 2), dtype=np.complex128)
+    for j in range(2):
+        feeds_j = [
+            (w, arc, 1.0 + 0j if k == j else 0.0 + 0j)
+            for k, (w, arc, _) in enumerate(common["feeds"])
+        ]
+        sim_j = BSplinePySim(**{**common, "feeds": feeds_j})
+        _z, coeffs = sim_j.compute_impedance()
+        geom = sim_j._build_geometry()
+        supp_seg, polys, _kcl, wk, wbg = sim_j._build_basis_polynomials(geom)
+        n_bt = supp_seg.shape[0]
+        for i, (w_i, arc_i, _v) in enumerate(common["feeds"]):
+            arc_at_knot = geom["per_wire"][w_i]["arc_at_knot"]
+            s_f = arc_i if arc_i is not None else arc_at_knot[-1] / 2.0
+            v_i = sim_j._build_source_vector(geom, wk, wbg, n_bt, wi=w_i, s_f=s_f)
+            Y_ref[i, j] = v_i @ coeffs
+    assert np.allclose(Y, Y_ref, atol=1e-10), f"d={degree}: Y - Y_ref:\n{Y - Y_ref}"
+
+
+@pytest.mark.parametrize("degree", [1, 2])
+def test_bspline_y_matrix_swept_with_junctions_matches_per_freq(degree):
+    pl0 = np.array([[0.0, -5.0, 0.0], [0.0, 0.0, -2.0]])
+    pl1 = np.array([[0.0, 0.0, -2.0], [0.0, 5.0, 0.0]])
+    common = dict(
+        wires=[pl0, pl1],
+        n_per_edge_per_wire=[[15], [15]],
+        feeds=[(0, 2.5, 1 + 0j), (1, 2.5, 1 + 0j)],
+        wire_radius=0.0005,
+        junctions=[[(0, "end"), (1, "start")]],
+        degree=degree,
+    )
+    C_LIGHT = 299_792_458.0
+    freqs_mhz = np.array([10.0, 14.0, 20.0])
+    k_array = 2 * np.pi * freqs_mhz * 1e6 / C_LIGHT
+
+    sim_swept = BSplinePySim(wavelength=22, **common)
+    Y_swept = sim_swept.compute_y_matrix_swept(k_array)
+    assert Y_swept.shape == (3, 2, 2)
+
+    for i, f in enumerate(freqs_mhz):
+        sim_f = BSplinePySim(wavelength=C_LIGHT / (f * 1e6), **common)
+        Y_f = sim_f.compute_y_matrix()
+        assert np.allclose(Y_swept[i], Y_f, atol=1e-10), (
+            f"d={degree}, f={f}: swept Y differs from per-k Y"
         )
 
 

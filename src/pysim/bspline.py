@@ -886,6 +886,25 @@ class BSplinePySim:
         lam = scipy.linalg.solve(kcl_A @ X, kcl_A @ w)
         return w - X @ lam
 
+    def _solve_with_kcl_ports(self, Z, V, kcl_A):
+        """Multi-port KCL-constrained Schur solve. V: (n_b, n_p), returns
+        (n_b, n_p). Matrix-RHS generalisation of `_solve_with_kcl` — all
+        n_p source columns share one LU factorisation with the n_c
+        constraint columns.
+        """
+        if kcl_A.shape[0] == 0:
+            return scipy.linalg.solve(Z, V)
+        n_b, n_p = V.shape
+        n_c = kcl_A.shape[0]
+        rhs = np.empty((n_b, n_p + n_c), dtype=np.complex128)
+        rhs[:, :n_p] = V
+        rhs[:, n_p:] = kcl_A.T
+        sol = scipy.linalg.solve(Z, rhs)
+        W = sol[:, :n_p]
+        X = sol[:, n_p:]
+        Lam = scipy.linalg.solve(kcl_A @ X, kcl_A @ W)
+        return W - X @ Lam
+
     # ------------------------------------------------------------------
     # Driver impedance
     # ------------------------------------------------------------------
@@ -1355,23 +1374,21 @@ class BSplinePySim:
         vectors as RHS columns and back-substituting once gives
         Y[i, j] = v_i^T · solve(Z, v_j) in one shot.
 
-        Junctions and singular enrichment aren't supported here yet —
-        the daisy-chain use case (hexbeam_5band) has neither (5
-        independent hexbeam element pairs), so this is fine for now.
-        Add the kcl-augmented variant when a multi-feed multi-junction
-        antenna asks for it.
+        Junctions are handled through the matrix-RHS Schur solve in
+        `_solve_with_kcl_ports` — KCL is enforced once across all n_p
+        source columns, so the augmentation cost stays O(n_c²) per Y
+        rather than scaling with the port count.
+
+        Singular enrichment is still gated; it composes an iterative two-
+        pass solve (variant="auto") that needs separate treatment.
         """
-        if self.junctions:
-            raise NotImplementedError(
-                "BSplinePySim.compute_y_matrix doesn't yet support junctions"
-            )
         if self.use_singular_enrichment:
             raise NotImplementedError(
                 "BSplinePySim.compute_y_matrix doesn't yet support enrichment"
             )
 
         geom = self._build_geometry()
-        supp_seg, polys, _kcl_A, wire_knots, wire_basis_global = (
+        supp_seg, polys, kcl_A, wire_knots, wire_basis_global = (
             self._build_basis_polynomials(geom)
         )
         n_basis_total = supp_seg.shape[0]
@@ -1398,16 +1415,16 @@ class BSplinePySim:
                 s_f=s_f_j,
             )
 
-        X = scipy.linalg.solve(Z, B)  # (n_basis, n_ports)
+        X = self._solve_with_kcl_ports(Z, B, kcl_A)  # (n_basis, n_ports)
         return B.T @ X  # Y[i, j] = v_i^T · solve(Z, v_j)
 
     def compute_y_matrix_swept(self, k_array) -> np.ndarray:
         """Per-frequency Y matrices. Loops over k like
-        `compute_impedance_swept`; returns (n_k, n_ports, n_ports)."""
-        if self.junctions:
-            raise NotImplementedError(
-                "BSplinePySim.compute_y_matrix_swept doesn't yet support junctions"
-            )
+        `compute_impedance_swept`; returns (n_k, n_ports, n_ports).
+
+        Junctions are handled per-k through `_solve_with_kcl_ports` — same
+        matrix-RHS Schur path as the single-k Y. Singular enrichment is
+        still gated."""
         if self.use_singular_enrichment:
             raise NotImplementedError(
                 "BSplinePySim.compute_y_matrix_swept doesn't yet support enrichment"
@@ -1419,7 +1436,7 @@ class BSplinePySim:
         omega_save = self.omega
 
         geom = self._build_geometry()
-        supp_seg, polys, _kcl_A, wire_knots, wire_basis_global = (
+        supp_seg, polys, kcl_A, wire_knots, wire_basis_global = (
             self._build_basis_polynomials(geom)
         )
         n_basis_total = supp_seg.shape[0]
@@ -1450,7 +1467,7 @@ class BSplinePySim:
                 J_img = self._build_J_image_blocks(geom, self.k)
                 td_img = self._image_tangent_dot(geom["tangents"])
                 Z = Z - self._assemble_Z(J_img, supp_seg, polys, geom, td_all=td_img)
-            X = scipy.linalg.solve(Z, B)
+            X = self._solve_with_kcl_ports(Z, B, kcl_A)
             out[ki] = B.T @ X
 
         self.k = k_save

@@ -1047,9 +1047,7 @@ class TriangularPySim:
         tangents = geom["tangents"]
         has_junctions = bool(self.junctions)
         assemble_batch = (
-            self._assemble_Z_general_batch
-            if has_junctions
-            else self._assemble_Z_batch
+            self._assemble_Z_general_batch if has_junctions else self._assemble_Z_batch
         )
 
         J_free = self._build_J_blocks_batch(geom, k_array)
