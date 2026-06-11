@@ -640,6 +640,27 @@ class TriangularPySim:
         lam = scipy.linalg.solve(A @ X, A @ w)
         return w - X @ lam
 
+    def _solve_with_kcl_ports(self, Z, V, geom):
+        """Multi-port single-k KCL-constrained Schur solve.
+
+        V: (n_b, n_p) right-hand side, one column per port. Returns
+        (n_b, n_p) coefficients. Same Schur derivation as `_solve_with_kcl`
+        but with a matrix RHS — packs all n_p source columns together with
+        the n_c constraint columns into a single LU + back-sub call, so
+        the factor cost is paid once for all ports.
+        """
+        A = geom["kcl_A"]
+        n_b, n_p = V.shape
+        n_c = A.shape[0]
+        rhs = np.empty((n_b, n_p + n_c), dtype=np.complex128)
+        rhs[:, :n_p] = V
+        rhs[:, n_p:] = A.T
+        sol = scipy.linalg.solve(Z, rhs)
+        W = sol[:, :n_p]  # Z⁻¹ V
+        X = sol[:, n_p:]  # Z⁻¹ Aᵀ
+        Lam = scipy.linalg.solve(A @ X, A @ W)
+        return W - X @ Lam
+
     def compute_impedance(self, *, ntrap=None):
         geom = self._build_geometry()
         tangents = geom["tangents"]
@@ -696,27 +717,26 @@ class TriangularPySim:
         open / I_k = 0).
 
         Same Z assembly + ground handling as `compute_impedance`. Only
-        the RHS / readout differs. Junctions are not yet supported —
-        the Schur-complement KCL solve in `_solve_with_kcl` would need
-        a matrix-RHS generalisation; deferred until a multi-feed
-        antenna with junctions needs this.
+        the RHS / readout differs. Junctions are handled through the
+        port-batched Schur-complement solve `_solve_with_kcl_ports`.
         """
-        if self.junctions:
-            raise NotImplementedError(
-                "compute_y_matrix with junctions isn't implemented yet"
-            )
-
         geom = self._build_geometry()
         tangents = geom["tangents"]
+        has_junctions = bool(self.junctions)
+        assemble = (
+            self._assemble_Z_general_single
+            if has_junctions
+            else self._assemble_Z_single
+        )
 
         J_free = self._build_J_blocks(geom, self.k)
         td_free = tangents @ tangents.T
-        Z = self._assemble_Z_single(*J_free, td_free, geom)
+        Z = assemble(*J_free, td_free, geom)
 
         if self.ground_z is not None:
             J_img = self._build_J_image_blocks(geom, self.k)
             td_img = self._image_tangent_dot(tangents)
-            Z = Z - self._assemble_Z_single(*J_img, td_img, geom)
+            Z = Z - assemble(*J_img, td_img, geom)
 
         self.z = Z
 
@@ -731,7 +751,10 @@ class TriangularPySim:
         for j, m_i in enumerate(m_indices):
             B[m_i, j] = 1.0
 
-        X = scipy.linalg.solve(Z, B)
+        if has_junctions:
+            X = self._solve_with_kcl_ports(Z, B, geom)
+        else:
+            X = scipy.linalg.solve(Z, B)
         return X[m_indices, :]
 
     def currents_at_knots(self, coeffs, s_array=None):
@@ -946,6 +969,29 @@ class TriangularPySim:
         lam = np.linalg.solve(S, Aw[:, :, None])[:, :, 0]  # (n_k, n_c)
         return w - np.einsum("kmc,kc->km", X, lam)
 
+    def _solve_with_kcl_swept_ports(self, Z, V, geom):
+        """k-batched and port-batched KCL-constrained Schur solve.
+
+        Z: (n_k, n_b, n_b). V: (n_b, n_p) — shared across k. Returns
+        (n_k, n_b, n_p). Same Schur math as `_solve_with_kcl_batch`,
+        generalised to a matrix RHS so `compute_y_matrix_swept` can solve
+        all ports at all frequencies in one batched call.
+        """
+        A = geom["kcl_A"]
+        n_k = Z.shape[0]
+        n_b, n_p = V.shape
+        n_c = A.shape[0]
+        rhs = np.empty((n_k, n_b, n_p + n_c), dtype=np.complex128)
+        rhs[:, :, :n_p] = V[None, :, :]
+        rhs[:, :, n_p:] = A.T[None, :, :]
+        sol = np.linalg.solve(Z, rhs)
+        W = sol[:, :, :n_p]  # (n_k, n_b, n_p)
+        X = sol[:, :, n_p:]  # (n_k, n_b, n_c)
+        S = np.einsum("cm,kmn->kcn", A, X)  # (n_k, n_c, n_c)
+        AW = np.einsum("cm,kmp->kcp", A, W)  # (n_k, n_c, n_p)
+        Lam = np.linalg.solve(S, AW)  # (n_k, n_c, n_p)
+        return W - np.einsum("kmc,kcp->kmp", X, Lam)
+
     def compute_impedance_swept(self, k_array):
         """Driver impedance over a batch of wavenumbers, sharing all
         k-independent work (geometry, static kernel, basis stencil).
@@ -990,27 +1036,30 @@ class TriangularPySim:
         `compute_impedance_swept`, but with a batched per-port RHS so
         we get all N columns per frequency in one solve.
 
-        Junctions are not yet supported (same reason as
-        `compute_y_matrix`).
+        Junctions are handled through `_solve_with_kcl_swept_ports`,
+        which generalises the per-k single-port Schur path to a matrix
+        RHS so all (port × frequency) solves share one LU factorisation
+        per frequency.
         """
-        if self.junctions:
-            raise NotImplementedError(
-                "compute_y_matrix_swept with junctions isn't implemented"
-            )
-
         k_array = np.asarray(k_array, dtype=float)
         omega_array = k_array * self.c
         geom = self._build_geometry()
         tangents = geom["tangents"]
+        has_junctions = bool(self.junctions)
+        assemble_batch = (
+            self._assemble_Z_general_batch
+            if has_junctions
+            else self._assemble_Z_batch
+        )
 
         J_free = self._build_J_blocks_batch(geom, k_array)
         td_free = tangents @ tangents.T
-        Z = self._assemble_Z_batch(*J_free, td_free, geom, omega_array)
+        Z = assemble_batch(*J_free, td_free, geom, omega_array)
 
         if self.ground_z is not None:
             J_img = self._build_J_image_blocks_batch(geom, k_array)
             td_img = self._image_tangent_dot(tangents)
-            Z = Z - self._assemble_Z_batch(*J_img, td_img, geom, omega_array)
+            Z = Z - assemble_batch(*J_img, td_img, geom, omega_array)
 
         m_indices = self._feed_basis_indices(geom)
         n_ports = len(m_indices)
@@ -1020,9 +1069,12 @@ class TriangularPySim:
         B = np.zeros((n_basis, n_ports), dtype=np.complex128)
         for j, m_i in enumerate(m_indices):
             B[m_i, j] = 1.0
-        B_batch = np.broadcast_to(B, (k_array.shape[0], n_basis, n_ports))
 
-        coeffs = np.linalg.solve(Z, B_batch)  # (n_k, n_basis, n_ports)
+        if has_junctions:
+            coeffs = self._solve_with_kcl_swept_ports(Z, B, geom)
+        else:
+            B_batch = np.broadcast_to(B, (k_array.shape[0], n_basis, n_ports))
+            coeffs = np.linalg.solve(Z, B_batch)  # (n_k, n_basis, n_ports)
         # Y[k, i, j] = current at port i when port j was driven with
         # V = 1, all others V = 0 — i.e. coeffs[k, m_indices[i], j].
         return coeffs[:, m_indices, :]

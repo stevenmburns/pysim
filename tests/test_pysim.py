@@ -294,6 +294,93 @@ def test_triangular_k2_junction_equivalent_to_single_polyline():
     )
 
 
+def test_triangular_y_matrix_with_junctions_single_feed():
+    """compute_y_matrix on a K=2-junction antenna with a single feed should
+    return [[1/Z]] where Z is what compute_impedance reports. Tests that the
+    new junction path through _solve_with_kcl_ports doesn't regress against
+    the existing single-port KCL solve."""
+    pl0 = np.array([[0.0, -5.0, 0.0], [0.0, 0.0, -2.0]])
+    pl1 = np.array([[0.0, 0.0, -2.0], [0.0, 5.0, 0.0]])
+    common = dict(
+        wires=[pl0, pl1],
+        n_per_edge_per_wire=[[15], [15]],
+        feed_wire_index=0,
+        feed_arclength=2.5,
+        wavelength=22,
+        nsegs=15,
+        wire_radius=0.0005,
+        junctions=[[(0, "end"), (1, "start")]],
+    )
+    sim = TriangularPySim(**common)
+    z, _ = sim.compute_impedance()
+    Y = TriangularPySim(**common).compute_y_matrix()
+    assert Y.shape == (1, 1)
+    assert abs(Y[0, 0] - 1.0 / z) < 1e-10, f"Y[0,0]={Y[0,0]}, 1/Z={1.0 / z}"
+
+
+def test_triangular_y_matrix_with_junctions_multi_feed():
+    """compute_y_matrix on a K=2-junction antenna with two feeds (one per
+    wire) should equal the N-independent-solves reference (drive each port
+    with V=1 and read coeffs at every feed's basis index)."""
+    pl0 = np.array([[0.0, -5.0, 0.0], [0.0, 0.0, -2.0]])
+    pl1 = np.array([[0.0, 0.0, -2.0], [0.0, 5.0, 0.0]])
+    common = dict(
+        wires=[pl0, pl1],
+        n_per_edge_per_wire=[[15], [15]],
+        feeds=[(0, 2.5, 1 + 0j), (1, 2.5, 1 + 0j)],
+        wavelength=22,
+        nsegs=15,
+        wire_radius=0.0005,
+        junctions=[[(0, "end"), (1, "start")]],
+    )
+
+    Y = TriangularPySim(**common).compute_y_matrix()
+    assert Y.shape == (2, 2)
+    assert abs(Y[0, 1] - Y[1, 0]) < 1e-10, "Y not symmetric (reciprocity)"
+
+    Y_ref = np.zeros((2, 2), dtype=np.complex128)
+    for j in range(2):
+        feeds_j = [
+            (w, arc, 1.0 + 0j if k == j else 0.0 + 0j)
+            for k, (w, arc, _) in enumerate(common["feeds"])
+        ]
+        ref_kwargs = {**common, "feeds": feeds_j}
+        sim_j = TriangularPySim(**ref_kwargs)
+        _z, coeffs = sim_j.compute_impedance()
+        m_indices = sim_j._feed_basis_indices(sim_j._build_geometry())
+        Y_ref[:, j] = [coeffs[m] for m in m_indices]
+    assert np.allclose(Y, Y_ref, atol=1e-10), f"Y - Y_ref:\n{Y - Y_ref}"
+
+
+def test_triangular_y_matrix_swept_with_junctions_matches_per_freq():
+    """Batched swept Y matrix with junctions should match per-frequency Y
+    matrices computed via compute_y_matrix."""
+    pl0 = np.array([[0.0, -5.0, 0.0], [0.0, 0.0, -2.0]])
+    pl1 = np.array([[0.0, 0.0, -2.0], [0.0, 5.0, 0.0]])
+    common = dict(
+        wires=[pl0, pl1],
+        n_per_edge_per_wire=[[15], [15]],
+        feeds=[(0, 2.5, 1 + 0j), (1, 2.5, 1 + 0j)],
+        nsegs=15,
+        wire_radius=0.0005,
+        junctions=[[(0, "end"), (1, "start")]],
+    )
+    C_LIGHT = 299_792_458.0
+    freqs_mhz = np.array([10.0, 14.0, 20.0])
+    k_array = 2 * np.pi * freqs_mhz * 1e6 / C_LIGHT
+
+    sim_swept = TriangularPySim(wavelength=22, **common)
+    Y_swept = sim_swept.compute_y_matrix_swept(k_array)
+    assert Y_swept.shape == (3, 2, 2)
+
+    for i, f in enumerate(freqs_mhz):
+        sim_f = TriangularPySim(wavelength=C_LIGHT / (f * 1e6), **common)
+        Y_f = sim_f.compute_y_matrix()
+        assert np.allclose(Y_swept[i], Y_f, atol=1e-10), (
+            f"f={f}: swept Y differs from per-k Y"
+        )
+
+
 def test_triangular_k2_junction_swept_matches_per_freq():
     """Batched swept solver with junctions should match per-freq solves."""
     pl0 = np.array([[0.0, -5.0, 0.0], [0.0, 0.0, -2.0]])
