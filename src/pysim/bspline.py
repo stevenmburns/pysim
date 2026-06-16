@@ -59,6 +59,18 @@ except ImportError:
 _BSPLINE_ASSEMBLE_ACCEL_MAX_D = 2
 
 
+# Constant Vandermonde inverses for uniform sample points [0, 1/d, ..., 1].
+# Used by `_build_basis_polynomials` to convert per-segment basis values at
+# d+1 uniform local-u sample points to polynomial coefficients without a
+# per-segment scipy.linalg.solve. With u_local = h_seg * [0, 1/d, ..., 1],
+# the Vandermonde factors as Vmat = V_unit @ diag(1, h, h², ..., h^d), so
+# coeffs_p = (V_unit_inv @ vals)_p / h_seg^p — pure matmul + column scaling.
+_V_UNIT_INV: dict[int, np.ndarray] = {
+    1: np.array([[1.0, 0.0], [-1.0, 1.0]]),
+    2: np.array([[1.0, 0.0, 0.0], [-3.0, 4.0, -1.0], [2.0, -4.0, 2.0]]),
+}
+
+
 # Module-level caches for `_build_geometry` and `_build_basis_polynomials`.
 # Both functions are pure functions of immutable geometry inputs (wires +
 # n_per_edge_per_wire, plus degree + junctions for the basis case) — they
@@ -606,47 +618,50 @@ class BSplinePySim:
             seg_off = geom["seg_offsets"][w_idx]
             h_per_seg_w = pw["h_per_seg"]
             arc_at_knot_w = pw["arc_at_knot"]
-            # build a sample of d+1 uniform points within each segment's
-            # local-u range, in GLOBAL arc length (so we can evaluate the
-            # BSpline at them)
-            # For per-segment extraction, do it inside the loop because h
-            # varies across edges.
+            n_total_w = pw["n_total"]
+
+            # Vectorize: per-wire single BSpline.design_matrix + constant
+            # V_unit_inv lookup replaces per-(basis, wing) BSpline
+            # construction + per-segment linspace/vander/solve.
+            #
+            # Sample points: d+1 uniform u within each segment, in global
+            # arc. shape (n_total_w, d+1) → flatten for design_matrix.
+            unit = np.linspace(0.0, 1.0, d + 1)  # (d+1,) shared across segs
+            u_local_per_seg = h_per_seg_w[:, None] * unit[None, :]  # (N, d+1)
+            u_global_per_seg = arc_at_knot_w[:-1, None] + u_local_per_seg
+            u_flat = u_global_per_seg.reshape(-1)
+
+            # All basis values at all sample points in one design_matrix call.
+            DM = BSpline.design_matrix(u_flat, knots, d).toarray()
+            # → (n_total_w, d+1, n_basis_w)
+            DM_seg = DM.reshape(n_total_w, d + 1, n_basis_w)
+
+            # V_unit_inv @ vals: convert d+1 basis values per segment to
+            # poly coeffs (in u_local). Then divide by h_seg^p column-wise
+            # to recover coeffs in u_local = h_seg · u_unit terms.
+            V_unit_inv = _V_UNIT_INV[d]
+            inv_h_powers = h_per_seg_w[:, None] ** (-np.arange(d + 1))
+            # → (N, d+1, n_basis_w): for each segment, polynomial coeff p
+            # of each basis function expressed as Σ_p coeffs_p · u_local^p
+            poly_per_seg = np.einsum("ij,sjk->sik", V_unit_inv, DM_seg)
+            poly_per_seg *= inv_h_powers[:, :, None]
+
+            # Per-basis support range as half-open segment indices [lo, hi).
+            # knots = [0]*d + arc + [wire_arc]*d, so knots[j] sits at
+            # segment index max(0, j - d), and knots[j+d+1] sits at
+            # min(N, j+1). Result: basis j has wings = segments
+            # max(0, j-d) .. min(N, j+1) - 1.
 
             per_basis_local_to_global = {}
             for kept_idx, (j, kind, junc_idx, end_pos) in enumerate(kept):
-                c_all = np.zeros(n_basis_w, dtype=np.float64)
-                c_all[j] = 1.0
-                bspl = BSpline(knots, c_all, d, extrapolate=False)
-
-                support_lo = knots[j]
-                support_hi = knots[j + d + 1]
+                seg_lo = max(0, j - d)
+                seg_hi = min(n_total_w, j + 1)
+                n_actual = seg_hi - seg_lo
 
                 supp_seg_m = np.zeros(n_wings, dtype=np.int64)
                 polys_m = np.zeros((n_wings, n_poly), dtype=np.float64)
-
-                # Find segments overlapping the support
-                wing = 0
-                # iterate over local segments in this wire
-                for seg_local in range(pw["n_total"]):
-                    seg_l_arc = arc_at_knot_w[seg_local]
-                    seg_r_arc = arc_at_knot_w[seg_local + 1]
-                    eps_seg = 1e-9 * max(h_per_seg_w[seg_local], 1e-12)
-                    if seg_r_arc < support_lo + eps_seg:
-                        continue
-                    if seg_l_arc > support_hi - eps_seg:
-                        break
-                    h_seg = h_per_seg_w[seg_local]
-                    # uniform sample for Vandermonde
-                    u_local = np.linspace(0.0, h_seg, d + 1)
-                    u_global = seg_l_arc + u_local
-                    vals = bspl(u_global)
-                    Vmat = np.vander(u_local, d + 1, increasing=True)
-                    coeffs = np.linalg.solve(Vmat, vals)
-                    supp_seg_m[wing] = seg_off + seg_local
-                    polys_m[wing, :] = coeffs
-                    wing += 1
-                    if wing >= n_wings:
-                        break
+                supp_seg_m[:n_actual] = seg_off + np.arange(seg_lo, seg_hi)
+                polys_m[:n_actual, :] = poly_per_seg[seg_lo:seg_hi, :, j]
 
                 all_supp_seg.append(supp_seg_m)
                 all_polys.append(polys_m)
