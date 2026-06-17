@@ -53,11 +53,12 @@ cd "$ROOT/python-necpp/necpp_src"
 # libraries available and the check fails — even though the runtime code
 # uses LAPACKE_zgetrf from libopenblas+liblapacke, never clapack_zgetrf.
 #
-# We sidestep by configuring --without-lapack (always passes) and then
-# patching config.h to set LAPACK=1 unconditionally. The matrix_algebra.cpp
-# code path gated on LAPACK is then live, and setup.py's PYNEC_BACKEND
-# logic chooses which LAPACK implementation we link to at extension-link
-# time (atlas clapack vs lapacke vs mkl).
+# For lapacke/mkl we configure --without-lapack (which always passes) and
+# rely on PyNEC/setup.py's `_defines` to pass -DLAPACK=1 at compile time,
+# so the matrix_algebra.cpp code path gated on LAPACK is live regardless
+# of what config.h says. setup.py's PYNEC_BACKEND logic chooses which
+# LAPACK implementation we link to at extension-link time (atlas clapack
+# vs lapacke vs mkl).
 MULTIARCH=$(gcc -print-multiarch 2>/dev/null || echo x86_64-linux-gnu)
 if [ ! -f config.h ]; then
     make -f Makefile.git
@@ -69,9 +70,6 @@ if [ ! -f config.h ]; then
             ./configure --with-lapack
     else
         ./configure --without-lapack
-        # Force LAPACK=1 — the runtime symbol comes from LAPACKE.
-        sed -i 's|/\* #undef LAPACK \*/|#define LAPACK 1|' config.h
-        grep '^#define LAPACK ' config.h
     fi
 fi
 
