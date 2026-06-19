@@ -27,6 +27,7 @@ module is just the generalization to higher polynomial moments.
 import numpy as np
 
 from ._bspline_static_moments import J_static_moment
+from ._quadrature import leggauss
 
 try:
     from . import _accelerators as _acc
@@ -118,7 +119,7 @@ def _seg_seg_reg_moments(seg_endpoints, a, k, max_d, n_qp):
 
     Returns J_reg of shape (max_d+1, max_d+1, N, N) complex.
     """
-    gl_xi, gl_w = np.polynomial.legendre.leggauss(n_qp)
+    gl_xi, gl_w = leggauss(n_qp)
     t01 = 0.5 * (gl_xi + 1.0)
     w01 = 0.5 * gl_w
 
@@ -162,7 +163,7 @@ def _seg_seg_full_moments_offedge(
     GL_reg afterwards, so the accuracy of this call only needs to be good
     on far / nearly-far pairs.
     """
-    gl_xi, gl_w = np.polynomial.legendre.leggauss(n_qp)
+    gl_xi, gl_w = leggauss(n_qp)
     t01 = 0.5 * (gl_xi + 1.0)
     w01 = 0.5 * gl_w
 

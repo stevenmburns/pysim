@@ -32,6 +32,8 @@ Antiderivatives:
 
 import numpy as np
 
+from ._quadrature import leggauss
+
 try:
     from . import _accelerators as _acc
 
@@ -152,7 +154,7 @@ def _seg_seg_reg_all_batch(seg_endpoints, a, k_array, n_qp):
 
     Returns (J00, J10, J01, J11), each of shape (n_k, N, N), complex.
     """
-    gl_xi, gl_w = np.polynomial.legendre.leggauss(n_qp)
+    gl_xi, gl_w = leggauss(n_qp)
     if _HAVE_REG_ACCEL:
         gl_t_01 = 0.5 * (gl_xi + 1.0)
         gl_w_01 = 0.5 * gl_w
@@ -227,7 +229,7 @@ def _seg_seg_offedge_quad_batch(seg_l_i, seg_r_i, seg_l_j, seg_r_j, a, k_array, 
 
     Returns (J00, J10, J01, J11), each of shape (n_k, N_i, N_j).
     """
-    gl_xi, gl_w = np.polynomial.legendre.leggauss(n_qp)
+    gl_xi, gl_w = leggauss(n_qp)
     t_qp = 0.5 * (gl_xi + 1.0)
     w_qp = 0.5 * gl_w
     if _HAVE_OFF_ACCEL:

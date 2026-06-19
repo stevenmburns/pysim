@@ -46,6 +46,7 @@ from ._bspline_kernels import (
     _seg_seg_reg_moments,
     _seg_seg_static_moments,
 )
+from ._quadrature import leggauss
 
 try:
     from . import _accelerators as _acc
@@ -913,7 +914,7 @@ class BSplinePySim:
                 "feed_smoothing_factor too large for wire — bump doesn't fit"
             )
 
-        gl_xi, gl_w = np.polynomial.legendre.leggauss(self.n_qp_source)
+        gl_xi, gl_w = leggauss(self.n_qp_source)
         t = 0.5 * (s_hi + s_lo) + 0.5 * (s_hi - s_lo) * gl_xi
         weights = 0.5 * (s_hi - s_lo) * gl_w
 
@@ -1274,7 +1275,7 @@ class BSplinePySim:
         tangents = geom["tangents"]
         td_all = np.ascontiguousarray(tangents @ tangents.T, dtype=np.float64)
 
-        gl_xi, gl_w = np.polynomial.legendre.leggauss(self.n_qp_sing)
+        gl_xi, gl_w = leggauss(self.n_qp_sing)
         t01 = 0.5 * (gl_xi + 1.0)
         w01 = 0.5 * gl_w
 
