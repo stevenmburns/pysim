@@ -84,6 +84,51 @@ def test_zblock_matches_dense_random_subblocks(builder, degree):
     assert worst < 1e-12, f"worst sub-block rel err {worst:.2e}"
 
 
+def _long_wire(degree, nsegs):
+    half = 2.0 * 0.962 * 22 / 4
+    wire = np.array([[0.0, 0.0, -half], [0.0, 0.0, half]])
+    return HMatrixPySim(
+        wires=[wire],
+        degree=degree,
+        n_per_edge_per_wire=[[nsegs]],
+        nsegs=nsegs,
+        wavelength=22.0,
+    )
+
+
+@pytest.mark.parametrize("eta", [1.0, 2.0])
+@pytest.mark.parametrize("leaf_size", [16, 32])
+def test_block_partition_is_exact_cover(eta, leaf_size):
+    """The far + near leaf blocks must tile the n x n index product with no
+    gaps and no overlaps."""
+    sim = _long_wire(1, 200)
+    part = sim.build_partition(eta=eta, leaf_size=leaf_size)
+    n = sim._context()["n_basis"]
+    cover = np.zeros((n, n), dtype=np.int32)
+    for s, t in part["far"] + part["near"]:
+        cover[np.ix_(s.indices, t.indices)] += 1
+    assert cover.min() == 1 and cover.max() == 1
+    st = part["stats"]
+    assert st["covered"] == st["total"] == n * n
+
+
+def test_block_partition_compresses_far_field():
+    """A multi-wavelength wire should put most of the matrix area into
+    admissible (far) blocks."""
+    sim = _long_wire(1, 300)
+    part = sim.build_partition(eta=1.0, leaf_size=32)
+    assert part["stats"]["far_frac"] > 0.6
+
+
+def test_far_blocks_have_no_same_edge_pairs():
+    """Admissibility must spatially separate clusters, so no far block may
+    contain a self-pair (a basis paired with itself)."""
+    sim = _long_wire(1, 300)
+    part = sim.build_partition(eta=1.0, leaf_size=32)
+    for s, t in part["far"]:
+        assert np.intersect1d(s.indices, t.indices).size == 0
+
+
 def test_zblock_off_edge_skips_same_edge_path():
     """A block between two well-separated single basis functions must contain
     no same-edge pairs, so it is computed purely off-edge — and still matches

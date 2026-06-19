@@ -43,6 +43,11 @@ from ._bspline_kernels import (
     _seg_seg_reg_moments,
     _seg_seg_static_moments,
 )
+from ._aca import (
+    build_block_tree,
+    build_cluster_tree,
+    partition_stats,
+)
 
 
 class HMatrixPySim(BSplinePySim):
@@ -108,17 +113,19 @@ class HMatrixPySim(BSplinePySim):
                 edge_arc.append(np.asarray(ed_arc[i_e], dtype=float))
                 eid += 1
 
-        # Basis geometric extent: centroid + radius of the union of the
-        # segment endpoints in the basis support. Used by the cluster tree.
-        seg_mid = 0.5 * (seg_l + seg_r)
+        # Basis geometric extent: axis-aligned bounding box (and centroid)
+        # of the union of the segment endpoints in the basis support. The
+        # cluster tree partitions on the boxes so admissibility reflects the
+        # true spatial extent of each basis function's current support.
+        basis_lo = np.empty((n_basis, 3), dtype=float)
+        basis_hi = np.empty((n_basis, 3), dtype=float)
         basis_centroid = np.empty((n_basis, 3), dtype=float)
-        basis_radius = np.empty(n_basis, dtype=float)
         for m in range(n_basis):
             segs = np.unique(supp_seg[m])
             pts = np.vstack([seg_l[segs], seg_r[segs]])
-            c = pts.mean(axis=0)
-            basis_centroid[m] = c
-            basis_radius[m] = np.sqrt(((pts - c) ** 2).sum(axis=1).max())
+            basis_lo[m] = pts.min(axis=0)
+            basis_hi[m] = pts.max(axis=0)
+            basis_centroid[m] = pts.mean(axis=0)
 
         ctx = {
             "geom": geom,
@@ -136,7 +143,8 @@ class HMatrixPySim(BSplinePySim):
             "seg_edge_loc": seg_edge_loc,
             "edge_arc": edge_arc,
             "basis_centroid": basis_centroid,
-            "basis_radius": basis_radius,
+            "basis_lo": basis_lo,
+            "basis_hi": basis_hi,
         }
         self._hm_context = ctx
         return ctx
@@ -293,8 +301,54 @@ class HMatrixPySim(BSplinePySim):
             Jsub, supp_I_local, polys[I], supp_J_local, polys[J], td_sub
         )
 
-    def __init__(self, *args, **kwargs):
+    # ------------------------------------------------------------------
+    # Cluster / block tree (Phase 1)
+    # ------------------------------------------------------------------
+
+    def build_partition(self, eta=None, leaf_size=None):
+        """Build (and memoise) the block-cluster partition of the n_basis x
+        n_basis impedance matrix into far (admissible, compressible) and near
+        (dense) leaf blocks.
+
+        Returns a dict with the cluster-tree `root`, the `far`/`near` block
+        lists (each a list of (Cluster, Cluster) pairs), and `stats`.
+        """
+        if eta is None:
+            eta = self.aca_eta
+        if leaf_size is None:
+            leaf_size = self.aca_leaf_size
+
+        cached = getattr(self, "_hm_partition", None)
+        if (
+            cached is not None
+            and cached["eta"] == eta
+            and (cached["leaf_size"] == leaf_size)
+        ):
+            return cached
+
+        ctx = self._context()
+        n = ctx["n_basis"]
+        root = build_cluster_tree(
+            np.arange(n), ctx["basis_lo"], ctx["basis_hi"], leaf_size=leaf_size
+        )
+        far, near = build_block_tree(root, root, eta)
+        stats = partition_stats(n, far, near)
+        part = {
+            "root": root,
+            "far": far,
+            "near": near,
+            "stats": stats,
+            "eta": eta,
+            "leaf_size": leaf_size,
+        }
+        self._hm_partition = part
+        return part
+
+    def __init__(self, *args, aca_eta=1.0, aca_leaf_size=32, **kwargs):
         super().__init__(*args, **kwargs)
+        self.aca_eta = float(aca_eta)
+        self.aca_leaf_size = int(aca_leaf_size)
         self._hm_context = None
         self._hm_se_cache = {}
         self._hm_se_cache_k = None
+        self._hm_partition = None
