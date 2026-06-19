@@ -108,16 +108,17 @@ def _seg_seg_static_moments(seg_endpoints, a, max_d):
     return out
 
 
-def _seg_seg_reg_moments(seg_endpoints, a, k, max_d, n_qp):
-    """Smooth-kernel piece (exp(-jkR) - 1)/(4π R) over polynomial moments
-    on every same-edge segment pair, via Gauss-Legendre quadrature.
+def _seg_seg_reg_geometry(seg_endpoints, a, max_d, n_qp):
+    """k-independent precompute for `_seg_seg_reg_moments`.
 
-    seg_endpoints: (N+1,) array of arc lengths along a single straight edge.
-    a, k: regularization radius and wavenumber.
-    max_d: maximum moment degree (inclusive).
-    n_qp: Gauss-Legendre nodes per segment per axis.
+    Everything in the smooth-kernel moment integral except the `exp(-jkR)`
+    phase: the pair-distance table R and the weight-folded local-coordinate
+    powers. Hoisting this out of a swept-k loop turns the per-k same-edge
+    work into a single `exp(-jkR)` + einsum (see
+    `_seg_seg_reg_moments_from_geometry`). Bounded memory — one edge's
+    (N·n_qp, N·n_qp) R table at a time, same as the per-k path.
 
-    Returns J_reg of shape (max_d+1, max_d+1, N, N) complex.
+    Returns a dict consumed by `_seg_seg_reg_moments_from_geometry`.
     """
     gl_xi, gl_w = leggauss(n_qp)
     t01 = 0.5 * (gl_xi + 1.0)
@@ -134,18 +135,41 @@ def _seg_seg_reg_moments(seg_endpoints, a, k, max_d, n_qp):
     s_flat = s_q.ravel()
     diff = s_flat[:, None] - s_flat[None, :]
     R = np.sqrt(diff * diff + a * a)
-    # (exp(-jkR) - 1) / (4π R). At R = a small, this is bounded → -jk/(4π) in
-    # the a → 0, kR → 0 limit; no quadrature pathology.
-    G_reg = (np.exp(-1j * k * R) - 1.0) / (4 * np.pi * R)
 
     # u^p evaluated at every quadrature node, weight-folded
     u_pow = np.stack([u_q**p for p in range(max_d + 1)], axis=0)  # (max_d+1, N, n_qp)
     wu_pow = w_q[None, :, :] * u_pow
 
+    return {"R": R, "wu_pow": wu_pow, "N": N, "n_qp": n_qp}
+
+
+def _seg_seg_reg_moments_from_geometry(geo, k):
+    """Per-k smooth-kernel moment block from a `_seg_seg_reg_geometry` dict."""
+    R = geo["R"]
+    wu_pow = geo["wu_pow"]
+    N = geo["N"]
+    n_qp = geo["n_qp"]
+    # (exp(-jkR) - 1) / (4π R). At R = a small, this is bounded → -jk/(4π) in
+    # the a → 0, kR → 0 limit; no quadrature pathology.
+    G_reg = (np.exp(-1j * k * R) - 1.0) / (4 * np.pi * R)
     G_block = G_reg.reshape(N, n_qp, N, n_qp)
     # J_reg[p, P, i, j] = sum_{q, r} wu_pow[p, i, q] G[i, q, j, r] wu_pow[P, j, r]
-    J_reg = np.einsum("piq,iqjr,Pjr->pPij", wu_pow, G_block, wu_pow)
-    return J_reg
+    return np.einsum("piq,iqjr,Pjr->pPij", wu_pow, G_block, wu_pow)
+
+
+def _seg_seg_reg_moments(seg_endpoints, a, k, max_d, n_qp):
+    """Smooth-kernel piece (exp(-jkR) - 1)/(4π R) over polynomial moments
+    on every same-edge segment pair, via Gauss-Legendre quadrature.
+
+    seg_endpoints: (N+1,) array of arc lengths along a single straight edge.
+    a, k: regularization radius and wavenumber.
+    max_d: maximum moment degree (inclusive).
+    n_qp: Gauss-Legendre nodes per segment per axis.
+
+    Returns J_reg of shape (max_d+1, max_d+1, N, N) complex.
+    """
+    geo = _seg_seg_reg_geometry(seg_endpoints, a, max_d, n_qp)
+    return _seg_seg_reg_moments_from_geometry(geo, k)
 
 
 def _seg_seg_full_moments_offedge(

@@ -43,7 +43,9 @@ from scipy.interpolate import BSpline
 
 from ._bspline_kernels import (
     _seg_seg_full_moments_offedge,
+    _seg_seg_reg_geometry,
     _seg_seg_reg_moments,
+    _seg_seg_reg_moments_from_geometry,
     _seg_seg_static_moments,
 )
 from ._quadrature import leggauss
@@ -731,7 +733,34 @@ class BSplinePySim:
             seg_l, seg_r, seg_l_img, seg_r_img, a, k, d, self.n_qp_pair
         )
 
-    def _build_J_blocks(self, geom, k):
+    def _same_edge_prep(self, geom):
+        """k-independent per-same-edge precompute hoisted out of the swept-k
+        loop: each edge's analytic static-moment block plus the reg-kernel
+        quadrature geometry (R table + weighted powers). Returns a list of
+        `(global_slice, A_static, reg_geometry)`. Bounded memory — one edge's
+        tables at a time, identical footprint to the per-k path; only the
+        cheap `exp(-jkR)` + einsum is left per k.
+        """
+        d = self.degree
+        a = self.wire_radius
+        per_wire = geom["per_wire"]
+        seg_off = geom["seg_offsets"]
+        prep = []
+        for w in range(len(per_wire)):
+            pw = per_wire[w]
+            ed_off = pw["edge_offsets"]
+            ed_arc = pw["edge_arc_edges"]
+            base = seg_off[w]
+            for i_e in range(len(ed_off) - 1):
+                sl = slice(base + ed_off[i_e], base + ed_off[i_e + 1])
+                A_st = _seg_seg_static_moments(ed_arc[i_e], a, max_d=d)
+                reg_geo = _seg_seg_reg_geometry(
+                    ed_arc[i_e], a, max_d=d, n_qp=self.n_qp_pair
+                )
+                prep.append((sl, A_st, reg_geo))
+        return prep
+
+    def _build_J_blocks(self, geom, k, same_edge_prep=None):
         """All polynomial moment integrals J_pq[i, j] for p, q ∈ {0..d} and
         every (i, j) global segment pair. Returns shape (d+1, d+1, N, N).
 
@@ -740,6 +769,10 @@ class BSplinePySim:
         G = exp(-jkR)/(4πR), R² = |Δr|² + a²; then overwrite same-edge
         blocks with the analytic static + GL-regularized split (essential
         for the log-singular diagonal).
+
+        `same_edge_prep` (from `_same_edge_prep`) lets a swept-k caller share
+        the k-independent static + reg-geometry across frequencies; when None
+        the same quantities are computed inline (single-k path).
         """
         d = self.degree
         a = self.wire_radius
@@ -754,19 +787,24 @@ class BSplinePySim:
         )  # (d+1, d+1, N, N) complex
 
         # Overwrite each same-edge block with analytic static + reg
-        per_wire = geom["per_wire"]
-        seg_off = geom["seg_offsets"]
-        for w in range(len(per_wire)):
-            pw = per_wire[w]
-            ed_off = pw["edge_offsets"]
-            ed_arc = pw["edge_arc_edges"]
-            base = seg_off[w]
-            for i_e in range(len(ed_off) - 1):
-                sl = slice(base + ed_off[i_e], base + ed_off[i_e + 1])
-                A_st = _seg_seg_static_moments(ed_arc[i_e], a, max_d=d)
-                A_reg = _seg_seg_reg_moments(
-                    ed_arc[i_e], a, k, max_d=d, n_qp=self.n_qp_pair
-                )
+        if same_edge_prep is None:
+            per_wire = geom["per_wire"]
+            seg_off = geom["seg_offsets"]
+            for w in range(len(per_wire)):
+                pw = per_wire[w]
+                ed_off = pw["edge_offsets"]
+                ed_arc = pw["edge_arc_edges"]
+                base = seg_off[w]
+                for i_e in range(len(ed_off) - 1):
+                    sl = slice(base + ed_off[i_e], base + ed_off[i_e + 1])
+                    A_st = _seg_seg_static_moments(ed_arc[i_e], a, max_d=d)
+                    A_reg = _seg_seg_reg_moments(
+                        ed_arc[i_e], a, k, max_d=d, n_qp=self.n_qp_pair
+                    )
+                    J[:, :, sl, sl] = A_st + A_reg
+        else:
+            for sl, A_st, reg_geo in same_edge_prep:
+                A_reg = _seg_seg_reg_moments_from_geometry(reg_geo, k)
                 J[:, :, sl, sl] = A_st + A_reg
 
         return J
@@ -1323,14 +1361,14 @@ class BSplinePySim:
     # Driver impedance
     # ------------------------------------------------------------------
 
-    def compute_impedance(self):
+    def compute_impedance(self, same_edge_prep=None):
         geom = self._build_geometry()
         supp_seg, polys, kcl_A, wire_knots, wire_basis_global = (
             self._build_basis_polynomials(geom)
         )
         n_basis_total = supp_seg.shape[0]
 
-        J = self._build_J_blocks(geom, self.k)
+        J = self._build_J_blocks(geom, self.k, same_edge_prep=same_edge_prep)
         Z = self._assemble_Z(J, supp_seg, polys, geom)
 
         if self.ground_z is not None:
@@ -1532,12 +1570,15 @@ class BSplinePySim:
                 s_f=s_f_j,
             )
 
+        # k-independent static + reg-geometry, shared across the sweep.
+        same_edge_prep = self._same_edge_prep(geom)
+
         out = np.zeros((k_array.shape[0], n_ports, n_ports), dtype=np.complex128)
         for ki, kk in enumerate(k_array):
             self.k = float(kk)
             self.omega = self.k * self.c
             self.wavelength = self.c / (self.omega / (2 * np.pi))
-            J = self._build_J_blocks(geom, self.k)
+            J = self._build_J_blocks(geom, self.k, same_edge_prep=same_edge_prep)
             Z = self._assemble_Z(J, supp_seg, polys, geom)
             if self.ground_z is not None:
                 J_img = self._build_J_image_blocks(geom, self.k)
@@ -1564,11 +1605,13 @@ class BSplinePySim:
         k_save = self.k
         wl_save = self.wavelength
         omega_save = self.omega
+        # k-independent static + reg-geometry, shared across the sweep.
+        same_edge_prep = self._same_edge_prep(self._build_geometry())
         for i, kk in enumerate(k_array):
             self.k = float(kk)
             self.omega = self.k * self.c
             self.wavelength = self.c / (self.omega / (2 * np.pi))
-            z, _ = self.compute_impedance()
+            z, _ = self.compute_impedance(same_edge_prep=same_edge_prep)
             z_out[i] = z
         self.k = k_save
         self.wavelength = wl_save
