@@ -253,3 +253,46 @@ def test_solve_converges_in_few_iterations():
     iters = arr._last_solve_iters
     assert max(iters) < 25
     assert max(iters) - min(iters) <= 2  # ~flat across RHS
+
+
+# ---- P3: identical-element + block-Toeplitz coupling reuse -------------------
+
+
+def test_toeplitz_coupling_reuse_uniform_grid():
+    """A uniform line array of identical elements has only as many distinct
+    coupling blocks as there are distinct displacements: for 4 equally spaced
+    elements the displacements are {1,2,3}·spacing, so ACA runs 3 times (not
+    12), the rest reused by displacement + complex-symmetry transpose."""
+    half = 0.962 * 22 / 4
+    offsets = [(-9.0, 0.0), (-3.0, 0.0), (3.0, 0.0), (9.0, 0.0)]
+    sim = _array_sim(offsets, [half] * 4, nsegs=16)
+    sim.build_array_blocks()
+    assert sim._last_n_coupling_aca == 3
+
+
+def test_coupling_reuse_preserves_answer():
+    """Reused coupling blocks must give the same dense reconstruction as a
+    fresh per-pair computation would (displacement equivalence is exact)."""
+    half = 0.962 * 22 / 4
+    offsets = [(-9.0, 0.0), (-3.0, 0.0), (3.0, 0.0), (9.0, 0.0)]
+    sim = _array_sim(offsets, [half] * 4, nsegs=16)
+    Z = _dense_Z(sim)
+    AB = sim.build_array_blocks(tol=1e-7)
+    # fewer ACA solves than ordered pairs, yet still reconstructs Z
+    assert sim._last_n_coupling_aca < 4 * 3
+    assert np.abs(AB.to_dense() - Z).max() / np.abs(Z).max() < 1e-3
+
+
+def test_one_self_block_per_shape_reused_across_elements():
+    """Two shape classes in a 4-element line ⇒ exactly two stored self-blocks,
+    each shared by its same-shape elements."""
+    long_h = 0.962 * 22 / 4
+    short_h = 0.7 * long_h
+    offsets = [(-9.0, 0.0), (-3.0, 0.0), (3.0, 0.0), (9.0, 0.0)]
+    sim = _array_sim(offsets, [long_h, short_h, long_h, short_h], nsegs=14)
+    AB = sim.build_array_blocks()
+    assert len(AB.shape_blocks) == 2
+    # element 0 and 2 (same shape) reference the same stored block object
+    s0 = AB.shape_blocks[int(AB.shape_of_elem[0])]
+    s2 = AB.shape_blocks[int(AB.shape_of_elem[2])]
+    assert s0 is s2
