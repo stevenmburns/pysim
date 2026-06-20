@@ -10,7 +10,12 @@ import pytest
 
 from pysim.bspline import BSplinePySim
 from pysim.hmatrix import HMatrixPySim
-from pysim.array_block import ArrayBlockPySim, element_groups
+from pysim.array_block import (
+    ArrayBlockPySim,
+    cache_stats,
+    element_groups,
+    reset_array_caches,
+)
 
 
 def _dense_Z(sim):
@@ -37,6 +42,20 @@ def _array_sim(offsets, halves, nsegs=12, degree=2):
         nsegs=nsegs,
         wavelength=22.0,
         feeds=[(i, None, 1.0 + 0.0j) for i in range(len(wires))],
+    )
+
+
+def _array_solver(offsets, halves, voltages, solver, nsegs=14, degree=2):
+    """Build `solver` (ArrayBlockPySim or BSplinePySim) for a dipole array with
+    explicit per-feed voltages (so a 'phase sweep' is just changing voltages on
+    a fixed geometry)."""
+    wires = [_dipole_wire(h, y=y, z=z) for (y, z), h in zip(offsets, halves)]
+    return solver(
+        wires=wires,
+        degree=degree,
+        n_per_edge_per_wire=[[nsegs]] * len(wires),
+        wavelength=22.0,
+        feeds=[(i, None, v) for i, v in enumerate(voltages)],
     )
 
 
@@ -296,3 +315,75 @@ def test_one_self_block_per_shape_reused_across_elements():
     s0 = AB.shape_blocks[int(AB.shape_of_elem[0])]
     s2 = AB.shape_blocks[int(AB.shape_of_elem[2])]
     assert s0 is s2
+
+
+# ---- P4: animation factor-cache --------------------------------------------
+
+
+def test_phase_sweep_reuses_operator_and_factorization():
+    """A phase/excitation sweep holds geometry fixed and only changes the feed
+    voltages, so the assembled operator and its factorization are reused across
+    frames (only the RHS back-substitution re-runs)."""
+    reset_array_caches()
+    half = 0.962 * 22 / 4
+    offsets = [(-6.0, 0.0), (6.0, 0.0)]
+    s0 = float(cache_stats()["operator_build"])
+    z_frames = []
+    for ph_deg in (0.0, 45.0, 90.0):
+        v1 = np.exp(1j * np.deg2rad(ph_deg))
+        sim = _array_solver(offsets, [half, half], [1.0 + 0j, v1], ArrayBlockPySim)
+        z_frames.append(np.atleast_1d(sim.compute_impedance()[0]))
+    st = cache_stats()
+    assert st["operator_build"] - s0 == 1  # built once
+    assert st["operator_hit"] >= 2  # reused on the later frames
+    # the factorization is cached on the operator (reused, not refactored)
+    op = ArrayBlockPySim(
+        wires=[_dipole_wire(half, *o) for o in [(-6, 0), (6, 0)]],
+        degree=2,
+        n_per_edge_per_wire=[[14], [14]],
+        wavelength=22.0,
+        feeds=[(0, None, 1.0 + 0j), (1, None, 1.0 + 0j)],
+    )._build_operator()
+    assert hasattr(op, "_factored")
+
+
+def test_phase_sweep_cached_result_matches_dense():
+    """Reuse must not change the answer: each cached phase frame matches a
+    from-scratch dense bspline solve at the same excitation."""
+    reset_array_caches()
+    half = 0.962 * 22 / 4
+    offsets = [(-6.0, 0.0), (6.0, 0.0)]
+    for ph_deg in (0.0, 60.0, 120.0):
+        v = [1.0 + 0j, np.exp(1j * np.deg2rad(ph_deg))]
+        za = _array_solver(offsets, [half, half], v, ArrayBlockPySim).compute_impedance()[0]
+        zd = _array_solver(offsets, [half, half], v, BSplinePySim).compute_impedance()[0]
+        za, zd = np.atleast_1d(za), np.atleast_1d(zd)
+        assert np.max(np.abs(za - zd) / np.abs(zd)) < 1e-3
+
+
+def test_spacing_sweep_reuses_self_blocks():
+    """A spacing sweep moves identical elements, so the dense self-block
+    assembly is reused across frames (the operator rebuilds for the new
+    coupling, but the self-blocks are cache hits) and stays correct vs dense."""
+    reset_array_caches()
+    half = 0.962 * 22 / 4
+    for spacing in (6.0, 8.0, 10.0):
+        offs = [(-spacing, 0.0), (spacing, 0.0)]
+        v = [1.0 + 0j, 1.0 + 0j]
+        ya = _array_solver(offs, [half, half], v, ArrayBlockPySim).compute_y_matrix()
+        yd = _array_solver(offs, [half, half], v, BSplinePySim).compute_y_matrix()
+        assert np.abs(ya - yd).max() / np.abs(yd).max() < 1e-3
+    st = cache_stats()
+    # one shape, built once, then reused on the two later spacings
+    assert st["self_block_build"] == 1
+    assert st["self_block_hit"] >= 2
+    assert st["operator_build"] == 3  # new geometry each frame
+
+
+def test_reset_array_caches_clears_state():
+    reset_array_caches()
+    half = 0.962 * 22 / 4
+    _array_solver([(-6.0, 0.0), (6.0, 0.0)], [half, half], [1, 1], ArrayBlockPySim).compute_y_matrix()
+    assert sum(cache_stats().values()) > 0
+    reset_array_caches()
+    assert all(v == 0 for v in cache_stats().values())

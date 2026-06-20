@@ -1,7 +1,9 @@
 # Plan: element-aware block-low-rank solver for antenna arrays
 
-Status: **P0 complete** (grouping + assumptions verified); P1+ in progress.
-This document captures the design and the validated measurements behind it.
+Status: **P0–P4 complete** (grouping, block decomposition, block-Jacobi GMRES
+solve, Toeplitz reuse, engine integration + scaling study, and the animation
+factor-cache all done and validated). P5 (CBFM) optional/not started. This
+document captures the design and the validated measurements behind it.
 
 ## P0 results (measured 2026-06-20, exact connectivity grouping)
 
@@ -189,12 +191,11 @@ composes with coarsening (coarse mesh *and* block structure).
   `bowtiearray2x4`, 12→5 on `invveearray`, 12→3 on a uniform 4-element line.
   (`self._last_n_coupling_aca` records the count.) The explicit per-shape LU
   factor cached *across solves* — the animation lever — lands with P4.
-- **P4 — Engine integration + scaling study. ✅ DONE** (animation-path factor
-  caching still open — see below). `_parity_for_solver` recognises
-  `ArrayBlockPySim` (degree-driven parity — critical: a mismatched parity
-  silently builds a different mesh and invalidates the dense A/B); registered
-  as the `arrayblock` pysim basis in the CLI (alongside a new `hmatrix`).
-  Scaling study `scripts/array_block_scaling.py`:
+- **P4 — Engine integration + scaling study. ✅ DONE.** `_parity_for_solver`
+  recognises `ArrayBlockPySim` (degree-driven parity — critical: a mismatched
+  parity silently builds a different mesh and invalidates the dense A/B);
+  registered as the `arrayblock` pysim basis in the CLI (alongside a new
+  `hmatrix`). Scaling study `scripts/array_block_scaling.py`:
 
   | design | N | dense | H-matrix | **ArrayBlock** |
   |---|---|---|---|---|
@@ -206,12 +207,22 @@ composes with coarsening (coarse mesh *and* block structure).
   storage vs the H-matrix's 30–40%, ~1e-5 Y accuracy, 9 GMRES iters flat in N,
   and 13 unique coupling ACA solves (flat in N via Toeplitz reuse).
 
-  **Still open (animation lever):** caching the assembled `ArrayBlock` + the
-  per-shape self-block LU *across solves* so a phase/excitation sweep re-solves
-  with cached back-subs (geometry fixed ⇒ Z fixed ⇒ only the RHS changes) and a
-  spacing sweep recomputes only the cheap coupling blocks. The multi-RHS Y
-  solve already factors once per call; what remains is persisting that across
-  engine ticks/frames.
+- **P4b — Animation factor-cache. ✅ DONE.** Two module-level caches
+  (`pysim.array_block`) let an animation sweep reuse work across frames:
+    - *Phase/excitation sweep* — operator cache (keyed by geometry + k + tol)
+      reuses the assembled `ArrayBlock` and the factorisation cached on it
+      (`HMatrixPySim._factored_solve`), so frames after the first are pure
+      multi-RHS back-subs: **~4–5× faster** (0.08 s vs 0.38 s on
+      `bowtiearray2x4`).
+    - *Spacing sweep* — self-block cache (keyed by an element's
+      translation-invariant geometry signature) reuses the dense self-block
+      assembly while only the cheap coupling recomputes: 2 builds then all
+      hits across frames.
+  Both verified correct vs dense `BSplinePySim` per frame; demo in
+  `scripts/array_block_animation.py`, tests in `tests/test_array_block.py`.
+  (Engine-tick persistence across `PysimEngine` instances is automatic — the
+  caches are module-scope, keyed by geometry, so a rebuilt solver on identical
+  geometry hits them with no engine changes.)
 - **P5 (optional) — CBFM / macro-basis.** Reduce each element to K
   characteristic modes → tiny `(P·K)²` reduced system; the right tool for
   large arrays (hundreds of elements).

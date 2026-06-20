@@ -32,13 +32,25 @@ measurements behind it. This file is being built up phase by phase:
     in a handful of iterations (5 on `invveearray`, 9 on `bowtiearray2x4`);
     impedance/Y match dense `BSplinePySim` to ~1e-5.
 
-  * P3 (this commit): identical-element + block-Toeplitz reuse. Self-blocks
-    are already one-per-shape. Coupling blocks are now deduplicated by
-    `(shape_a, shape_b, displacement)`: free-space translation invariance makes
-    all pairs with that key the same block, so ACA runs once per unique key
-    (+complex-symmetry transpose), collapsing the `P(P-1)` pairs to a handful
-    of displacements on a regular grid — 56→13 on `bowtiearray2x4`, 12→5 on
-    `invveearray`, 12→3 on a uniform 4-element line.
+  * P3: identical-element + block-Toeplitz reuse. Self-blocks are one-per-shape.
+    Coupling blocks are deduplicated by `(shape_a, shape_b, displacement)`:
+    free-space translation invariance makes all pairs with that key the same
+    block, so ACA runs once per unique key (+complex-symmetry transpose),
+    collapsing the `P(P-1)` pairs to a handful of displacements on a regular
+    grid — 56→13 on `bowtiearray2x4`, 12→5 on `invveearray`, 12→3 on a uniform
+    4-element line.
+
+  * P4 (this commit): the animation factor-cache. Two module-level caches let
+    an animation sweep reuse the expensive work across frames:
+      - operator cache (keyed by full geometry + k + tol): a *phase/excitation*
+        sweep holds geometry fixed, so Z and its factored preconditioner are
+        reused wholesale — each frame is just new-RHS back-substitutions.
+      - self-block cache (keyed by an element's translation-invariant geometry
+        signature + k + radius): a *spacing* sweep keeps identical elements, so
+        the dense self-block assembly is reused across frames and only the
+        cheap coupling blocks recompute.
+    The factorisation itself is cached on the operator (see
+    `HMatrixPySim._factored_solve`), so a reused operator never refactors.
 
 `ArrayBlockPySim` subclasses `HMatrixPySim`, reusing its `_context`, `zblock`,
 the C++ off-edge block assembler, and `aca_partial` verbatim; the grouping
@@ -53,6 +65,51 @@ from .hmatrix import (
     _OFFEDGE_BLOCK_ACCEL_MAX_D,
     HMatrixPySim,
 )
+
+
+# ----------------------------------------------------------------------
+# Animation factor-cache (P4): module-level reuse across solves/frames
+# ----------------------------------------------------------------------
+
+# Whole-operator cache (keyed by geometry + k + tol): a phase/excitation sweep
+# holds geometry fixed, so the assembled ArrayBlock and its factored
+# preconditioner are reused wholesale and each frame only re-solves the RHS.
+_ARRAY_OP_CACHE: dict = {}
+_ARRAY_OP_CACHE_MAX = 8
+
+# Self-block cache (keyed by an element's translation-invariant geometry
+# signature + k + radius + basis): a spacing sweep keeps identical elements, so
+# the dense self-block assembly is reused while only coupling recomputes.
+_SELF_BLOCK_CACHE: dict = {}
+_SELF_BLOCK_CACHE_MAX = 64
+
+# Instrumentation so tests (and the demo script) can prove reuse happened.
+_CACHE_STATS = {
+    "operator_build": 0,
+    "operator_hit": 0,
+    "self_block_build": 0,
+    "self_block_hit": 0,
+}
+
+
+def reset_array_caches():
+    """Clear the animation caches and zero the hit/build counters."""
+    _ARRAY_OP_CACHE.clear()
+    _SELF_BLOCK_CACHE.clear()
+    for key in _CACHE_STATS:
+        _CACHE_STATS[key] = 0
+
+
+def cache_stats():
+    """A copy of the cache hit/build counters."""
+    return dict(_CACHE_STATS)
+
+
+def _cache_put(cache, key, value, max_size):
+    """Insert with a crude FIFO bound so long sweeps don't grow unbounded."""
+    if len(cache) >= max_size:
+        cache.pop(next(iter(cache)))
+    cache[key] = value
 
 
 # ----------------------------------------------------------------------
@@ -359,12 +416,51 @@ class ArrayBlockPySim(HMatrixPySim):
             self._array_partition = cached
         return cached
 
+    def _self_block_key(self, ctx, segs, k):
+        """Content-addressed key for an element's dense self-block: the
+        element's segment endpoints recentred on its own centroid (so it is
+        translation-invariant — identical elements at different array positions
+        share a key), rounded and canonically ordered, plus the parameters the
+        self-impedance depends on (k, wire radius, degree, quadrature)."""
+        seg_l, seg_r = ctx["seg_l"][segs], ctx["seg_r"][segs]
+        cen = 0.5 * (seg_l + seg_r).mean(axis=0)
+        rel = np.hstack([seg_l - cen, seg_r - cen])
+        keyarr = np.round(rel / 1e-6).astype(np.int64)
+        mid = 0.5 * (keyarr[:, :3] + keyarr[:, 3:])
+        order = np.lexsort((mid[:, 2], mid[:, 1], mid[:, 0]))
+        sig = keyarr[order].tobytes()
+        return (sig, float(k), float(self.wire_radius), self.degree, self.n_qp_pair)
+
     def _build_operator(self):
-        """Build the array-block operator; `compute_impedance` /
-        `compute_y_matrix` (inherited from `HMatrixPySim`) run the same
-        constrained GMRES on it via `_solve_hmatrix`, with the block-diagonal
-        self-blocks as the block-Jacobi preconditioner."""
-        return self.build_array_blocks()
+        """Build the array-block operator (cached) for the constrained solve.
+
+        `compute_impedance` / `compute_y_matrix` (inherited from
+        `HMatrixPySim`) run the same GMRES on it via `_solve_hmatrix`, with the
+        block-diagonal self-blocks as the block-Jacobi preconditioner.
+
+        The assembled operator is cached at module scope keyed by the full
+        geometry + k + tol, so an animation *phase/excitation* sweep — geometry
+        fixed, only the RHS changes — reuses both the operator and the
+        factorisation cached on it (`HMatrixPySim._factored_solve`), making each
+        frame a cheap multi-RHS back-substitution."""
+        key = (
+            self._geometry_cache_key(),
+            float(self.k),
+            float(self.wire_radius),
+            self.degree,
+            self.n_qp_pair,
+            float(self.aca_tol),
+        )
+        op = _ARRAY_OP_CACHE.get(key)
+        if op is None:
+            op = self.build_array_blocks()
+            op._n_coupling_aca = self._last_n_coupling_aca
+            _cache_put(_ARRAY_OP_CACHE, key, op, _ARRAY_OP_CACHE_MAX)
+            _CACHE_STATS["operator_build"] += 1
+        else:
+            _CACHE_STATS["operator_hit"] += 1
+        self._last_n_coupling_aca = op._n_coupling_aca
+        return op
 
     def _coupling_aca(self, ctx, I, J, k, tol, use_accel):
         """ACA low-rank factors (U, V) of the off-diagonal element block
@@ -411,10 +507,20 @@ class ArrayBlockPySim(HMatrixPySim):
         n = ctx["n_basis"]
 
         # Dense self-block per distinct shape, from a representative element.
+        # Cached by the element's translation-invariant geometry signature so a
+        # spacing sweep (identical elements, new positions) reuses the assembly.
         shape_blocks = {}
         for s, e in enumerate(part.shape_representatives()):
             g = part.groups[e]
-            shape_blocks[s] = self.zblock(g, g, k=k)
+            sb_key = self._self_block_key(ctx, part.seg_groups[e], k)
+            blk = _SELF_BLOCK_CACHE.get(sb_key)
+            if blk is None:
+                blk = self.zblock(g, g, k=k)
+                _cache_put(_SELF_BLOCK_CACHE, sb_key, blk, _SELF_BLOCK_CACHE_MAX)
+                _CACHE_STATS["self_block_build"] += 1
+            else:
+                _CACHE_STATS["self_block_hit"] += 1
+            shape_blocks[s] = blk
 
         use_accel = (
             _HAVE_OFFEDGE_BLOCK_ACCEL

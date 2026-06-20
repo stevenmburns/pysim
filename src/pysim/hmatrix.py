@@ -65,6 +65,75 @@ except ImportError:  # pragma: no cover
 _OFFEDGE_BLOCK_ACCEL_MAX_D = 2
 
 
+class _AugmentedFactoredSolve:
+    """Factored augmented near-field preconditioner `[Zn A^T; A 0]` plus the
+    per-RHS preconditioned GMRES on the operator `H`.
+
+    Holds no reference to the solver instance, so it can be cached on the
+    operator and reused across solves that share the same operator: the `splu`
+    factorisation and the GMRES `LinearOperator`s are RHS-independent, so an
+    animation phase/excitation sweep re-solves with cached back-substitutions
+    (`x0 = lu.solve(rhs)`) plus a handful of Krylov steps, never refactoring.
+    """
+
+    def __init__(self, H, kcl_A, Zn):
+        self.H = H
+        self.kcl_A = kcl_A
+        n = H.n
+        self.n = n
+        nc = kcl_A.shape[0] if kcl_A is not None else 0
+        self.nc = nc
+        self.N = n + nc
+        if nc > 0:
+            A_sp = sp.csr_matrix(kcl_A.astype(np.complex128))
+            Saug = sp.bmat([[Zn, A_sp.T], [A_sp, None]], format="csc")
+        else:
+            Saug = Zn
+        self.lu = splu(Saug)
+
+    def _aug_matvec(self, z):
+        n, nc = self.n, self.nc
+        out = np.empty(self.N, dtype=np.complex128)
+        out[:n] = self.H.matvec(z[:n])
+        if nc > 0:
+            out[:n] += self.kcl_A.T @ z[n:]
+            out[n:] = self.kcl_A @ z[:n]
+        return out
+
+    def solve(self, B, rtol):
+        """Solve for every RHS column of B (n, nrhs). Returns (X, iters)."""
+        n, N = self.n, self.N
+        Aug = LinearOperator((N, N), matvec=self._aug_matvec, dtype=np.complex128)
+        Minv = LinearOperator((N, N), matvec=self.lu.solve, dtype=np.complex128)
+        nrhs = B.shape[1]
+        X = np.zeros((n, nrhs), dtype=np.complex128)
+        iters_all = []
+        for j in range(nrhs):
+            rhs = np.zeros(N, dtype=np.complex128)
+            rhs[:n] = B[:, j]
+            x0 = self.lu.solve(rhs)  # preconditioner solve = excellent guess
+            iters = [0]
+
+            def _count(_xk, iters=iters):
+                iters[0] += 1
+
+            sol, _info = gmres(
+                Aug,
+                rhs,
+                M=Minv,
+                x0=x0,
+                rtol=rtol,
+                atol=0.0,
+                restart=min(N, 200),
+                maxiter=2000,
+                callback=_count,
+                callback_type="pr_norm",
+            )
+            X[:, j] = sol[:n]
+            iters_all.append(iters[0])
+        return X, iters_all
+
+
 class HMatrixPySim(BSplinePySim):
     """Distance-based hierarchical accelerator for the B-spline MoM.
 
@@ -595,6 +664,20 @@ class HMatrixPySim(BSplinePySim):
             shape=(n, n),
         ).tocsc()
 
+    def _factored_solve(self, H, kcl_A):
+        """The augmented preconditioner factorisation for operator `H`, built
+        once and cached on `H` itself. Because the factorisation depends only
+        on `H` (its near blocks) and the KCL rows — not on the RHS or the
+        excitation — caching it on `H` lets a *reused* operator (e.g. an
+        animation phase sweep, where geometry and Z are fixed and only the RHS
+        changes) skip the expensive `splu` entirely. A freshly-built `H` (the
+        generic H-matrix path) just factors once per solve as before."""
+        fac = getattr(H, "_factored", None)
+        if fac is None:
+            fac = _AugmentedFactoredSolve(H, kcl_A, self._near_sparse(H, H.n))
+            H._factored = fac
+        return fac
+
     def _solve_hmatrix(self, H, kcl_A, B):
         """Solve the constrained system  [Z A^T; A 0][x; λ] = [b; 0]  for each
         RHS column of B (n, nrhs), with Z applied via the H-matvec and a
@@ -602,63 +685,8 @@ class HMatrixPySim(BSplinePySim):
 
         With no junctions (kcl_A empty) this is a plain GMRES on Z.
         """
-        n = H.n
-        nc = kcl_A.shape[0] if kcl_A is not None else 0
-        N = n + nc
-        rtol = self.solve_tol
-
-        # Near-field preconditioner, augmented with the KCL rows, factorised
-        # once and reused across all RHS columns.
-        Zn = self._near_sparse(H, n)
-        if nc > 0:
-            A_sp = sp.csr_matrix(kcl_A.astype(np.complex128))
-            Saug = sp.bmat([[Zn, A_sp.T], [A_sp, None]], format="csc")
-        else:
-            Saug = Zn
-        lu = splu(Saug)
-
-        def aug_matvec(z):
-            x = z[:n]
-            out = np.empty(N, dtype=np.complex128)
-            out[:n] = H.matvec(x)
-            if nc > 0:
-                lam = z[n:]
-                out[:n] += kcl_A.T @ lam
-                out[n:] = kcl_A @ x
-            return out
-
-        def prec(z):
-            return lu.solve(z)
-
-        Aug = LinearOperator((N, N), matvec=aug_matvec, dtype=np.complex128)
-        Minv = LinearOperator((N, N), matvec=prec, dtype=np.complex128)
-
-        nrhs = B.shape[1]
-        X = np.zeros((n, nrhs), dtype=np.complex128)
-        self._last_solve_iters = []
-        for j in range(nrhs):
-            rhs = np.zeros(N, dtype=np.complex128)
-            rhs[:n] = B[:, j]
-            x0 = prec(rhs)  # preconditioner solve is an excellent initial guess
-            iters = [0]
-
-            def _count(_xk):
-                iters[0] += 1
-
-            sol, info = gmres(
-                Aug,
-                rhs,
-                M=Minv,
-                x0=x0,
-                rtol=rtol,
-                atol=0.0,
-                restart=min(N, 200),
-                maxiter=2000,
-                callback=_count,
-                callback_type="pr_norm",
-            )
-            X[:, j] = sol[:n]
-            self._last_solve_iters.append(iters[0])
+        fac = self._factored_solve(H, kcl_A)
+        X, self._last_solve_iters = fac.solve(B, self.solve_tol)
         return X
 
     def _hmatrix_unsupported(self):
