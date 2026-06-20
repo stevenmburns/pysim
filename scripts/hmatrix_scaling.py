@@ -27,6 +27,7 @@ from pysim.hmatrix import HMatrixPySim
 WAVELENGTH = 22.0
 LEN_WL = 4.0  # wire length in wavelengths (fixed as N grows)
 ACA_TOL = 1e-5
+ACA_ETA = 2.0
 DEGREE = 1
 
 
@@ -84,6 +85,7 @@ def main():
             n_per_edge_per_wire=[[nsegs]],
             wavelength=WAVELENGTH,
             aca_tol=ACA_TOL,
+            aca_eta=ACA_ETA,
         )
         t0 = time.perf_counter()
         H = hmat.build_hmatrix()

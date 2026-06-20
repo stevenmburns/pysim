@@ -105,6 +105,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from pysim.bspline import BSplinePySim
+from pysim.hmatrix import HMatrixPySim
 from pysim.sinusoidal import SinusoidalPySim
 from pysim.triangular import TriangularPySim
 
@@ -131,15 +132,29 @@ _PYSIM_MODEL_KEYS = {
         "tikhonov_lambda",
         "auto_tap_ratio_threshold",
     ),
+    # Hierarchical (H-matrix / ACA) accelerator: same B-spline basis as
+    # bspline, plus the clustering / compression / iterative-solve knobs.
+    "hmatrix": (
+        "degree",
+        "n_qp_pair",
+        "n_qp_source",
+        "feed_smoothing_factor",
+        "aca_eta",
+        "aca_leaf_size",
+        "aca_tol",
+        "solve_tol",
+    ),
 }
 _PYSIM_MODELS = {
     "triangular": TriangularPySim,
     "sinusoidal": SinusoidalPySim,
     "bspline": BSplinePySim,
+    "hmatrix": HMatrixPySim,
 }
 
 
-_PYSIM_MODELS_WITH_GROUND = {"triangular", "bspline", "sinusoidal"}
+# hmatrix supports ground through its dense fallback path.
+_PYSIM_MODELS_WITH_GROUND = {"triangular", "bspline", "sinusoidal", "hmatrix"}
 
 
 def _make_pysim_sim(req: dict, **base_kwargs):
