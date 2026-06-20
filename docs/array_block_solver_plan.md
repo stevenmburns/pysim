@@ -180,8 +180,15 @@ composes with coarsening (coarse mesh *and* block structure).
   across RHS. (Explicit shared-factor reuse — one LU per shape, reused across
   elements *and* animation frames — is the P3/P4 performance refinement; the
   P2 preconditioner uses a single sparse LU of the block-diagonal.)
-- **P3 — Identical-element + block-Toeplitz reuse.** One self-block, unique
-  coupling blocks only; measure fill/factor savings.
+- **P3 — Identical-element + block-Toeplitz reuse. ✅ DONE.** Self-blocks are
+  one-per-shape (reused across same-shape elements). Coupling blocks are
+  deduplicated by `(shape_a, shape_b, displacement)` — free-space translation
+  invariance makes all such pairs the same block, so ACA runs once per unique
+  key (plus the complex-symmetry transpose). This generalises block-Toeplitz
+  reuse without needing explicit grid coordinates: 56→13 ACA solves on
+  `bowtiearray2x4`, 12→5 on `invveearray`, 12→3 on a uniform 4-element line.
+  (`self._last_n_coupling_aca` records the count.) The explicit per-shape LU
+  factor cached *across solves* — the animation lever — lands with P4.
 - **P4 — Engine integration + animation path.** Register as a selectable
   solver; expose factorization reuse across solves for phase/spacing sweeps;
   scaling study vs dense and vs `HMatrixPySim` on the array designs.

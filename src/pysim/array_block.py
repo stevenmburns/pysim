@@ -24,13 +24,21 @@ measurements behind it. This file is being built up phase by phase:
     complex-symmetry `Z_ba = Z_ab^T` halving the ACA work. The container has a
     fast `matvec` that reproduces the dense `Z @ x`.
 
-  * P2 (this commit): the constrained solve. `ArrayBlock` exposes its dense
-    self-blocks as `.near`, so `ArrayBlockPySim` runs the inherited
-    `_solve_hmatrix` augmented-GMRES verbatim — the block-diagonal self-blocks
-    become the block-Jacobi preconditioner and the KCL junction constraints go
-    in the saddle rows. Because coupling is ~1e-4 of the self-blocks, GMRES
-    converges in a handful of iterations (5 on `invveearray`, 9 on
-    `bowtiearray2x4`); impedance/Y match dense `BSplinePySim` to ~1e-5.
+  * P2: the constrained solve. `ArrayBlock` exposes its dense self-blocks as
+    `.near`, so `ArrayBlockPySim` runs the inherited `_solve_hmatrix`
+    augmented-GMRES verbatim — the block-diagonal self-blocks become the
+    block-Jacobi preconditioner and the KCL junction constraints go in the
+    saddle rows. Because coupling is ~1e-4 of the self-blocks, GMRES converges
+    in a handful of iterations (5 on `invveearray`, 9 on `bowtiearray2x4`);
+    impedance/Y match dense `BSplinePySim` to ~1e-5.
+
+  * P3 (this commit): identical-element + block-Toeplitz reuse. Self-blocks
+    are already one-per-shape. Coupling blocks are now deduplicated by
+    `(shape_a, shape_b, displacement)`: free-space translation invariance makes
+    all pairs with that key the same block, so ACA runs once per unique key
+    (+complex-symmetry transpose), collapsing the `P(P-1)` pairs to a handful
+    of displacements on a regular grid — 56→13 on `bowtiearray2x4`, 12→5 on
+    `invveearray`, 12→3 on a uniform 4-element line.
 
 `ArrayBlockPySim` subclasses `HMatrixPySim`, reusing its `_context`, `zblock`,
 the C++ off-edge block assembler, and `aca_partial` verbatim; the grouping
@@ -382,9 +390,17 @@ class ArrayBlockPySim(HMatrixPySim):
 
         One dense self-block per shape class (built once from a representative
         element and reused across same-shape elements), plus a low-rank
-        coupling block per element pair. `Z` is complex-symmetric
-        (`Z_ba = Z_ab^T`), so only unordered pairs are ACA-compressed; the
-        reverse direction reuses the transposed factors.
+        coupling block per element pair.
+
+        Coupling reuse (block-Toeplitz, generalised): a coupling block depends
+        only on the two elements' shapes and their relative displacement (the
+        free-space kernel is translation-invariant), so all pairs sharing a
+        `(shape_a, shape_b, displacement)` key are the *same* block — ACA runs
+        once per unique key. On a regular grid this collapses the `P(P-1)`
+        pairs to a handful of displacements. Complex symmetry `Z_ba = Z_ab^T`
+        is folded in too: a key whose reverse is already cached reuses the
+        transposed factors instead of a fresh ACA. `self._last_n_coupling_aca`
+        records how many ACA solves actually ran.
         """
         if tol is None:
             tol = self.aca_tol
@@ -406,14 +422,41 @@ class ArrayBlockPySim(HMatrixPySim):
             and self.hmatrix_use_accel
         )
 
+        # Element centroids for the displacement key, from each element's own
+        # segment midpoints (translated elements differ by exactly the
+        # displacement, so rounding to the grouping tol is safe). Computed from
+        # seg_groups, not ctx["basis_centroid"] — the latter is polluted by
+        # boundary-basis support padding, which would perturb the key.
+        seg_mid = 0.5 * (ctx["seg_l"] + ctx["seg_r"])
+        cen = np.array([seg_mid[sg].mean(axis=0) for sg in part.seg_groups])
+        shp = part.shape_of_elem
+        disp_tol = 1e-6
+
         coupling = []
+        cache = {}  # (shape_a, shape_b, disp_key) -> (U, V)
+        n_aca = 0
         P = part.n_elem
         for a in range(P):
-            for b in range(a + 1, P):
-                I, J = part.groups[a], part.groups[b]
-                U, V = self._coupling_aca(ctx, I, J, k, tol, use_accel)
-                coupling.append((a, b, U, V))
-                # Z_ba = Z_ab^T = (U V)^T = V^T U^T.
-                coupling.append((b, a, V.T.copy(), U.T.copy()))
+            for b in range(P):
+                if a == b:
+                    continue
+                sa, sb = int(shp[a]), int(shp[b])
+                dkey = tuple(np.round((cen[b] - cen[a]) / disp_tol).astype(np.int64))
+                key = (sa, sb, dkey)
+                hit = cache.get(key)
+                if hit is None:
+                    rkey = (sb, sa, tuple(-d for d in dkey))
+                    rhit = cache.get(rkey)
+                    if rhit is not None:
+                        # Z_ab = Z_ba^T = (U_r V_r)^T = V_r^T U_r^T.
+                        hit = (rhit[1].T.copy(), rhit[0].T.copy())
+                    else:
+                        hit = self._coupling_aca(
+                            ctx, part.groups[a], part.groups[b], k, tol, use_accel
+                        )
+                        n_aca += 1
+                    cache[key] = hit
+                coupling.append((a, b, hit[0], hit[1]))
 
+        self._last_n_coupling_aca = n_aca
         return ArrayBlock(n, part.groups, part.shape_of_elem, shape_blocks, coupling)
