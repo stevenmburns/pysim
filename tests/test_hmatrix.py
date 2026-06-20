@@ -240,6 +240,29 @@ def test_compute_y_matrix_matches_dense_junction(degree):
     assert np.abs(yh - yd).max() / np.abs(yd).max() < 1e-4
 
 
+def test_first_ring_preconditioner_reduces_iterations():
+    """The first-ring preconditioner (default precond_eta < aca_eta) must give
+    the same answer as the plain near-field preconditioner but in no more —
+    and in practice fewer — GMRES iterations."""
+    half = 2 * 0.962 * 22 / 4
+    wires = [np.array([[0.0, 0.0, -half], [0.0, 0.0, half]])]
+    common = dict(
+        wires=wires,
+        degree=1,
+        n_per_edge_per_wire=[[600]],
+        wavelength=22.0,
+        aca_tol=1e-5,
+        aca_eta=2.0,
+    )
+    plain = HMatrixPySim(precond_eta=2.0, **common)  # ring disabled
+    ring = HMatrixPySim(**common)  # default ring (0.5*aca_eta)
+    zp, _ = plain.compute_impedance()
+    zr, _ = ring.compute_impedance()
+    assert abs(zr - zp) / abs(zp) < 1e-4
+    assert ring._hmatrix.precond_extra  # the ring is non-empty
+    assert max(ring._last_solve_iters) <= max(plain._last_solve_iters)
+
+
 def test_solve_converges_in_few_iterations():
     """The near-field preconditioner should give single/low-double-digit
     GMRES iteration counts — the point of the hierarchical solve."""

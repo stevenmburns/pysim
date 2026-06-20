@@ -78,11 +78,11 @@ Fixed-length wire, mesh refined, `aca_tol=1e-5`, `aca_eta=2.0`, degree 1:
 
 ```
    N   far%  rank  store%    relZ    Dfill(C)  Hbuild   Dsolve  Hsolve  iters
-  250   66%  ~5    49.4%   6.6e-08    0.10s     0.15s    0.003s  0.09s     4
-  500   82%  ~5    30.9%   1.4e-07    0.41s     0.26s    0.070s  0.12s     5
- 1000   91%  ~5    18.9%   7.5e-07    1.56s     0.53s    0.103s  0.29s     6
- 2000   95%  ~5    11.1%   1.6e-06    6.12s     1.00s    0.302s  0.68s    12
- 4000   98%  ~5     6.4%   3.9e-07   24.85s     2.19s    1.761s  1.63s    21
+  250   66%  ~5    49.4%   1.5e-07    0.11s     0.14s    0.027s  0.05s     3
+  500   82%  ~5    30.9%   3.6e-07    0.43s     0.28s    0.059s  0.13s     4
+ 1000   91%  ~5    18.9%   4.9e-07    1.54s     0.53s    0.114s  0.35s     5
+ 2000   95%  ~5    11.1%   3.6e-06    6.16s     1.05s    0.327s  0.76s     6
+ 4000   98%  ~5     6.4%   2.6e-06   25.01s     2.31s    1.825s  1.76s    13
 ```
 
 (`Hbuild` uses the C++ fused off-edge assembler; `Hsolve` is a full solve
@@ -106,10 +106,9 @@ What this shows:
   moments and does the Galerkin combine in one pass for the ACA row/column
   sampling, replacing the per-row numpy orchestration + einsum (~2.6×).
 - **End-to-end the H-matrix now beats the dense path ~12×** at N=4000
-  (~2 s vs ~26 s) and the gap widens. The GMRES iteration count still creeps
-  up (4 → 21 over N=250 → 4000) as the near-field preconditioner neglects
-  more of the far field — a stronger preconditioner (H-LU / coarse
-  correction) is the next lever, not the already-cheap H-matvec.
+  (~2 s vs ~26 s) and the gap widens. The GMRES iteration count stays low
+  (3 → 13 over N=250 → 4000) thanks to the first-ring preconditioner below;
+  the solve is not the bottleneck at these sizes.
 
 ### Known limitations / next work
 
@@ -121,10 +120,35 @@ What this shows:
 - **Remaining C++ targets:** the per-block ACA pivoting loop itself
   (`aca_partial`) and the near-block dense fill still run in Python; the
   H-matvec is already negligible so it is intentionally not a target.
-- **Preconditioner strength:** GMRES iteration count grows slowly with N
-  (4 → 21 over 250 → 4000) as the near-field preconditioner neglects more of
-  the far field. An H-LU or coarse-correction preconditioner would flatten
-  this for very large problems.
+- **Preconditioner (first-ring near-field).** GMRES iteration count grows
+  with N as the near-field captures a shrinking fraction of the operator. The
+  preconditioner therefore uses a *stronger* near-field than the operator:
+  every leaf-scale far block that is inadmissible at `precond_eta`
+  (default 0.5·`aca_eta`) — the thin "first ring" just outside the near band —
+  is folded into the sparse preconditioner as a dense reconstruction of its
+  already-computed low-rank factors (no extra kernel work; the operator stays
+  compressed). This cuts iterations ~40% (e.g. 22 → 14 at N=4000). Net effect:
+  **~1.3–1.4× faster for multi-RHS solves** (Y-matrix ports, frequency sweeps)
+  where the one-time `splu` factorisation is amortised across columns;
+  roughly neutral (slightly slower) for a single RHS, where it isn't. Set
+  `precond_eta = aca_eta` to disable.
+
+  What did *not* work, and why (documented so it isn't re-attempted): a
+  spectral **coarse-space deflation** of the smooth modes. The near-field
+  preconditioned operator has only a handful of eigenvalues spread from 1, and
+  those eigenvectors are smooth and perfectly captured by a contiguous coarse
+  space — yet deflating them (verified with *exact* arithmetic on the dense
+  problem) does not reduce GMRES iterations at all. The MoM EFIE matrix is
+  complex-symmetric and **non-normal**, so its convergence is not governed by
+  the eigenvalue spectrum; a denser near-field helps, eigenvalue deflation
+  does not.
+
+- **Scalable solve (future).** At present sizes the solve is not a wall-clock
+  bottleneck (~0.3 s vs ~2 s build at N=4000). For *much* larger N the
+  `splu` of the near-field preconditioner itself becomes the limit; an H-LU
+  factorisation or a sparse approximate inverse (applied without a full
+  sparse LU) would be the scalable replacement — not a stronger near-field,
+  which only shifts cost from iterations to factorisation.
 - **Electrically very large structures:** when admissible blocks exceed ~λ
   the Helmholtz kernel becomes oscillatory and standard ACA rank grows;
   directional/butterfly/HF-FMM techniques would be needed. Not hit by the

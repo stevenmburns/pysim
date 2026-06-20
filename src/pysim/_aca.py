@@ -212,12 +212,17 @@ class HMatrix:
 
     near : list of (row_idx, col_idx, D)            D: (|row|, |col|)
     far  : list of (row_idx, col_idx, U, V)         U@V approximates the block
+    precond_extra : optional list of (row_idx, col_idx, D) dense reconstructions
+        of the first-ring far blocks — NOT part of the operator (the far list
+        already represents them as low-rank); used only to strengthen the
+        GMRES preconditioner's near-field.
     """
 
-    def __init__(self, n, near, far):
+    def __init__(self, n, near, far, precond_extra=None):
         self.n = n
         self.near = near
         self.far = far
+        self.precond_extra = precond_extra or []
 
     def matvec(self, x):
         x = np.asarray(x)

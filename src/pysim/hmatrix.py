@@ -48,6 +48,7 @@ from ._bspline_kernels import (
 from ._aca import (
     HMatrix,
     aca_partial,
+    admissible,
     build_block_tree,
     build_cluster_tree,
     partition_stats,
@@ -415,6 +416,8 @@ class HMatrixPySim(BSplinePySim):
         )
 
         far_blocks = []
+        precond_extra = []  # first-ring far blocks, dense, for the preconditioner
+        p_eta = self.precond_eta
         for s, t in part["far"]:
             I, J = s.indices, t.indices
             mI, nJ = I.size, J.size
@@ -440,8 +443,21 @@ class HMatrixPySim(BSplinePySim):
                 near_blocks.append((I, J, dense()))
             else:
                 far_blocks.append((I, J, U, V))
+                # "First ring": leaf-scale blocks adjacent to the near band —
+                # admissible for the operator but not at the tighter
+                # precond_eta. Fold a dense reconstruction into the
+                # preconditioner (free: reuses the low-rank factors). The
+                # leaf-size cap keeps it a *thin* ring: large far blocks (big
+                # well-separated clusters) are genuinely far and excluded, so
+                # the preconditioner stays sparse.
+                if (
+                    p_eta < self.aca_eta
+                    and max(mI, nJ) <= self.aca_leaf_size
+                    and not admissible(s, t, p_eta)
+                ):
+                    precond_extra.append((I, J, U @ V))
 
-        return HMatrix(n, near_blocks, far_blocks)
+        return HMatrix(n, near_blocks, far_blocks, precond_extra=precond_extra)
 
     def _gl01(self):
         """Gauss-Legendre nodes/weights mapped to [0, 1] (cached)."""
@@ -560,11 +576,13 @@ class HMatrixPySim(BSplinePySim):
     # ------------------------------------------------------------------
 
     def _near_sparse(self, H, n):
-        """Assemble the dense near blocks of an HMatrix into one sparse
-        (n, n) matrix — the near-field approximation used to precondition
-        GMRES (and the dominant part of Z, so a strong preconditioner)."""
+        """Assemble the near-field approximation of Z into one sparse (n, n)
+        matrix for the GMRES preconditioner: the operator's dense near blocks
+        plus the first-ring far blocks (H.precond_extra), the latter folded in
+        as dense reconstructions of their low-rank factors to give a stronger
+        preconditioner than the operator's own near band."""
         rows, cols, data = [], [], []
-        for I, J, D in H.near:
+        for I, J, D in H.near + H.precond_extra:
             rr = np.repeat(I, J.size)
             cc = np.tile(J, I.size)
             rows.append(rr)
@@ -609,8 +627,11 @@ class HMatrixPySim(BSplinePySim):
                 out[n:] = kcl_A @ x
             return out
 
+        def prec(z):
+            return lu.solve(z)
+
         Aug = LinearOperator((N, N), matvec=aug_matvec, dtype=np.complex128)
-        Minv = LinearOperator((N, N), matvec=lambda z: lu.solve(z), dtype=np.complex128)
+        Minv = LinearOperator((N, N), matvec=prec, dtype=np.complex128)
 
         nrhs = B.shape[1]
         X = np.zeros((n, nrhs), dtype=np.complex128)
@@ -618,7 +639,7 @@ class HMatrixPySim(BSplinePySim):
         for j in range(nrhs):
             rhs = np.zeros(N, dtype=np.complex128)
             rhs[:n] = B[:, j]
-            x0 = lu.solve(rhs)  # near-field solve is an excellent initial guess
+            x0 = prec(rhs)  # preconditioner solve is an excellent initial guess
             iters = [0]
 
             def _count(_xk):
@@ -711,6 +732,7 @@ class HMatrixPySim(BSplinePySim):
         aca_tol=1e-4,
         solve_tol=1e-6,
         hmatrix_use_accel=True,
+        precond_eta=None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -718,6 +740,18 @@ class HMatrixPySim(BSplinePySim):
         self.aca_leaf_size = int(aca_leaf_size)
         self.aca_tol = float(aca_tol)
         self.solve_tol = float(solve_tol)
+        # Preconditioner near-field admissibility. The GMRES preconditioner
+        # uses a *stronger* (tighter-eta) near-field than the operator: every
+        # operator-far block that is inadmissible at `precond_eta` (the "first
+        # ring" just outside the operator's near band) is folded into the
+        # sparse preconditioner as a dense reconstruction of its already-
+        # computed low-rank factors — no extra kernel work, operator stays
+        # compressed. None ⇒ 0.5·aca_eta. Set equal to aca_eta to disable.
+        # The MoM EFIE operator is non-normal, so spectral (coarse-space)
+        # deflation does not help; a denser near-field does.
+        self.precond_eta = (
+            0.5 * self.aca_eta if precond_eta is None else float(precond_eta)
+        )
         # Use the fused C++ off-edge block assembler for ACA far blocks when
         # available; set False to force the pure-numpy zblock path (testing).
         self.hmatrix_use_accel = bool(hmatrix_use_accel)
