@@ -30,7 +30,9 @@ in pure numpy/scipy, deferring the constant-factor C++ work. Where it stands:
 | 2 | ACA far blocks + `HMatrix` container + H-matvec | ✅ |
 | 3 | GMRES solve + near-field preconditioner + KCL | ✅ matches dense ~1e-6 |
 | 4 | Scaling study + engine/web integration | ✅ |
-| 5 | C++ accelerators (ACA fill, H-matvec) | ⏳ future |
+| 5a | Algorithmic: same-edge fill restricted to near band O(N·leaf) | ✅ |
+| 5b | C++ fused off-edge block assembler for the ACA fill | ✅ |
+| 5c | C++ H-matvec / stronger preconditioner | ⏳ future (H-matvec not a bottleneck) |
 
 ## How it works
 
@@ -75,13 +77,16 @@ Against the dense `BSplinePySim` at matched mesh:
 Fixed-length wire, mesh refined, `aca_tol=1e-5`, `aca_eta=2.0`, degree 1:
 
 ```
-   N   far%  rank  store%    relZ    Dfill(C)  Hbuild(py)  Dsolve  Hsolve  iters
-  250   66%  ~5    49.4%   6.6e-08    0.10s     0.27s      0.003s  0.15s     4
-  500   82%  ~5    30.9%   1.4e-07    0.40s     0.54s      0.064s  0.38s     5
- 1000   91%  ~5    18.9%   7.5e-07    1.60s     1.17s      0.095s  0.99s     6
- 2000   95%  ~5    11.1%   1.6e-06    6.23s     2.62s      0.323s  2.26s    12
- 4000   98%  ~5     6.4%   3.9e-07   25.07s     5.70s      1.88s   5.18s    21
+   N   far%  rank  store%    relZ    Dfill(C)  Hbuild   Dsolve  Hsolve  iters
+  250   66%  ~5    49.4%   6.6e-08    0.10s     0.15s    0.003s  0.09s     4
+  500   82%  ~5    30.9%   1.4e-07    0.41s     0.26s    0.070s  0.12s     5
+ 1000   91%  ~5    18.9%   7.5e-07    1.56s     0.53s    0.103s  0.29s     6
+ 2000   95%  ~5    11.1%   1.6e-06    6.12s     1.00s    0.302s  0.68s    12
+ 4000   98%  ~5     6.4%   3.9e-07   24.85s     2.19s    1.761s  1.63s    21
 ```
+
+(`Hbuild` uses the C++ fused off-edge assembler; `Hsolve` is a full solve
+including its own build, which reuses the warm same-edge / context caches.)
 
 What this shows:
 
@@ -91,26 +96,31 @@ What this shows:
   admissible blocks are sub-wavelength so there is no oscillatory rank
   growth in this size range.
 - **Accuracy is flat at ~1e-6** across all N — compression hides no error.
-- **The pure-Python H-build now beats the C-accelerated dense fill** for
-  N ≥ ~1000 (5.7 s vs 25 s at N=4000, a 4.4× win that widens with N): `Hbuild`
-  scales ~O(N log N), `Dfill` ~O(N²). This followed an algorithmic fix —
-  same-edge near-field moments are computed only over each near block's
-  contiguous sub-range (~2·leaf wide) instead of the full O(N_edge²) edge
-  block, which had been ~68% of build time.
-- **The iterative solve is now the relative weak point.** `Hsolve` (GMRES on
-  the H-matvec) is comparable to or slower than the dense LU at these sizes,
-  and the iteration count creeps up (4 → 21 over N=250 → 4000) as the
-  near-field preconditioner neglects more of the far field. Dense LU is
-  O(N³) so it loses eventually, but a stronger preconditioner (H-LU / coarse
-  correction) is the clear next lever. The C++ phase additionally targets the
-  remaining per-block Python orchestration in the fill.
+- **The H-build beats the C-accelerated dense fill** for N ≥ ~500 — at N=4000,
+  2.2 s vs 25 s, an **11× win that widens with N** (`Hbuild` ~O(N log N),
+  `Dfill` ~O(N²)). Two changes got here: (1) an algorithmic fix computing
+  same-edge near-field moments only over each near block's contiguous
+  sub-range (~2·leaf) instead of the full O(N_edge²) edge block (had been
+  ~68% of build time); (2) a C++ fused off-edge block assembler
+  (`_accelerators.bspline_assemble_offedge_block`) that quadratures the
+  moments and does the Galerkin combine in one pass for the ACA row/column
+  sampling, replacing the per-row numpy orchestration + einsum (~2.6×).
+- **End-to-end the H-matrix now beats the dense path ~12×** at N=4000
+  (~2 s vs ~26 s) and the gap widens. The GMRES iteration count still creeps
+  up (4 → 21 over N=250 → 4000) as the near-field preconditioner neglects
+  more of the far field — a stronger preconditioner (H-LU / coarse
+  correction) is the next lever, not the already-cheap H-matvec.
 
 ### Known limitations / next work
 
-- **C++ accelerators (Phase 5):** port the ACA fill (per-block row/col
-  evaluation) and the H-matvec to C++/OpenMP, the same way the dense path was
-  accelerated. This is what turns the proven operation-count win into a
-  wall-clock win.
+- **C++ ACA fill — done.** `_accelerators.bspline_assemble_offedge_block`
+  fuses the off-edge moment quadrature and the Galerkin combine for the ACA
+  row/column sampling (used by `HMatrixPySim._offedge_block_evaluators`,
+  gated by `hmatrix_use_accel`). Falls back to the pure-numpy `zblock` path
+  when the extension is absent or `degree > 2`.
+- **Remaining C++ targets:** the per-block ACA pivoting loop itself
+  (`aca_partial`) and the near-block dense fill still run in Python; the
+  H-matvec is already negligible so it is intentionally not a target.
 - **Preconditioner strength:** GMRES iteration count grows slowly with N
   (4 → 21 over 250 → 4000) as the near-field preconditioner neglects more of
   the far field. An H-LU or coarse-correction preconditioner would flatten

@@ -169,6 +169,22 @@ def test_hmatrix_compresses_storage():
     assert st["max_rank"] <= 32
 
 
+@pytest.mark.parametrize("degree", [1, 2])
+def test_hmatrix_accel_matches_numpy_path(degree):
+    """The fused C++ off-edge block assembler must produce an H-matrix
+    identical (to machine precision) to the pure-numpy zblock fill."""
+    sim_a = _long_wire(degree, 200)
+    sim_a.hmatrix_use_accel = True
+    sim_n = _long_wire(degree, 200)
+    sim_n.hmatrix_use_accel = False
+    Ha = sim_a.build_hmatrix(tol=1e-5)
+    Hn = sim_n.build_hmatrix(tol=1e-5)
+    rng = np.random.default_rng(3)
+    x = rng.standard_normal(Ha.n) + 1j * rng.standard_normal(Ha.n)
+    ya, yn = Ha.matvec(x), Hn.matvec(x)
+    assert np.linalg.norm(ya - yn) / np.linalg.norm(yn) < 1e-12
+
+
 def test_hmatrix_handles_junction_geometry():
     sim = _bent_wire_with_junction(1, 60)
     Z = _dense_Z(sim)

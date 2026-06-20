@@ -1051,6 +1051,229 @@ assemble_Z_bspline(
 }
 
 
+// Fused off-edge block assembler for the hierarchical (H-matrix / ACA) solver.
+//
+// Computes a dense Z[I, J] block where every basis pair is OFF-EDGE (the
+// caller guarantees admissibility / well-separation), fusing the moment
+// quadrature and the Galerkin assembly into one pass — no intermediate
+// (D+1, D+1, N, N) moment tensor and no numpy einsum. ACA's row/column
+// sampling calls this with a single-row or single-column basis slice, so the
+// whole per-row Python orchestration (np.unique / np.vectorize / dict maps /
+// einsum) is replaced by one C++ call.
+//
+// Segment data is passed as the union of segments referenced by the I-side
+// and J-side bases (resolved once per block in Python); support_*_local index
+// into those union arrays. Same EFIE Galerkin formula as
+// assemble_Z_bspline_kernel, but the per-pair moments are quadratured inline
+// from the segment endpoints (a²-regularised full kernel, the off-edge path).
+template<int D>
+static py::array_t<std::complex<double>>
+bspline_assemble_offedge_block_kernel(
+    py::array_t<int64_t, py::array::c_style | py::array::forcecast> supp_I,   // (nI, NM)
+    py::array_t<double, py::array::c_style | py::array::forcecast> polys_I,   // (nI, NM, NM)
+    py::array_t<double, py::array::c_style | py::array::forcecast> segl_I,    // (nSegI, 3)
+    py::array_t<double, py::array::c_style | py::array::forcecast> segr_I,    // (nSegI, 3)
+    py::array_t<double, py::array::c_style | py::array::forcecast> tan_I,     // (nSegI, 3)
+    py::array_t<int64_t, py::array::c_style | py::array::forcecast> supp_J,   // (nJ, NM)
+    py::array_t<double, py::array::c_style | py::array::forcecast> polys_J,   // (nJ, NM, NM)
+    py::array_t<double, py::array::c_style | py::array::forcecast> segl_J,    // (nSegJ, 3)
+    py::array_t<double, py::array::c_style | py::array::forcecast> segr_J,    // (nSegJ, 3)
+    py::array_t<double, py::array::c_style | py::array::forcecast> tan_J,     // (nSegJ, 3)
+    double a_squared,
+    double k,
+    double omega,
+    double eps_,
+    double mu_,
+    py::array_t<double, py::array::c_style | py::array::forcecast> gl_t,
+    py::array_t<double, py::array::c_style | py::array::forcecast> gl_w
+) {
+    static constexpr int NM = D + 1;
+
+    auto sI = supp_I.unchecked<2>();
+    auto pI = polys_I.unchecked<3>();
+    auto slI = segl_I.unchecked<2>();
+    auto srI = segr_I.unchecked<2>();
+    auto tI = tan_I.unchecked<2>();
+    auto sJ = supp_J.unchecked<2>();
+    auto pJ = polys_J.unchecked<3>();
+    auto slJ = segl_J.unchecked<2>();
+    auto srJ = segr_J.unchecked<2>();
+    auto tJ = tan_J.unchecked<2>();
+    auto glt = gl_t.unchecked<1>();
+    auto glw = gl_w.unchecked<1>();
+
+    size_t nI = (size_t)supp_I.shape(0);
+    size_t nJ = (size_t)supp_J.shape(0);
+    size_t nSegI = (size_t)segl_I.shape(0);
+    size_t nSegJ = (size_t)segl_J.shape(0);
+    size_t n_qp = (size_t)gl_t.shape(0);
+    if (supp_I.shape(1) != NM || supp_J.shape(1) != NM) {
+        throw std::runtime_error("support arrays must have shape (n, D+1)");
+    }
+    if (n_qp > 8) {
+        throw std::runtime_error("n_qp > 8 not supported (scratch buffer size)");
+    }
+
+    // Per-segment quadrature positions + lengths, precomputed once.
+    std::vector<double> posI(nSegI * n_qp * 3), lenI(nSegI);
+    std::vector<double> posJ(nSegJ * n_qp * 3), lenJ(nSegJ);
+    for (size_t s = 0; s < nSegI; s++) {
+        double dx = srI(s,0)-slI(s,0), dy = srI(s,1)-slI(s,1), dz = srI(s,2)-slI(s,2);
+        lenI[s] = std::sqrt(dx*dx + dy*dy + dz*dz);
+        for (size_t q = 0; q < n_qp; q++) {
+            double t = glt(q);
+            posI[(s*n_qp+q)*3+0] = (1.0-t)*slI(s,0) + t*srI(s,0);
+            posI[(s*n_qp+q)*3+1] = (1.0-t)*slI(s,1) + t*srI(s,1);
+            posI[(s*n_qp+q)*3+2] = (1.0-t)*slI(s,2) + t*srI(s,2);
+        }
+    }
+    for (size_t s = 0; s < nSegJ; s++) {
+        double dx = srJ(s,0)-slJ(s,0), dy = srJ(s,1)-slJ(s,1), dz = srJ(s,2)-slJ(s,2);
+        lenJ[s] = std::sqrt(dx*dx + dy*dy + dz*dz);
+        for (size_t q = 0; q < n_qp; q++) {
+            double t = glt(q);
+            posJ[(s*n_qp+q)*3+0] = (1.0-t)*slJ(s,0) + t*srJ(s,0);
+            posJ[(s*n_qp+q)*3+1] = (1.0-t)*slJ(s,1) + t*srJ(s,1);
+            posJ[(s*n_qp+q)*3+2] = (1.0-t)*slJ(s,2) + t*srJ(s,2);
+        }
+    }
+
+    py::array_t<std::complex<double>> Z({nI, nJ});
+    auto z_view = Z.mutable_unchecked<2>();
+
+    const double inv_4pi = 1.0 / (4.0 * M_PI);
+    const double omega_mu = omega * mu_;
+    const double inv_omega_eps = 1.0 / (omega * eps_);
+
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (size_t m = 0; m < nI; m++) {
+        for (size_t n = 0; n < nJ; n++) {
+            double zA_re = 0.0, zA_im = 0.0, zPhi_re = 0.0, zPhi_im = 0.0;
+
+            for (int a = 0; a < NM; a++) {
+                int64_t smi = sI(m, a);
+                double tix = tI(smi,0), tiy = tI(smi,1), tiz = tI(smi,2);
+                const double *pi = &posI[smi * n_qp * 3];
+                double Li = lenI[smi];
+                for (int b = 0; b < NM; b++) {
+                    int64_t snj = sJ(n, b);
+                    const double *pj = &posJ[snj * n_qp * 3];
+                    double Lj = lenJ[snj];
+                    double td = tix*tJ(snj,0) + tiy*tJ(snj,1) + tiz*tJ(snj,2);
+
+                    // Moment tensor Jc[p][P] for this single segment pair.
+                    std::complex<double> Jc[NM][NM];
+                    {
+                        alignas(32) double R[64], G_re[64], G_im[64];
+                        alignas(32) double wuwu[(NM*NM) * 64];
+                        size_t n_pairs = n_qp * n_qp;
+                        for (size_t q = 0; q < n_qp; q++) {
+                            double pix = pi[q*3+0], piy = pi[q*3+1], piz = pi[q*3+2];
+                            for (size_t r = 0; r < n_qp; r++) {
+                                double dx = pix - pj[r*3+0];
+                                double dy = piy - pj[r*3+1];
+                                double dz = piz - pj[r*3+2];
+                                R[q*n_qp+r] = std::sqrt(dx*dx+dy*dy+dz*dz+a_squared);
+                            }
+                        }
+                        for (size_t q = 0; q < n_qp; q++) {
+                            double wi = glw(q) * Li, ui = glt(q) * Li;
+                            double uip[NM]; uip[0] = 1.0;
+                            for (int p = 1; p < NM; p++) uip[p] = uip[p-1]*ui;
+                            for (size_t r = 0; r < n_qp; r++) {
+                                double wj = glw(r) * Lj, uj = glt(r) * Lj;
+                                double ujp[NM]; ujp[0] = 1.0;
+                                for (int P = 1; P < NM; P++) ujp[P] = ujp[P-1]*uj;
+                                double wij = wi*wj;
+                                size_t qr = q*n_qp + r;
+                                for (int p = 0; p < NM; p++)
+                                    for (int P = 0; P < NM; P++)
+                                        wuwu[(p*NM+P)*n_pairs + qr] = wij*uip[p]*ujp[P];
+                            }
+                        }
+                        #pragma omp simd
+                        for (size_t qr = 0; qr < n_pairs; qr++) {
+                            double inv = inv_4pi / R[qr];
+                            double ph = -k * R[qr];
+                            G_re[qr] = std::cos(ph) * inv;
+                            G_im[qr] = std::sin(ph) * inv;
+                        }
+                        for (int pP = 0; pP < NM*NM; pP++) {
+                            double sr_ = 0.0, si_ = 0.0;
+                            const double *w_row = &wuwu[pP * n_pairs];
+                            #pragma omp simd reduction(+:sr_,si_)
+                            for (size_t qr = 0; qr < n_pairs; qr++) {
+                                sr_ += w_row[qr]*G_re[qr];
+                                si_ += w_row[qr]*G_im[qr];
+                            }
+                            Jc[pP/NM][pP%NM] = std::complex<double>(sr_, si_);
+                        }
+                    }
+
+                    // Galerkin combine for this wing pair.
+                    double wA_re = 0.0, wA_im = 0.0, wPhi_re = 0.0, wPhi_im = 0.0;
+                    for (int p = 0; p < NM; p++) {
+                        double mp = pI(m, a, p);
+                        for (int q = 0; q < NM; q++) {
+                            double nq = pJ(n, b, q);
+                            double prod = mp * nq;
+                            wA_re += prod * Jc[p][q].real();
+                            wA_im += prod * Jc[p][q].imag();
+                            if (p >= 1 && q >= 1) {
+                                double pq = (double)(p*q) * prod;
+                                wPhi_re += pq * Jc[p-1][q-1].real();
+                                wPhi_im += pq * Jc[p-1][q-1].imag();
+                            }
+                        }
+                    }
+                    zA_re += td * wA_re;
+                    zA_im += td * wA_im;
+                    zPhi_re += wPhi_re;
+                    zPhi_im += wPhi_im;
+                }
+            }
+
+            double Zre = -omega_mu * zA_im + zPhi_im * inv_omega_eps;
+            double Zim = omega_mu * zA_re - zPhi_re * inv_omega_eps;
+            z_view(m, n) = std::complex<double>(Zre, Zim);
+        }
+    }
+
+    return Z;
+}
+
+static py::array_t<std::complex<double>>
+bspline_assemble_offedge_block(
+    py::array_t<int64_t, py::array::c_style | py::array::forcecast> supp_I,
+    py::array_t<double, py::array::c_style | py::array::forcecast> polys_I,
+    py::array_t<double, py::array::c_style | py::array::forcecast> segl_I,
+    py::array_t<double, py::array::c_style | py::array::forcecast> segr_I,
+    py::array_t<double, py::array::c_style | py::array::forcecast> tan_I,
+    py::array_t<int64_t, py::array::c_style | py::array::forcecast> supp_J,
+    py::array_t<double, py::array::c_style | py::array::forcecast> polys_J,
+    py::array_t<double, py::array::c_style | py::array::forcecast> segl_J,
+    py::array_t<double, py::array::c_style | py::array::forcecast> segr_J,
+    py::array_t<double, py::array::c_style | py::array::forcecast> tan_J,
+    double a_squared, double k, double omega, double eps_, double mu_, int max_d,
+    py::array_t<double, py::array::c_style | py::array::forcecast> gl_t,
+    py::array_t<double, py::array::c_style | py::array::forcecast> gl_w
+) {
+    switch (max_d) {
+        case 1:
+            return bspline_assemble_offedge_block_kernel<1>(
+                supp_I, polys_I, segl_I, segr_I, tan_I, supp_J, polys_J,
+                segl_J, segr_J, tan_J, a_squared, k, omega, eps_, mu_, gl_t, gl_w);
+        case 2:
+            return bspline_assemble_offedge_block_kernel<2>(
+                supp_I, polys_I, segl_I, segr_I, tan_I, supp_J, polys_J,
+                segl_J, segr_J, tan_J, a_squared, k, omega, eps_, mu_, gl_t, gl_w);
+        default:
+            throw std::runtime_error(
+                "bspline_assemble_offedge_block: max_d must be 1 or 2");
+    }
+}
+
+
 // Runtime dispatch wrapper. Picks the right template instantiation based on
 // max_d (the maximum polynomial moment degree, == B-spline degree D).
 static py::array_t<std::complex<double>>
@@ -1914,6 +2137,20 @@ PYBIND11_MODULE(_accelerators, m) {
           py::arg("polys"), py::arg("td_all"),
           py::arg("omega"), py::arg("eps"), py::arg("mu"),
           py::arg("max_d"));
+    m.def("bspline_assemble_offedge_block", &bspline_assemble_offedge_block,
+          "Fused off-edge Z[I, J] block assembly for the H-matrix / ACA "
+          "solver: quadratures the a²-regularised full-kernel moments and "
+          "performs the EFIE Galerkin combine in one pass, with no "
+          "intermediate moment tensor. Segments are the per-block union "
+          "referenced by the I/J bases; support_*_local index into them. "
+          "Templated on max_d in {1, 2}; single-k.",
+          py::arg("supp_I"), py::arg("polys_I"), py::arg("segl_I"),
+          py::arg("segr_I"), py::arg("tan_I"),
+          py::arg("supp_J"), py::arg("polys_J"), py::arg("segl_J"),
+          py::arg("segr_J"), py::arg("tan_J"),
+          py::arg("a_squared"), py::arg("k"), py::arg("omega"),
+          py::arg("eps"), py::arg("mu"), py::arg("max_d"),
+          py::arg("gl_t"), py::arg("gl_w"));
     m.def("assemble_Z_enrich", &assemble_Z_enrich,
           "Assemble (Z_pe, Z_ep, Z_ee) for the stable XFEM singular basis "
           "enrichment at K≥3 junctions. Each enrichment basis is "

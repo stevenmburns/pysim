@@ -52,6 +52,16 @@ from ._aca import (
     build_cluster_tree,
     partition_stats,
 )
+from ._quadrature import leggauss
+
+try:
+    from . import _accelerators as _acc
+
+    _HAVE_OFFEDGE_BLOCK_ACCEL = hasattr(_acc, "bspline_assemble_offedge_block")
+except ImportError:  # pragma: no cover
+    _HAVE_OFFEDGE_BLOCK_ACCEL = False
+
+_OFFEDGE_BLOCK_ACCEL_MAX_D = 2
 
 
 class HMatrixPySim(BSplinePySim):
@@ -398,27 +408,151 @@ class HMatrixPySim(BSplinePySim):
             I, J = s.indices, t.indices
             near_blocks.append((I, J, self.zblock(I, J, k=k)))
 
+        use_accel = (
+            _HAVE_OFFEDGE_BLOCK_ACCEL
+            and self.degree <= _OFFEDGE_BLOCK_ACCEL_MAX_D
+            and self.hmatrix_use_accel
+        )
+
         far_blocks = []
         for s, t in part["far"]:
             I, J = s.indices, t.indices
             mI, nJ = I.size, J.size
 
-            def get_row(i, I=I, J=J):
-                return self.zblock(I[i : i + 1], J, k=k, same_edge=False).ravel()
+            if use_accel:
+                get_row, get_col, dense = self._offedge_block_evaluators(ctx, I, J, k)
+            else:
 
-            def get_col(j, I=I, J=J):
-                return self.zblock(I, J[j : j + 1], k=k, same_edge=False).ravel()
+                def get_row(i, I=I, J=J):
+                    return self.zblock(I[i : i + 1], J, k=k, same_edge=False).ravel()
+
+                def get_col(j, I=I, J=J):
+                    return self.zblock(I, J[j : j + 1], k=k, same_edge=False).ravel()
+
+                def dense(I=I, J=J):
+                    return self.zblock(I, J, k=k, same_edge=False)
 
             U, V = aca_partial(get_row, get_col, mI, nJ, tol=tol)
             r = U.shape[1]
             if r * (mI + nJ) >= mI * nJ:
                 # No compression — store dense (off-edge kernel; the block is
                 # admissible so the same-edge analytic path is unnecessary).
-                near_blocks.append((I, J, self.zblock(I, J, k=k, same_edge=False)))
+                near_blocks.append((I, J, dense()))
             else:
                 far_blocks.append((I, J, U, V))
 
         return HMatrix(n, near_blocks, far_blocks)
+
+    def _gl01(self):
+        """Gauss-Legendre nodes/weights mapped to [0, 1] (cached)."""
+        cached = getattr(self, "_hm_gl01", None)
+        if cached is None:
+            xi, w = leggauss(self.n_qp_pair)
+            cached = (
+                np.ascontiguousarray(0.5 * (xi + 1.0)),
+                np.ascontiguousarray(0.5 * w),
+            )
+            self._hm_gl01 = cached
+        return cached
+
+    def _offedge_block_evaluators(self, ctx, I, J, k):
+        """Build (get_row, get_col, dense) closures for an admissible far block
+        backed by the fused C++ off-edge assembler `bspline_assemble_offedge_block`.
+
+        The block-wide I/J segment unions and local support maps are resolved
+        once here; each row/column call passes only the single basis it needs
+        on its own axis (so the C++ side never precomputes positions for unused
+        segments) against the precomputed full opposite axis.
+        """
+        supp_seg = ctx["supp_seg"]
+        polys = ctx["polys"]
+        seg_l = ctx["seg_l"]
+        seg_r = ctx["seg_r"]
+        tangents = ctx["tangents"]
+        d = self.degree
+        a2 = self.wire_radius * self.wire_radius
+        glt, glw = self._gl01()
+        omega, eps, mu = self.omega, self.eps, self.mu
+
+        segI = np.unique(supp_seg[I].ravel())
+        segJ = np.unique(supp_seg[J].ravel())
+        sIl = np.searchsorted(segI, supp_seg[I]).astype(np.int64)
+        sJl = np.searchsorted(segJ, supp_seg[J]).astype(np.int64)
+        pI = np.ascontiguousarray(polys[I])
+        pJ = np.ascontiguousarray(polys[J])
+        slI, srI, tI = seg_l[segI], seg_r[segI], tangents[segI]
+        slJ, srJ, tJ = seg_l[segJ], seg_r[segJ], tangents[segJ]
+        one_supp = np.arange(d + 1, dtype=np.int64)[None, :]
+
+        def get_row(i):
+            seg_i = supp_seg[I[i]]
+            return _acc.bspline_assemble_offedge_block(
+                one_supp,
+                polys[I[i]][None],
+                seg_l[seg_i],
+                seg_r[seg_i],
+                tangents[seg_i],
+                sJl,
+                pJ,
+                slJ,
+                srJ,
+                tJ,
+                a2,
+                k,
+                omega,
+                eps,
+                mu,
+                d,
+                glt,
+                glw,
+            ).ravel()
+
+        def get_col(j):
+            seg_j = supp_seg[J[j]]
+            return _acc.bspline_assemble_offedge_block(
+                sIl,
+                pI,
+                slI,
+                srI,
+                tI,
+                one_supp,
+                polys[J[j]][None],
+                seg_l[seg_j],
+                seg_r[seg_j],
+                tangents[seg_j],
+                a2,
+                k,
+                omega,
+                eps,
+                mu,
+                d,
+                glt,
+                glw,
+            ).ravel()
+
+        def dense():
+            return _acc.bspline_assemble_offedge_block(
+                sIl,
+                pI,
+                slI,
+                srI,
+                tI,
+                sJl,
+                pJ,
+                slJ,
+                srJ,
+                tJ,
+                a2,
+                k,
+                omega,
+                eps,
+                mu,
+                d,
+                glt,
+                glw,
+            )
+
+        return get_row, get_col, dense
 
     # ------------------------------------------------------------------
     # Iterative solve (Phase 3): GMRES on the H-matvec + near-field
@@ -576,6 +710,7 @@ class HMatrixPySim(BSplinePySim):
         aca_leaf_size=32,
         aca_tol=1e-4,
         solve_tol=1e-6,
+        hmatrix_use_accel=True,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -583,7 +718,11 @@ class HMatrixPySim(BSplinePySim):
         self.aca_leaf_size = int(aca_leaf_size)
         self.aca_tol = float(aca_tol)
         self.solve_tol = float(solve_tol)
+        # Use the fused C++ off-edge block assembler for ACA far blocks when
+        # available; set False to force the pure-numpy zblock path (testing).
+        self.hmatrix_use_accel = bool(hmatrix_use_accel)
         self._hm_context = None
+        self._hm_gl01 = None
         self._hm_se_cache = {}
         self._hm_se_cache_k = None
         self._hm_partition = None
