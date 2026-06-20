@@ -189,9 +189,29 @@ composes with coarsening (coarse mesh *and* block structure).
   `bowtiearray2x4`, 12→5 on `invveearray`, 12→3 on a uniform 4-element line.
   (`self._last_n_coupling_aca` records the count.) The explicit per-shape LU
   factor cached *across solves* — the animation lever — lands with P4.
-- **P4 — Engine integration + animation path.** Register as a selectable
-  solver; expose factorization reuse across solves for phase/spacing sweeps;
-  scaling study vs dense and vs `HMatrixPySim` on the array designs.
+- **P4 — Engine integration + scaling study. ✅ DONE** (animation-path factor
+  caching still open — see below). `_parity_for_solver` recognises
+  `ArrayBlockPySim` (degree-driven parity — critical: a mismatched parity
+  silently builds a different mesh and invalidates the dense A/B); registered
+  as the `arrayblock` pysim basis in the CLI (alongside a new `hmatrix`).
+  Scaling study `scripts/array_block_scaling.py`:
+
+  | design | N | dense | H-matrix | **ArrayBlock** |
+  |---|---|---|---|---|
+  | bowtiearray2x4 | 1424 (native) | 0.55 s | 4.2 s, 40% | **0.57 s, 13%, acc 3e-5** |
+  | bowtiearray2x4 | 2096 | 1.10 s | 10.7 s, 30% | **1.03 s, 10%, acc 5e-5** |
+
+  ArrayBlock **crosses dense at the native mesh and beats it above** — the bar
+  the generic H-matrix missed (it is 4–10× *slower* than dense here) — at ~10%
+  storage vs the H-matrix's 30–40%, ~1e-5 Y accuracy, 9 GMRES iters flat in N,
+  and 13 unique coupling ACA solves (flat in N via Toeplitz reuse).
+
+  **Still open (animation lever):** caching the assembled `ArrayBlock` + the
+  per-shape self-block LU *across solves* so a phase/excitation sweep re-solves
+  with cached back-subs (geometry fixed ⇒ Z fixed ⇒ only the RHS changes) and a
+  spacing sweep recomputes only the cheap coupling blocks. The multi-RHS Y
+  solve already factors once per call; what remains is persisting that across
+  engine ticks/frames.
 - **P5 (optional) — CBFM / macro-basis.** Reduce each element to K
   characteristic modes → tiny `(P·K)²` reduced system; the right tool for
   large arrays (hundreds of elements).
