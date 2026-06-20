@@ -1,8 +1,38 @@
 # Plan: element-aware block-low-rank solver for antenna arrays
 
-Status: **planned** (not started). This document captures the design and the
-validated measurements behind it so a future session can pick it up without
-re-deriving them.
+Status: **P0 complete** (grouping + assumptions verified); P1+ in progress.
+This document captures the design and the validated measurements behind it.
+
+## P0 results (measured 2026-06-20, exact connectivity grouping)
+
+Implemented in `src/pysim/array_block.py` (`element_groups` → `ArrayPartition`),
+verified by `tests/test_array_block.py` and `scripts/array_block_verify.py`.
+
+- **Grouping is exact, not approximate.** Element membership comes from the
+  exact basis→wire map (bases are emitted contiguously per wire) composed with
+  a wire→element connected-components grouping on shared polyline anchors —
+  *not* spatial k-means. On `bowtiearray2x4` this gives **8 elements of
+  exactly 178 bases each** (k-means gave 171–197); on `invveearray`, 4 × 45.
+- **Arrays have several distinct element *shapes*, not one.** A 2×4 has up to
+  **4** shape classes (itop/ibot/otop/obot), a 2×2 up to **2** (top/bot), a
+  1×2 just **1**. The default `bowtiearray2x4` collapses to 2 (its params set
+  inner==outer); perturbing inner≠outer recovers 4. Shape classes are detected
+  geometrically (translation-invariant segment-midpoint signature).
+- **Self-blocks identical *within* a shape class** to **~2e-12** (free space,
+  consistent ordering) — confirmed on both designs. So the self-block factor
+  reuse is one factored block *per distinct shape* (≤4), not necessarily one.
+- **Coupling is much weaker than first estimated:** mean
+  `‖Z_ab‖_F/‖Z_aa‖_F ≈ 2e-4` (bowtie), `3e-5` (invvee) — ~100× below the
+  k-means estimate of 0.02. The k-means figure was inflated by boundary-basis
+  mis-assignment leaking near-field self terms into the "coupling" blocks; the
+  exact grouping shows the true coupling. Weaker coupling ⇒ even faster
+  block-Jacobi convergence. (`zblock` coupling matches dense Z to ~1e-13.)
+- **Coupling rank ~3–5** at a 1% threshold (matches the original estimate).
+- **Storage** with factor reuse (n_shapes self-blocks + rank-~4 coupling):
+  **~6%** of n² on `bowtiearray2x4` (vs the generic H-matrix's 41%).
+
+The original (pre-P0) k-means measurements are kept below for context; where
+they differ from P0, the P0 numbers above are authoritative.
 
 ## Motivation
 
@@ -128,10 +158,11 @@ composes with coarsening (coarse mesh *and* block structure).
 
 ## Implementation phases
 
-- **P0 — Verify assumptions.** Exact element grouping from the builder;
-  confirm identical self-blocks to ~1e-12 (free space); confirm coupling rank
-  ~4 and weakness ~2% on `bowtiearray2x4` and at least one other array
-  (`invveearray`). Gate the whole effort on these holding.
+- **P0 — Verify assumptions. ✅ DONE.** Exact element grouping (connectivity,
+  not k-means); identical self-blocks confirmed to ~2e-12 *within each shape
+  class* (free space); coupling rank ~3–5 and weakness ~2e-4 (far below the
+  estimated 2%) confirmed on `bowtiearray2x4` and `invveearray`. See the P0
+  results section above. Gate passed.
 - **P1 — Block partition + matvec.** Build self + coupling blocks (ACA), an
   `ArrayBlock` container with a fast matvec, validate matvec vs dense `Z@x`.
 - **P2 — Block-Jacobi GMRES solve.** Shared self-block factor + GMRES;
