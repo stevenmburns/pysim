@@ -8,6 +8,7 @@ The real array designs are exercised by scripts/array_block_verify.py.
 import numpy as np
 import pytest
 
+from pysim.bspline import BSplinePySim
 from pysim.hmatrix import HMatrixPySim
 from pysim.array_block import ArrayBlockPySim, element_groups
 
@@ -178,3 +179,77 @@ def test_array_block_symmetry_uses_transposed_factors():
         for b in range(P):
             if a != b:
                 assert np.allclose(blk[(b, a)], blk[(a, b)].T, atol=1e-10)
+
+
+# ---- P2: block-Jacobi GMRES solve -------------------------------------------
+
+
+def _bent_element(h, y=0.0):
+    """Two wires meeting at a right-angle junction (an L), offset in y. Gives
+    each element an internal junction → exercises the KCL saddle path."""
+    w0 = np.array([[0.0, y, 0.0], [0.0, y, h]])
+    w1 = np.array([[0.0, y, h], [0.0, y + h, h]])
+    return [w0, w1]
+
+
+def _bent_array(n_elem, h, dy=20.0, nsegs=12, degree=2):
+    wires = []
+    junctions = []
+    feeds = []
+    for e in range(n_elem):
+        w0, w1 = _bent_element(h, y=e * dy)
+        base = len(wires)
+        wires += [w0, w1]
+        junctions.append([(base, "end"), (base + 1, "start")])
+        feeds.append((base, None, 1.0 + 0.0j))
+    common = dict(
+        wires=wires,
+        degree=degree,
+        n_per_edge_per_wire=[[nsegs]] * len(wires),
+        wavelength=22.0,
+        junctions=junctions,
+        feeds=feeds,
+    )
+    return common
+
+
+def test_compute_y_matrix_matches_dense_no_junction():
+    """Multi-dipole array (no junctions) — plain block-Jacobi GMRES on Z."""
+    half = 0.962 * 22 / 4
+    offsets = [(-9.0, 0.0), (-3.0, 0.0), (3.0, 0.0), (9.0, 0.0)]
+    dense = _array_sim(offsets, [half] * 4, nsegs=16)
+    arr = _array_sim(offsets, [half] * 4, nsegs=16)
+    # the dense reference is the base solver on the same mesh
+    yd = BSplinePySim(
+        wires=[w for w in dense.wires_polylines],
+        degree=2,
+        n_per_edge_per_wire=[[16]] * 4,
+        wavelength=22.0,
+        feeds=[(i, None, 1.0 + 0.0j) for i in range(4)],
+    ).compute_y_matrix()
+    ya = arr.compute_y_matrix()
+    assert np.abs(ya - yd).max() / np.abs(yd).max() < 1e-4
+    assert max(arr._last_solve_iters) < 30
+
+
+@pytest.mark.parametrize("degree", [1, 2])
+def test_compute_y_matrix_matches_dense_with_junctions(degree):
+    """Array of L-shaped elements with internal junctions — exercises the
+    block-Jacobi preconditioner augmented with the KCL saddle rows."""
+    h = 0.962 * 22 / 4
+    common = _bent_array(3, h, nsegs=14, degree=degree)
+    yd = BSplinePySim(**common).compute_y_matrix()
+    ya = ArrayBlockPySim(**common).compute_y_matrix()
+    assert np.abs(ya - yd).max() / np.abs(yd).max() < 1e-4
+
+
+def test_solve_converges_in_few_iterations():
+    """Weak inter-element coupling ⇒ the block-Jacobi preconditioner gives a
+    small, RHS-flat GMRES iteration count."""
+    half = 0.962 * 22 / 4
+    offsets = [(-9.0, 0.0), (-3.0, 0.0), (3.0, 0.0), (9.0, 0.0)]
+    arr = _array_sim(offsets, [half] * 4, nsegs=20)
+    arr.compute_y_matrix()
+    iters = arr._last_solve_iters
+    assert max(iters) < 25
+    assert max(iters) - min(iters) <= 2  # ~flat across RHS

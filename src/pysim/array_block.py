@@ -17,12 +17,20 @@ measurements behind it. This file is being built up phase by phase:
     routines confirmed the design's load-bearing measurements (self-blocks
     identical within a shape class, weak + low-rank coupling).
 
-  * P1 (this commit): `ArrayBlockPySim.build_array_blocks()` assembles the
-    impedance matrix as an `ArrayBlock` — one dense self-block per distinct
-    shape class (reused across same-shape elements; the P0-verified ~2e-12
-    identity) plus an ACA-compressed low-rank coupling block per element pair,
-    with the complex-symmetry `Z_ba = Z_ab^T` halving the ACA work. The
-    container has a fast `matvec` that reproduces the dense `Z @ x`.
+  * P1: `ArrayBlockPySim.build_array_blocks()` assembles the impedance matrix
+    as an `ArrayBlock` — one dense self-block per distinct shape class (reused
+    across same-shape elements; the P0-verified ~2e-12 identity) plus an
+    ACA-compressed low-rank coupling block per element pair, with the
+    complex-symmetry `Z_ba = Z_ab^T` halving the ACA work. The container has a
+    fast `matvec` that reproduces the dense `Z @ x`.
+
+  * P2 (this commit): the constrained solve. `ArrayBlock` exposes its dense
+    self-blocks as `.near`, so `ArrayBlockPySim` runs the inherited
+    `_solve_hmatrix` augmented-GMRES verbatim — the block-diagonal self-blocks
+    become the block-Jacobi preconditioner and the KCL junction constraints go
+    in the saddle rows. Because coupling is ~1e-4 of the self-blocks, GMRES
+    converges in a handful of iterations (5 on `invveearray`, 9 on
+    `bowtiearray2x4`); impedance/Y match dense `BSplinePySim` to ~1e-5.
 
 `ArrayBlockPySim` subclasses `HMatrixPySim`, reusing its `_context`, `zblock`,
 the C++ off-edge block assembler, and `aca_partial` verbatim; the grouping
@@ -275,6 +283,16 @@ class ArrayBlock:
         self.shape_of_elem = shape_of_elem
         self.shape_blocks = shape_blocks
         self.coupling = coupling
+        # Dense self-blocks as (I, J, D) triples, so the block decomposition is
+        # a drop-in for `HMatrixPySim._solve_hmatrix`: its near-field
+        # preconditioner becomes the block-diagonal of Z (block-Jacobi), which
+        # — because coupling is ~1e-4 of the self-blocks — drives GMRES to a
+        # handful of iterations. `precond_extra` (the H-matrix's first-ring
+        # strengthening) has no analogue here, so it is empty.
+        self.near = [
+            (g, g, shape_blocks[int(shape_of_elem[e])]) for e, g in enumerate(groups)
+        ]
+        self.precond_extra = []
 
     def matvec(self, x):
         x = np.asarray(x)
@@ -332,6 +350,13 @@ class ArrayBlockPySim(HMatrixPySim):
             cached = element_groups(self, tol=tol)
             self._array_partition = cached
         return cached
+
+    def _build_operator(self):
+        """Build the array-block operator; `compute_impedance` /
+        `compute_y_matrix` (inherited from `HMatrixPySim`) run the same
+        constrained GMRES on it via `_solve_hmatrix`, with the block-diagonal
+        self-blocks as the block-Jacobi preconditioner."""
+        return self.build_array_blocks()
 
     def _coupling_aca(self, ctx, I, J, k, tol, use_accel):
         """ACA low-rank factors (U, V) of the off-diagonal element block

@@ -171,8 +171,15 @@ composes with coarsening (coarse mesh *and* block structure).
   `bowtiearray2x4`, ~1e-9 on `invveearray`; unit tests on synthetic dipole
   arrays). Compression at native size: ~13% (bowtie). Coupling-tol tuning and
   block-Toeplitz reuse to shrink storage further are deferred to P3.
-- **P2 — Block-Jacobi GMRES solve.** Shared self-block factor + GMRES;
-  validate impedance/Y vs dense bspline within ~1e-4; measure iterations.
+- **P2 — Block-Jacobi GMRES solve. ✅ DONE.** `ArrayBlock` exposes its dense
+  self-blocks as `.near`, so the inherited `HMatrixPySim._solve_hmatrix`
+  augmented-GMRES runs verbatim with the block-diagonal self-blocks as the
+  block-Jacobi preconditioner and the KCL constraints in the saddle rows.
+  Validated: Y matches dense `BSplinePySim` to ~2e-6 (`invveearray`) / ~3e-5
+  (`bowtiearray2x4`); GMRES converges in 5 / 9 iterations respectively, ~flat
+  across RHS. (Explicit shared-factor reuse — one LU per shape, reused across
+  elements *and* animation frames — is the P3/P4 performance refinement; the
+  P2 preconditioner uses a single sparse LU of the block-diagonal.)
 - **P3 — Identical-element + block-Toeplitz reuse.** One self-block, unique
   coupling blocks only; measure fill/factor savings.
 - **P4 — Engine integration + animation path.** Register as a selectable

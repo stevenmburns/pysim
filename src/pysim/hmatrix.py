@@ -665,13 +665,21 @@ class HMatrixPySim(BSplinePySim):
         """The H-matrix path is free-space, no-enrichment only for now."""
         return self.ground_z is not None or self.use_singular_enrichment
 
+    def _build_operator(self):
+        """Build the fast operator the constrained solve runs GMRES on. The
+        generic accelerator returns its H-matrix; subclasses with a different
+        structural decomposition (e.g. `ArrayBlockPySim`) override this and
+        feed the result through the same `_solve_hmatrix` machinery (the solve
+        only needs `.n`, `.matvec`, and `.near`/`.precond_extra`)."""
+        return self.build_hmatrix()
+
     def compute_y_matrix(self):
         if self._hmatrix_unsupported():
             return super().compute_y_matrix()
         ctx = self._context()
         geom = ctx["geom"]
         n = ctx["n_basis"]
-        H = self.build_hmatrix()
+        H = self._build_operator()
         n_ports = len(self.feeds)
         B = np.zeros((n, n_ports), dtype=np.complex128)
         for j, (w_i, arc_i, _v) in enumerate(self.feeds):
@@ -695,7 +703,7 @@ class HMatrixPySim(BSplinePySim):
         ctx = self._context()
         geom = ctx["geom"]
         n = ctx["n_basis"]
-        H = self.build_hmatrix()
+        H = self._build_operator()
 
         v_per_feed = []
         for w_i, arc_i, _v in self.feeds:
