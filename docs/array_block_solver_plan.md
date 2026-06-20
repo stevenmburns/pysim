@@ -163,8 +163,14 @@ composes with coarsening (coarse mesh *and* block structure).
   class* (free space); coupling rank ~3–5 and weakness ~2e-4 (far below the
   estimated 2%) confirmed on `bowtiearray2x4` and `invveearray`. See the P0
   results section above. Gate passed.
-- **P1 — Block partition + matvec.** Build self + coupling blocks (ACA), an
-  `ArrayBlock` container with a fast matvec, validate matvec vs dense `Z@x`.
+- **P1 — Block partition + matvec. ✅ DONE.** `ArrayBlockPySim`
+  (subclass of `HMatrixPySim`); `build_array_blocks()` assembles one dense
+  self-block per shape class (reused across same-shape elements) + ACA
+  low-rank coupling per pair, exploiting `Z_ba = Z_ab^T` to halve the ACA
+  work. `ArrayBlock.matvec` reproduces dense `Z@x` (validated to ~1e-8 on
+  `bowtiearray2x4`, ~1e-9 on `invveearray`; unit tests on synthetic dipole
+  arrays). Compression at native size: ~13% (bowtie). Coupling-tol tuning and
+  block-Toeplitz reuse to shrink storage further are deferred to P3.
 - **P2 — Block-Jacobi GMRES solve.** Shared self-block factor + GMRES;
   validate impedance/Y vs dense bspline within ~1e-4; measure iterations.
 - **P3 — Identical-element + block-Toeplitz reuse.** One self-block, unique

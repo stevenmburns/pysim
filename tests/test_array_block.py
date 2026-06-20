@@ -6,9 +6,18 @@ The real array designs are exercised by scripts/array_block_verify.py.
 """
 
 import numpy as np
+import pytest
 
 from pysim.hmatrix import HMatrixPySim
-from pysim.array_block import element_groups
+from pysim.array_block import ArrayBlockPySim, element_groups
+
+
+def _dense_Z(sim):
+    """The exact dense bspline Z the block decomposition must reproduce."""
+    geom = sim._build_geometry()
+    supp_seg, polys, _kcl_A, _wk, _wbg = sim._build_basis_polynomials(geom)
+    J = sim._build_J_blocks(geom, sim.k)
+    return sim._assemble_Z(J, supp_seg, polys, geom)
 
 
 def _dipole_wire(half, y=0.0, z=0.0):
@@ -20,7 +29,7 @@ def _array_sim(offsets, halves, nsegs=12, degree=2):
     half-lengths match, a distinct shape when they differ. `offsets` are
     (y, z) element centres far enough apart to be electrically separate."""
     wires = [_dipole_wire(h, y=y, z=z) for (y, z), h in zip(offsets, halves)]
-    return HMatrixPySim(
+    return ArrayBlockPySim(
         wires=wires,
         degree=degree,
         n_per_edge_per_wire=[[nsegs]] * len(wires),
@@ -112,3 +121,60 @@ def test_single_structure_is_one_element():
     assert part.n_elem == 1
     assert part.n_shapes == 1
     assert part.sizes.tolist() == [part.n_basis]
+
+
+# ---- P1: block decomposition + matvec ---------------------------------------
+
+
+@pytest.mark.parametrize("degree", [1, 2])
+def test_array_block_matvec_matches_dense(degree):
+    """The ArrayBlock matvec must reproduce the dense Z @ x: the P x P element
+    grid tiles Z exactly, self-blocks are exact dense, coupling is ACA to tol."""
+    half = 0.962 * 22 / 4
+    offsets = [(-9.0, 0.0), (-3.0, 0.0), (3.0, 0.0), (9.0, 0.0)]
+    sim = _array_sim(offsets, [half] * 4, nsegs=14, degree=degree)
+    Z = _dense_Z(sim)
+    n = Z.shape[0]
+    AB = sim.build_array_blocks(tol=1e-7)
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+    rel = np.linalg.norm(AB.matvec(x) - Z @ x) / np.linalg.norm(Z @ x)
+    assert rel < 1e-4
+
+
+def test_array_block_to_dense_reconstruction():
+    half = 0.962 * 22 / 4
+    offsets = [(-9.0, 0.0), (-3.0, 0.0), (3.0, 0.0), (9.0, 0.0)]
+    sim = _array_sim(offsets, [half] * 4, nsegs=14)
+    Z = _dense_Z(sim)
+    AB = sim.build_array_blocks(tol=1e-7)
+    rel = np.abs(AB.to_dense() - Z).max() / np.abs(Z).max()
+    assert rel < 1e-3
+
+
+def test_array_block_reuses_one_self_block_per_shape():
+    """Identical elements ⇒ a single dense self-block shared by all of them."""
+    half = 0.962 * 22 / 4
+    offsets = [(-9.0, 0.0), (-3.0, 0.0), (3.0, 0.0), (9.0, 0.0)]
+    sim = _array_sim(offsets, [half] * 4, nsegs=14)
+    AB = sim.build_array_blocks()
+    assert len(AB.shape_blocks) == 1  # one shape ⇒ one stored self-block
+    assert AB.stats()["n_shapes"] == 1
+
+
+def test_array_block_symmetry_uses_transposed_factors():
+    """Z is complex-symmetric, so block (b,a) is stored as the transpose of
+    (a,b)'s factors — both directions present, reconstructing Z[b,a]=Z[a,b]^T."""
+    half = 0.962 * 22 / 4
+    offsets = [(-9.0, 0.0), (-3.0, 0.0), (3.0, 0.0)]
+    sim = _array_sim(offsets, [half] * 3, nsegs=14)
+    AB = sim.build_array_blocks(tol=1e-8)
+    pairs = {(a, b) for a, b, _, _ in AB.coupling}
+    P = len(AB.groups)
+    assert pairs == {(a, b) for a in range(P) for b in range(P) if a != b}
+    # spot-check Z[b,a] == Z[a,b]^T from the stored factors
+    blk = {(a, b): U @ V for a, b, U, V in AB.coupling}
+    for a in range(P):
+        for b in range(P):
+            if a != b:
+                assert np.allclose(blk[(b, a)], blk[(a, b)].T, atol=1e-10)

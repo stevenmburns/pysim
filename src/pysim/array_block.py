@@ -10,18 +10,33 @@ low-rank coupling blocks off it.
 See `docs/array_block_solver_plan.md` for the design and the validated
 measurements behind it. This file is being built up phase by phase:
 
-  * P0 (this commit): element grouping (the key enabler) + the assumption
-    verification harness. `element_groups` maps each basis to its array
-    element via connected components of the wire graph; `ArrayPartition`
-    bundles the grouping with the per-element basis ranges. The verification
-    routines confirm the design's load-bearing measurements (identical
-    self-blocks, weak + low-rank coupling) before the solver is built on top.
+  * P0: element grouping (the key enabler) + the assumption verification
+    harness. `element_groups` maps each basis to its array element via
+    connected components of the wire graph and labels elements by geometric
+    shape class; `ArrayPartition` bundles the grouping. The verification
+    routines confirmed the design's load-bearing measurements (self-blocks
+    identical within a shape class, weak + low-rank coupling).
 
-The grouping reuses BSplinePySim's geometry/basis build verbatim; nothing
-here touches the MoM kernel.
+  * P1 (this commit): `ArrayBlockPySim.build_array_blocks()` assembles the
+    impedance matrix as an `ArrayBlock` — one dense self-block per distinct
+    shape class (reused across same-shape elements; the P0-verified ~2e-12
+    identity) plus an ACA-compressed low-rank coupling block per element pair,
+    with the complex-symmetry `Z_ba = Z_ab^T` halving the ACA work. The
+    container has a fast `matvec` that reproduces the dense `Z @ x`.
+
+`ArrayBlockPySim` subclasses `HMatrixPySim`, reusing its `_context`, `zblock`,
+the C++ off-edge block assembler, and `aca_partial` verbatim; the grouping
+reuses BSplinePySim's geometry/basis build. Nothing here touches the kernel.
 """
 
 import numpy as np
+
+from ._aca import aca_partial
+from .hmatrix import (
+    _HAVE_OFFEDGE_BLOCK_ACCEL,
+    _OFFEDGE_BLOCK_ACCEL_MAX_D,
+    HMatrixPySim,
+)
 
 
 # ----------------------------------------------------------------------
@@ -226,3 +241,154 @@ def element_groups(sim, tol=1e-6):
     return ArrayPartition(
         n_basis, elem_of_basis, groups, wire_elem, seg_groups, shape_of_elem
     )
+
+
+# ----------------------------------------------------------------------
+# Block container + matvec (P1)
+# ----------------------------------------------------------------------
+
+
+class ArrayBlock:
+    """Element-block decomposition of the impedance matrix with a fast matvec.
+
+    The `P x P` grid of element blocks exactly tiles `Z` (the element groups
+    partition all bases): diagonal blocks are dense self-blocks, off-diagonal
+    blocks are low-rank coupling blocks.
+
+    groups : list[np.ndarray]
+        Per-element basis indices (from `ArrayPartition`).
+    shape_of_elem : (P,) int
+        Shape class of each element.
+    shape_blocks : dict[int, np.ndarray]
+        One dense `(N_s, N_s)` self-block per distinct shape class, applied to
+        every element of that shape (same-shape self-blocks are identical to
+        ~2e-12 in free space — the P0-verified reuse).
+    coupling : list[(a, b, U, V)]
+        Low-rank factors for every ordered off-diagonal pair: block `(a, b)`
+        is `U @ V`. Stored for both directions (the `(b, a)` entry reuses the
+        transposed factors of `(a, b)`).
+    """
+
+    def __init__(self, n, groups, shape_of_elem, shape_blocks, coupling):
+        self.n = n
+        self.groups = groups
+        self.shape_of_elem = shape_of_elem
+        self.shape_blocks = shape_blocks
+        self.coupling = coupling
+
+    def matvec(self, x):
+        x = np.asarray(x)
+        y = np.zeros(self.n, dtype=np.complex128)
+        for e, g in enumerate(self.groups):
+            y[g] += self.shape_blocks[int(self.shape_of_elem[e])] @ x[g]
+        for a, b, U, V in self.coupling:
+            y[self.groups[a]] += U @ (V @ x[self.groups[b]])
+        return y
+
+    def storage(self):
+        """Complex scalars stored (distinct self-blocks + coupling factors)."""
+        s = sum(D.size for D in self.shape_blocks.values())
+        s += sum(U.size + V.size for _, _, U, V in self.coupling)
+        return s
+
+    def stats(self):
+        ranks = [U.shape[1] for _, _, U, _ in self.coupling]
+        return {
+            "n": self.n,
+            "n_elem": len(self.groups),
+            "n_shapes": len(self.shape_blocks),
+            "n_coupling": len(self.coupling),
+            "storage": self.storage(),
+            "dense_storage": self.n * self.n,
+            "compression": self.storage() / (self.n * self.n),
+            "max_rank": max(ranks) if ranks else 0,
+            "mean_rank": float(np.mean(ranks)) if ranks else 0.0,
+        }
+
+    def to_dense(self):
+        """Reconstruct the full dense matrix (validation / small n only)."""
+        Z = np.zeros((self.n, self.n), dtype=np.complex128)
+        for e, g in enumerate(self.groups):
+            Z[np.ix_(g, g)] = self.shape_blocks[int(self.shape_of_elem[e])]
+        for a, b, U, V in self.coupling:
+            Z[np.ix_(self.groups[a], self.groups[b])] = U @ V
+        return Z
+
+
+class ArrayBlockPySim(HMatrixPySim):
+    """Element-aware block-low-rank accelerator for arrays of identical (or
+    few-shape) elements. Drop-in for `HMatrixPySim` (same constructor).
+
+    P1 adds `array_partition()` (cached element grouping) and
+    `build_array_blocks()` (the `ArrayBlock` assembly + matvec). The solve and
+    `compute_impedance` / `compute_y_matrix` overrides arrive in P2; until then
+    they resolve to the dense `BSplinePySim` path via the base class.
+    """
+
+    def array_partition(self, tol=1e-6):
+        """Element/shape partition of the bases (cached)."""
+        cached = getattr(self, "_array_partition", None)
+        if cached is None:
+            cached = element_groups(self, tol=tol)
+            self._array_partition = cached
+        return cached
+
+    def _coupling_aca(self, ctx, I, J, k, tol, use_accel):
+        """ACA low-rank factors (U, V) of the off-diagonal element block
+        Z[I][:, J]. The two elements share no segments, so the block is purely
+        off-edge (no same-edge analytic overwrite) and well separated ⇒ low
+        rank. Reuses the H-matrix off-edge evaluators / numpy fallback."""
+        mI, nJ = I.size, J.size
+        if use_accel:
+            get_row, get_col, _dense = self._offedge_block_evaluators(ctx, I, J, k)
+        else:
+
+            def get_row(i, I=I, J=J):
+                return self.zblock(I[i : i + 1], J, k=k, same_edge=False).ravel()
+
+            def get_col(j, I=I, J=J):
+                return self.zblock(I, J[j : j + 1], k=k, same_edge=False).ravel()
+
+        U, V = aca_partial(get_row, get_col, mI, nJ, tol=tol)
+        return U, V
+
+    def build_array_blocks(self, tol=None, k=None):
+        """Assemble the impedance matrix as an `ArrayBlock`.
+
+        One dense self-block per shape class (built once from a representative
+        element and reused across same-shape elements), plus a low-rank
+        coupling block per element pair. `Z` is complex-symmetric
+        (`Z_ba = Z_ab^T`), so only unordered pairs are ACA-compressed; the
+        reverse direction reuses the transposed factors.
+        """
+        if tol is None:
+            tol = self.aca_tol
+        if k is None:
+            k = self.k
+        part = self.array_partition()
+        ctx = self._context()
+        n = ctx["n_basis"]
+
+        # Dense self-block per distinct shape, from a representative element.
+        shape_blocks = {}
+        for s, e in enumerate(part.shape_representatives()):
+            g = part.groups[e]
+            shape_blocks[s] = self.zblock(g, g, k=k)
+
+        use_accel = (
+            _HAVE_OFFEDGE_BLOCK_ACCEL
+            and self.degree <= _OFFEDGE_BLOCK_ACCEL_MAX_D
+            and self.hmatrix_use_accel
+        )
+
+        coupling = []
+        P = part.n_elem
+        for a in range(P):
+            for b in range(a + 1, P):
+                I, J = part.groups[a], part.groups[b]
+                U, V = self._coupling_aca(ctx, I, J, k, tol, use_accel)
+                coupling.append((a, b, U, V))
+                # Z_ba = Z_ab^T = (U V)^T = V^T U^T.
+                coupling.append((b, a, V.T.copy(), U.T.copy()))
+
+        return ArrayBlock(n, part.groups, part.shape_of_elem, shape_blocks, coupling)
