@@ -22,7 +22,7 @@ pytest tests/
 
 ## Optional: PyNEC backend
 
-The web UI can run either the in-tree triangular MoM solver or NEC2 via [PyNEC](https://github.com/tmolteno/python-necpp), useful for cross-validation and for the ~5–10× faster single-frequency solves NEC2 delivers. PyNEC is vendored as a git submodule because the PyPI wheel builds are broken on current Python versions.
+pysim can be cross-validated against NEC2 via [PyNEC](https://github.com/tmolteno/python-necpp) (the `tests/test_pynec_backend.py` suite); NEC2 also delivers ~5–10× faster single-frequency solves. PyNEC is vendored as a git submodule because the PyPI wheel builds are broken on current Python versions.
 
 ### Default build (LAPACKE + OpenBLAS)
 
@@ -34,7 +34,7 @@ sudo apt install autoconf automake libtool m4 \
 scripts/build_pynec.sh
 ```
 
-After the build, `from PyNEC import nec_context` works in `.venv`. The web UI's "solver" tab in the simulation section toggles between pysim and PyNEC at runtime. If the build is skipped the UI silently falls back to pysim.
+After the build, `from PyNEC import nec_context` works in `.venv` and the PyNEC cross-validation tests run. If the build is skipped those tests are skipped (pysim itself needs no PyNEC).
 
 ### Choosing a different LAPACK backend
 
