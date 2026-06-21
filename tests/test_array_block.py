@@ -315,6 +315,28 @@ def test_solve_converges_in_few_iterations():
     assert max(iters) - min(iters) <= 2  # ~flat across RHS
 
 
+def test_compute_impedance_swept_matches_dense():
+    """The array-block frequency sweep must run (overriding the dense base
+    sweep, whose `same_edge_prep` arg the accelerated compute_impedance doesn't
+    accept) and match the dense bspline swept impedance per port."""
+    half = 0.962 * 22 / 4
+    offsets = [(-9.0, 0.0), (-3.0, 0.0), (3.0, 0.0), (9.0, 0.0)]
+    arr = _array_sim(offsets, [half] * 4, nsegs=16)
+    dense = BSplinePySim(
+        wires=list(arr.wires_polylines),
+        degree=2,
+        n_per_edge_per_wire=[[16]] * 4,
+        wavelength=22.0,
+        feeds=[(i, None, 1.0 + 0.0j) for i in range(4)],
+    )
+    k0 = 2 * np.pi / 22.0
+    k_array = np.linspace(0.9 * k0, 1.1 * k0, 4)
+    za = arr.compute_impedance_swept(k_array)
+    zd = dense.compute_impedance_swept(k_array)
+    assert za.shape == zd.shape == (4, 4)
+    assert np.max(np.abs(za - zd) / np.abs(zd)) < 1e-3
+
+
 # ---- P3: identical-element + block-Toeplitz coupling reuse -------------------
 
 

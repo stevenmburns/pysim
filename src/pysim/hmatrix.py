@@ -966,6 +966,36 @@ class HMatrixPySim(BSplinePySim):
         z = z_per[0] if len(self.feeds) == 1 else z_per
         return z, coeffs
 
+    def compute_impedance_swept(self, k_array):
+        """Frequency sweep on the accelerated operator: rebind k per point and
+        reuse the fast `compute_impedance` (which assembles the H-matrix /
+        array block for that k). Overrides the dense base sweep, whose
+        `same_edge_prep` batching argument the accelerated `compute_impedance`
+        doesn't accept — calling it would `TypeError`. Falls back to the dense
+        base sweep (with its batched same-edge precompute) whenever the
+        accelerator is unsupported for this configuration."""
+        if self._hmatrix_unsupported():
+            return super().compute_impedance_swept(k_array)
+        k_array = np.asarray(k_array, dtype=float)
+        n_feeds = len(self.feeds)
+        if n_feeds == 1:
+            z_out = np.zeros(k_array.shape[0], dtype=np.complex128)
+        else:
+            z_out = np.zeros((k_array.shape[0], n_feeds), dtype=np.complex128)
+        k_save, wl_save, omega_save = self.k, self.wavelength, self.omega
+        try:
+            for i, kk in enumerate(k_array):
+                self.k = float(kk)
+                self.omega = self.k * self.c
+                self.wavelength = self.c / (self.omega / (2 * np.pi))
+                z, _ = self.compute_impedance()
+                z_out[i] = z
+        finally:
+            self.k = k_save
+            self.wavelength = wl_save
+            self.omega = omega_save
+        return z_out
+
     def __init__(
         self,
         *args,

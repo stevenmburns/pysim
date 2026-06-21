@@ -232,6 +232,22 @@ def test_compute_impedance_matches_dense_dipole(degree):
     assert abs(zh - zd) / abs(zd) < 1e-4
 
 
+def test_compute_impedance_swept_matches_dense():
+    """The H-matrix frequency sweep must run (it overrides the dense base
+    sweep, whose `same_edge_prep` batching arg the accelerated
+    `compute_impedance` doesn't accept — a bare inherit `TypeError`s) and match
+    the dense bspline swept impedance."""
+    half = 0.962 * 22 / 4
+    wires = [np.array([[0.0, 0.0, -half], [0.0, 0.0, half]])]
+    dense, hmat = _matched_pair(wires, degree=2, n_per_edge_per_wire=[[60]])
+    k0 = 2 * np.pi / 22.0
+    k_array = np.linspace(0.9 * k0, 1.1 * k0, 5)
+    zd = dense.compute_impedance_swept(k_array)
+    zh = hmat.compute_impedance_swept(k_array)
+    assert zh.shape == zd.shape == (5,)
+    assert np.max(np.abs(zh - zd) / np.abs(zd)) < 1e-4
+
+
 @pytest.mark.parametrize("degree", [1, 2])
 def test_compute_y_matrix_matches_dense_junction(degree):
     h = 0.962 * 22 / 4
