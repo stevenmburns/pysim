@@ -37,17 +37,33 @@ extern "C" double cos(double);
 extern "C" double sin(double);
 #endif
 
+// Stringizing helpers so a token sequence can be turned into a _Pragma.
+#define PYSIM_STR_(x) #x
+#define PYSIM_PRAGMA_(x) _Pragma(PYSIM_STR_(x))
+
 // The (i, j)-grid parallel loops below use `collapse(2)` for finer load
-// balancing. MSVC builds with /openmp:experimental (required for the
-// `#pragma omp simd` directives in the inner loops), which does NOT support the
-// OpenMP 3.0 `collapse` clause. Fall back to plain outer-loop parallelism
-// there — same results, only coarser scheduling across the grid. GCC keeps
-// collapse(2).
+// balancing. We keep the Windows OpenMP usage conservative and drop it to plain
+// outer-loop parallelism under MSVC — same results, only coarser scheduling
+// across the grid. GCC (and MSVC's /openmp:llvm) keeps collapse(2).
 #if defined(_MSC_VER)
 #  define PYSIM_OMP_PARALLEL_FOR_COLLAPSE2 _Pragma("omp parallel for schedule(static)")
 #else
 #  define PYSIM_OMP_PARALLEL_FOR_COLLAPSE2 \
        _Pragma("omp parallel for collapse(2) schedule(static)")
+#endif
+
+// `omp simd` neutralization for MSVC. MSVC's /openmp:llvm (which we build with,
+// for its collapse + unsigned-index support) rejects the `omp simd` directive
+// outright, and /openmp:experimental silently drops simd `reduction` clauses —
+// a correctness hazard. Turn the simd directives into no-ops under MSVC and let
+// /arch:AVX2 autovectorize the inner loops as correct scalar-reduction code.
+// GCC keeps real `omp simd` (bound to libmvec via the declare-simd block above).
+// Reduction-clause commas are protected by the inner parens, so they pass as a
+// single macro argument.
+#if defined(_MSC_VER)
+#  define PYSIM_OMP_SIMD(clauses)
+#else
+#  define PYSIM_OMP_SIMD(clauses) PYSIM_PRAGMA_(omp simd clauses)
 #endif
 
 // Batched cross-segment Gauss-Legendre quadrature in 3D.
@@ -191,7 +207,7 @@ seg_seg_quad_batch_3d(
                     uj_arr[qr] = glt(r) * Lj;
                 }
             }
-            #pragma omp simd
+            PYSIM_OMP_SIMD()
             for (size_t qr = 0; qr < n_pairs; qr++) {
                 inv_R_4pi[qr] = inv_4pi / R[qr];
             }
@@ -200,7 +216,7 @@ seg_seg_quad_batch_3d(
                 double k = ka(kk);
 
                 // Stage 1: phase = -k * R, fully vectorizable.
-                #pragma omp simd
+                PYSIM_OMP_SIMD()
                 for (size_t qr = 0; qr < n_pairs; qr++) {
                     phases[qr] = -k * R[qr];
                 }
@@ -211,11 +227,11 @@ seg_seg_quad_batch_3d(
                 // `sincos` call (smart for serial code), but libmvec has no
                 // vector `sincos`, only `_ZGVdN4v_cos` and `_ZGVdN4v_sin`.
                 // Splitting keeps them as independent vectorizable calls.
-                #pragma omp simd
+                PYSIM_OMP_SIMD()
                 for (size_t qr = 0; qr < n_pairs; qr++) {
                     cos_phases[qr] = std::cos(phases[qr]);
                 }
-                #pragma omp simd
+                PYSIM_OMP_SIMD()
                 for (size_t qr = 0; qr < n_pairs; qr++) {
                     sin_phases[qr] = std::sin(phases[qr]);
                 }
@@ -226,7 +242,7 @@ seg_seg_quad_batch_3d(
                 double s10_re = 0.0, s10_im = 0.0;
                 double s01_re = 0.0, s01_im = 0.0;
                 double s11_re = 0.0, s11_im = 0.0;
-                #pragma omp simd reduction(+:s00_re,s00_im,s10_re,s10_im,s01_re,s01_im,s11_re,s11_im)
+                PYSIM_OMP_SIMD(reduction(+:s00_re,s00_im,s10_re,s10_im,s01_re,s01_im,s11_re,s11_im))
                 for (size_t qr = 0; qr < n_pairs; qr++) {
                     double iR = inv_R_4pi[qr];
                     double G_re = cos_phases[qr] * iR;
@@ -364,7 +380,7 @@ seg_seg_reg_quad_batch_1d(
                     uj_arr[qr] = glt(r) * Lj;
                 }
             }
-            #pragma omp simd
+            PYSIM_OMP_SIMD()
             for (size_t qr = 0; qr < n_pairs; qr++) {
                 inv_R_4pi[qr] = inv_4pi / R[qr];
             }
@@ -372,15 +388,15 @@ seg_seg_reg_quad_batch_1d(
             for (size_t kk = 0; kk < n_k; kk++) {
                 double k = ka(kk);
 
-                #pragma omp simd
+                PYSIM_OMP_SIMD()
                 for (size_t qr = 0; qr < n_pairs; qr++) {
                     phases[qr] = -k * R[qr];
                 }
-                #pragma omp simd
+                PYSIM_OMP_SIMD()
                 for (size_t qr = 0; qr < n_pairs; qr++) {
                     cos_phases[qr] = std::cos(phases[qr]);
                 }
-                #pragma omp simd
+                PYSIM_OMP_SIMD()
                 for (size_t qr = 0; qr < n_pairs; qr++) {
                     sin_phases[qr] = std::sin(phases[qr]);
                 }
@@ -390,7 +406,7 @@ seg_seg_reg_quad_batch_1d(
                 double s10_re = 0.0, s10_im = 0.0;
                 double s01_re = 0.0, s01_im = 0.0;
                 double s11_re = 0.0, s11_im = 0.0;
-                #pragma omp simd reduction(+:s00_re,s00_im,s10_re,s10_im,s01_re,s01_im,s11_re,s11_im)
+                PYSIM_OMP_SIMD(reduction(+:s00_re,s00_im,s10_re,s10_im,s01_re,s01_im,s11_re,s11_im))
                 for (size_t qr = 0; qr < n_pairs; qr++) {
                     double iR = inv_R_4pi[qr];
                     double Greg_re = (cos_phases[qr] - 1.0) * iR;
@@ -907,19 +923,19 @@ seg_seg_full_moments_bspline_kernel(
             }
 
             // Stage 1: phases = -k * R, then sincos via libmvec.
-            #pragma omp simd
+            PYSIM_OMP_SIMD()
             for (size_t qr = 0; qr < n_pairs; qr++) {
                 phases[qr] = -k * R[qr];
             }
-            #pragma omp simd
+            PYSIM_OMP_SIMD()
             for (size_t qr = 0; qr < n_pairs; qr++) {
                 cos_phases[qr] = std::cos(phases[qr]);
             }
-            #pragma omp simd
+            PYSIM_OMP_SIMD()
             for (size_t qr = 0; qr < n_pairs; qr++) {
                 sin_phases[qr] = std::sin(phases[qr]);
             }
-            #pragma omp simd
+            PYSIM_OMP_SIMD()
             for (size_t qr = 0; qr < n_pairs; qr++) {
                 inv_R_4pi[qr] = inv_4pi / R[qr];
                 G_re[qr] = cos_phases[qr] * inv_R_4pi[qr];
@@ -930,7 +946,7 @@ seg_seg_full_moments_bspline_kernel(
             for (int pP = 0; pP < NMM; pP++) {
                 double sr = 0.0, si = 0.0;
                 const double *w_row = &wuwu[pP * n_pairs];
-                #pragma omp simd reduction(+:sr,si)
+                PYSIM_OMP_SIMD(reduction(+:sr,si))
                 for (size_t qr = 0; qr < n_pairs; qr++) {
                     sr += w_row[qr] * G_re[qr];
                     si += w_row[qr] * G_im[qr];
@@ -1215,7 +1231,7 @@ bspline_assemble_offedge_block_kernel(
                                         wuwu[(p*NM+P)*n_pairs + qr] = wij*uip[p]*ujp[P];
                             }
                         }
-                        #pragma omp simd
+                        PYSIM_OMP_SIMD()
                         for (size_t qr = 0; qr < n_pairs; qr++) {
                             double inv = inv_4pi / R[qr];
                             double ph = -k * R[qr];
@@ -1225,7 +1241,7 @@ bspline_assemble_offedge_block_kernel(
                         for (int pP = 0; pP < NM*NM; pP++) {
                             double sr_ = 0.0, si_ = 0.0;
                             const double *w_row = &wuwu[pP * n_pairs];
-                            #pragma omp simd reduction(+:sr_,si_)
+                            PYSIM_OMP_SIMD(reduction(+:sr_,si_))
                             for (size_t qr = 0; qr < n_pairs; qr++) {
                                 sr_ += w_row[qr]*G_re[qr];
                                 si_ += w_row[qr]*G_im[qr];
@@ -1913,9 +1929,9 @@ sinusoidal_field_tensor(
         // Split cos and sin into separate omp-simd loops (libmvec has no vector
         // sincos) so each body stays vectorizable to _ZGVdN4v_{cos,sin}
         // (AVX2, 4 doubles per call).
-        #pragma omp simd
+        PYSIM_OMP_SIMD()
         for (size_t i = 0; i < P; i++) cphb[i] = std::cos(ph[i]);
-        #pragma omp simd
+        PYSIM_OMP_SIMD()
         for (size_t i = 0; i < P; i++) sphb[i] = std::sin(ph[i]);
 
         // ---- Stage C: assembly --------------------------------------------

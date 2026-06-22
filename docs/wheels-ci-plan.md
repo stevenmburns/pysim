@@ -10,7 +10,7 @@ Decisions locked (2026-06-22):
 | Decision        | Choice                          | Rationale |
 |-----------------|---------------------------------|-----------|
 | CPU baseline    | **AVX2 + FMA** (Haswell/Zen+)   | "modern" target; keeps the libmvec sincos win on Linux; simplest |
-| Windows toolchain | **MSVC `/openmp:experimental`** | See note below — `:llvm` was the initial pick but the VS18 compiler rejects `#pragma omp simd` under it; `:experimental` keeps simd + the redistributable `vcomp140.dll`. `collapse(2)` is dropped on MSVC. No libmvec on Windows |
+| Windows toolchain | **MSVC `/openmp:llvm`** | See "Resolved" note — `:llvm` takes `collapse` + `size_t` indices natively; the `omp simd` directives are neutralized on MSVC (`:llvm` rejects them, `:experimental` mangles their reductions). No libmvec on Windows |
 | Distribution    | **GitHub Release artifacts**    | No public PyPI commitment; antenna_designer pins a release wheel |
 
 This work lives **in the pysim repo** (its own `.github/workflows/`), not in
@@ -42,12 +42,12 @@ from setuptools import setup
 from pybind11.setup_helpers import Pybind11Extension
 
 if sys.platform == "win32":
-    # /openmp:experimental => OpenMP 2.0 + the `simd` directives the kernels
-    # use; it links the redistributable vcomp140.dll. It does NOT support
-    # `collapse`, which the .cpp drops on MSVC (see Step 2). /arch:AVX2 matches
-    # the Linux AVX2 baseline. No libmvec on Windows: the declare-simd cos/sin
-    # block in the .cpp is guarded out (see Step 2), sincos stays scalar/autovec.
-    extra_compile_args = ["/O2", "/arch:AVX2", "/openmp:experimental", "/fp:fast"]
+    # /openmp:llvm => OpenMP 3.0 collapse + unsigned (size_t) loop indices, so
+    # the parallel-for loops need no changes. It rejects `omp simd`, which the
+    # .cpp neutralizes on MSVC (see Step 2). /arch:AVX2 matches the Linux AVX2
+    # baseline. No libmvec on Windows: the declare-simd cos/sin block in the
+    # .cpp is guarded out (see Step 2), sincos stays scalar/autovec.
+    extra_compile_args = ["/O2", "/arch:AVX2", "/openmp:llvm", "/fp:fast"]
     extra_link_args = []
 else:
     extra_compile_args = [
@@ -88,11 +88,13 @@ Also verify/drop `#include <complex.h>` (line 4) — on MSVC it defines a
 `complex` macro that collides with `std::complex`. The file uses `std::complex`
 throughout, so `<complex.h>` is likely unnecessary; remove it or guard it.
 
-The `#pragma omp simd` sites (many) need no change — `/openmp:experimental`
-accepts them. The `#pragma omp parallel for collapse(2)` sites (7) are routed
-through a `PYSIM_OMP_PARALLEL_FOR_COLLAPSE2` macro that expands to plain
-`parallel for` under `_MSC_VER` (experimental has no `collapse`) and to the
-full `collapse(2)` form on GCC.
+The `#pragma omp simd` sites (19) are routed through a `PYSIM_OMP_SIMD(...)`
+macro that expands to nothing under `_MSC_VER` (so `/arch:AVX2` autovec handles
+those loops) and to the real `omp simd` directive on GCC. The
+`#pragma omp parallel for collapse(2)` sites (7) go through a
+`PYSIM_OMP_PARALLEL_FOR_COLLAPSE2` macro (plain `parallel for` on MSVC, full
+`collapse(2)` on GCC). `/openmp:llvm` would accept `collapse` and `size_t`
+indices natively; the macros just keep Windows OpenMP usage minimal.
 
 ## Step 3 — cibuildwheel config in `pyproject.toml`
 
@@ -164,16 +166,30 @@ requirement). Submodule can stay for source/dev; the wheel is for consumers.
 
 ## Resolved during implementation
 
-1. **Windows OpenMP mode (the `:llvm` → `:experimental` pivot).** The initial
-   plan assumed `/openmp:llvm` covers both `collapse` and `simd`. The first
-   `windows-latest` CI run (PR #93) disproved that on MSVC 14.51 / VS18:
-   `error C7660: 'simd': requires '-openmp:experimental'` — `:llvm` accepts
-   `collapse` but rejects the `simd` directive, and the two MSVC OpenMP modes
-   are mutually exclusive. Resolution: build with `/openmp:experimental` (keeps
-   all `#pragma omp simd`, links the redistributable `vcomp140.dll`, sidesteps
-   the libomp redistribution question entirely) and macro-drop `collapse(2)` to
-   plain outer-loop `parallel for` under `_MSC_VER`. Correctness is unchanged;
-   only the (i, j)-grid load balancing is coarser on Windows.
+1. **Windows OpenMP mode (two CI rounds to settle).** The initial plan assumed
+   `/openmp:llvm` covers both `collapse` and `simd`. Two `windows-latest` runs
+   on PR #93 mapped the real MSVC 14.51 / VS18 behavior, which contradicts the
+   2023 docs:
+   - `/openmp:llvm`: supports `collapse` **and** unsigned (`size_t`) loop
+     indices (OpenMP 3.0), but **rejects** `#pragma omp simd`
+     (`error C7660: 'simd' requires '-openmp:experimental'`).
+   - `/openmp:experimental`: supports `omp simd`, but **rejects** unsigned loop
+     indices (`error C3016: index variable ... must have signed integral type`)
+     **and** silently drops simd `reduction` clauses (`warning C4849`) — a
+     correctness hazard.
+
+   The kernels use all three (`collapse`, `size_t` indices, simd reductions), so
+   no single mode compiles them correctly. Resolution: build with
+   **`/openmp:llvm`** (no loop-counter changes needed — it takes `collapse` and
+   `size_t` natively) and **neutralize the `omp simd` directives under
+   `_MSC_VER`** via a `PYSIM_OMP_SIMD()` macro, leaving `/arch:AVX2`
+   autovectorization to handle the inner loops as correct scalar-reduction code.
+   `collapse(2)` is additionally macro-dropped on MSVC to keep Windows OpenMP
+   usage minimal (optional under `:llvm`). The GCC build is untouched and still
+   binds the libmvec AVX2 sincos (`_ZGVdN4v_{cos,sin}`). Open item this
+   introduces: `/openmp:llvm` links `libomp140.x86_64.dll`, which delvewheel
+   must vendor into the wheel — the wheel-import test step in CI is what
+   confirms it.
 
 2. **libmvec under auditwheel.** libmvec is part of glibc, so it's on the
    manylinux allowlist — auditwheel won't try to vendor it and won't reject the
