@@ -6,23 +6,20 @@ name: wheels
 # manylinux container, and wheel repair (auditwheel on Linux, delvewheel on
 # Windows).
 #
-# Triggers:
-#   - workflow_dispatch: manual validation runs while bringing the matrix green.
-#   - pull_request (build-affecting paths only): catch breakage on PRs that
-#     touch the extension or its build config, without running on every PR.
-#   - push tags v*: build + attach the wheels to the GitHub Release.
+# Triggers (deliberately NOT pull_request — the 4-8 min cross-platform matrix
+# must never block PR feedback):
+#   - push to main: post-merge validation, so main always builds clean wheels
+#     on both platforms. The fast Linux-compile smoke already runs per-PR in
+#     ci.yml's `test` job (`pip install -e .` builds the extension), so the only
+#     gap this leaves is Windows/MSVC-specific breakage, caught here on merge.
+#   - push tags v*: build + attach the wheels (+ sdist) to the GitHub Release.
+#   - workflow_dispatch: run the full matrix manually on a branch before merging
+#     a build-affecting change, when you want cross-platform coverage pre-merge.
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - "setup.py"
-      - "pyproject.toml"
-      - "MANIFEST.in"
-      - "src/pysim/_accelerators.cpp"
-      - "src/pysim/_bspline_static_moments_inline.h"
-      - ".github/workflows/wheels.yml"
   push:
+    branches: ["main"]
     tags: ["v*"]
 
 jobs:
