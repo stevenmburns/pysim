@@ -37,6 +37,19 @@ extern "C" double cos(double);
 extern "C" double sin(double);
 #endif
 
+// The (i, j)-grid parallel loops below use `collapse(2)` for finer load
+// balancing. MSVC builds with /openmp:experimental (required for the
+// `#pragma omp simd` directives in the inner loops), which does NOT support the
+// OpenMP 3.0 `collapse` clause. Fall back to plain outer-loop parallelism
+// there — same results, only coarser scheduling across the grid. GCC keeps
+// collapse(2).
+#if defined(_MSC_VER)
+#  define PYSIM_OMP_PARALLEL_FOR_COLLAPSE2 _Pragma("omp parallel for schedule(static)")
+#else
+#  define PYSIM_OMP_PARALLEL_FOR_COLLAPSE2 \
+       _Pragma("omp parallel for collapse(2) schedule(static)")
+#endif
+
 // Batched cross-segment Gauss-Legendre quadrature in 3D.
 //
 // For each k in k_array, and each (i, j) segment pair, compute:
@@ -133,7 +146,7 @@ seg_seg_quad_batch_3d(
         }
     }
 
-    #pragma omp parallel for collapse(2) schedule(static)
+    PYSIM_OMP_PARALLEL_FOR_COLLAPSE2
     for (size_t i = 0; i < N_i; i++) {
         for (size_t j = 0; j < N_j; j++) {
             // n_qp <= 8 in practice, so n_qp^2 <= 64. Stack-allocated, aligned
@@ -314,7 +327,7 @@ seg_seg_reg_quad_batch_1d(
         }
     }
 
-    #pragma omp parallel for collapse(2) schedule(static)
+    PYSIM_OMP_PARALLEL_FOR_COLLAPSE2
     for (size_t i = 0; i < N; i++) {
         for (size_t j = 0; j < N; j++) {
             // Same split-loop layout as seg_seg_quad_batch_3d: the per-(qr)
@@ -485,7 +498,7 @@ assemble_Z(
 
     const std::complex<double> j_unit(0.0, 1.0);
 
-    #pragma omp parallel for collapse(2) schedule(static)
+    PYSIM_OMP_PARALLEL_FOR_COLLAPSE2
     for (size_t kk = 0; kk < n_k; kk++) {
         for (size_t m = 0; m < n_basis; m++) {
             int64_t m_l = ls(m);
@@ -656,7 +669,7 @@ assemble_Z_general(
 
     const std::complex<double> j_unit(0.0, 1.0);
 
-    #pragma omp parallel for collapse(2) schedule(static)
+    PYSIM_OMP_PARALLEL_FOR_COLLAPSE2
     for (size_t kk = 0; kk < n_k; kk++) {
         for (size_t m = 0; m < n_basis; m++) {
             double omega_k = om(kk);
@@ -836,7 +849,7 @@ seg_seg_full_moments_bspline_kernel(
         }
     }
 
-    #pragma omp parallel for collapse(2) schedule(static)
+    PYSIM_OMP_PARALLEL_FOR_COLLAPSE2
     for (size_t i = 0; i < N_i; i++) {
         for (size_t j = 0; j < N_j; j++) {
             alignas(32) double R[64];
@@ -990,7 +1003,7 @@ assemble_Z_bspline_kernel(
     const double omega_mu = omega * mu_;
     const double inv_omega_eps = 1.0 / (omega * eps_);
 
-    #pragma omp parallel for collapse(2) schedule(static)
+    PYSIM_OMP_PARALLEL_FOR_COLLAPSE2
     for (size_t m = 0; m < n_basis; m++) {
         for (size_t n = 0; n < n_basis; n++) {
             double zA_re = 0.0, zA_im = 0.0;
@@ -1156,7 +1169,7 @@ bspline_assemble_offedge_block_kernel(
     const double omega_mu = omega * mu_;
     const double inv_omega_eps = 1.0 / (omega * eps_);
 
-    #pragma omp parallel for collapse(2) schedule(static)
+    PYSIM_OMP_PARALLEL_FOR_COLLAPSE2
     for (size_t m = 0; m < nI; m++) {
         for (size_t n = 0; n < nJ; n++) {
             double zA_re = 0.0, zA_im = 0.0, zPhi_re = 0.0, zPhi_im = 0.0;
