@@ -54,6 +54,27 @@ markers = [
 # not under src/) is importable from the pynec-backend tests.
 pythonpath = ["."]
 
+[tool.cibuildwheel]
+# Modern CPython only. requires-python is >=3.8, but 3.8/3.9 predate the
+# AVX2-baseline target; 3.10+ matches the "modern Linux/Windows" goal.
+build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
+# 64-bit glibc Linux + 64-bit Windows only. Skip musllinux (Alpine/musl has no
+# libmvec, and the -lmvec link in setup.py would fail), 32-bit, and PyPy.
+skip = "*-musllinux_* *_i686 *-win32 pp*"
+test-requires = "pytest"
+# Only the three core solver test modules exercise the C++ accelerator and run
+# without the web/PyNEC integration deps (fastapi + a separately-built PyNEC).
+# -m skips slow/plot. cibuildwheel runs this from a temp dir against the
+# installed wheel, so `import pysim` resolves to the wheel, not src/.
+test-command = 'pytest {project}/tests/test_pysim.py {project}/tests/test_hmatrix.py {project}/tests/test_array_block.py -m "not slow and not plot"'
+
+[tool.cibuildwheel.linux]
+# glibc >= 2.28 ships libmvec; manylinux2014 (glibc 2.17) does NOT, so the
+# -lmvec link in setup.py would fail. _2_28 is the right "modern Linux" floor.
+# (It is also cibuildwheel 3.x+'s default, but pin it explicitly so a future
+# default change can't silently drop libmvec.)
+manylinux-x86_64-image = "manylinux_2_28"
+
 [tool.ruff]
 # Vendored upstream source (PyNEC + necpp) — never lint.
 extend-exclude = ["python-necpp"]
