@@ -18,6 +18,7 @@ on:
     paths:
       - "setup.py"
       - "pyproject.toml"
+      - "MANIFEST.in"
       - "src/pysim/_accelerators.cpp"
       - "src/pysim/_bspline_static_moments_inline.h"
       - ".github/workflows/wheels.yml"
@@ -44,9 +45,30 @@ jobs:
           name: wheels-${{ matrix.os }}
           path: ./wheelhouse/*.whl
 
+  make_sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist
+        run: pipx run build --sdist
+      - name: Verify the sdist builds the extension from source
+        # Compiling the extension from the sdist on a clean checkout is what
+        # catches a missing build input (e.g. the inline header that setuptools
+        # does not auto-include — see MANIFEST.in). ubuntu-latest's glibc ships
+        # libmvec, so the Linux build path here matches the wheels.
+        run: |
+          python -m pip install --upgrade pip
+          pip install dist/*.tar.gz
+          python -c "import pysim._accelerators; from pysim import triangular as t; assert t._HAVE_ASSEMBLE_Z and t._HAVE_ASSEMBLE_Z_GENERAL"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: ./dist/*.tar.gz
+
   release:
-    name: attach wheels to release
-    needs: build_wheels
+    name: attach wheels + sdist to release
+    needs: [build_wheels, make_sdist]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
@@ -56,7 +78,9 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Attach wheels to the GitHub Release
+      - name: Attach wheels + sdist to the GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.whl
+          files: |
+            dist/*.whl
+            dist/*.tar.gz

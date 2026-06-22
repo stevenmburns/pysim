@@ -204,10 +204,15 @@ requirement). Submodule can stay for source/dev; the wheel is for consumers.
 
 ## Suggested PR sequence (in pysim)
 
-1. PR A: `setup.py` + `.cpp` guards so the extension **builds on Windows
-   locally** (verify on a Windows box or a throwaway `windows-latest` run via
-   `workflow_dispatch`). Correctness first.
-2. PR B: add `[tool.cibuildwheel]` + `wheels.yml`, driven by
-   `workflow_dispatch`, until the full matrix is green.
-3. PR C: turn on the tag-triggered `release` job; cut a `v0.0.1` tag.
-4. antenna_designer: switch its pysim dependency to the release wheel.
+1. PR A (#92, merged): `setup.py` + `.cpp` portability so the extension builds
+   on Windows. Correctness first.
+2. PR B (#93, merged): `[tool.cibuildwheel]` + `wheels.yml` (build_wheels +
+   tag-gated release job), driven to green on both OSes. Settled the MSVC
+   OpenMP mode (see "Resolved") and added a wheel-load assertion.
+3. PR C: add an `sdist` job so the release ships a source tarball too (a
+   binary-only release breaks `pip install` on any unlisted interpreter/platform
+   and blocks a future PyPI move). Needs `MANIFEST.in` to ship the inline header
+   that setuptools doesn't auto-include; the job builds the extension from the
+   sdist on every run to keep that honest. Then cut a `v0.0.1` tag to fire the
+   release.
+4. antenna_designer: switch its pysim dependency to the release wheel/sdist.

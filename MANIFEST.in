@@ -1,0 +1,4 @@
+# setuptools auto-includes the C++ ext source (_accelerators.cpp) in the sdist,
+# but not the header it pulls in via #include "_bspline_static_moments_inline.h".
+# Without this, a source build from the sdist fails to compile the extension.
+include src/pysim/_bspline_static_moments_inline.h
