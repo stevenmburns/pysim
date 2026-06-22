@@ -10,10 +10,15 @@ from pybind11.setup_helpers import Pybind11Extension
 # guards the libmvec-specific declarations to non-MSVC compilers. If the
 # extension fails to build/import, triangular.py falls back to pure Python.
 if sys.platform == "win32":
-    # /openmp:llvm gives the LLVM OpenMP runtime, which supports the OpenMP 3.1+
-    # `collapse` and `simd` constructs the kernels use; classic /openmp is only
-    # OpenMP 2.0 and rejects them. /arch:AVX2 matches the Linux AVX2 baseline.
-    extra_compile_args = ["/O2", "/arch:AVX2", "/openmp:llvm", "/fp:fast"]
+    # MSVC's OpenMP modes are mutually exclusive and, on this toolchain, no
+    # single one covers both constructs the kernels use: /openmp:experimental
+    # supports `#pragma omp simd` (used heavily) but not the OpenMP 3.0
+    # `collapse` clause, while /openmp:llvm is the reverse and ships a
+    # non-redistributable libomp DLL. We pick :experimental — it keeps the simd
+    # directives and links the redistributable vcomp140.dll — and the .cpp drops
+    # `collapse(2)` to plain outer-loop parallelism under _MSC_VER.
+    # /arch:AVX2 matches the Linux AVX2 baseline.
+    extra_compile_args = ["/O2", "/arch:AVX2", "/openmp:experimental", "/fp:fast"]
     extra_link_args = []
 else:
     extra_compile_args = [
