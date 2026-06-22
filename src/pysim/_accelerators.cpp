@@ -1,8 +1,13 @@
+// M_PI is not in the C++ standard. GCC/glibc define it unconditionally, but
+// MSVC only exposes it when _USE_MATH_DEFINES is set *before* the first math
+// header is pulled in (directly or transitively via pybind11). Must stay at
+// the very top of the file.
+#define _USE_MATH_DEFINES
+
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
-#include <complex.h>
-#include "math.h"
+#include <complex>
 
 #include <cmath>
 #include <iostream>
@@ -20,11 +25,17 @@ namespace py = pybind11;
 // <cmath> still resolve to these underlying extern-C symbols, so the rest of
 // the file's calls pick up the simd-vectorized form for free once the linker
 // has libmvec available (-lmvec in setup.py).
+//
+// Gated to GNU-compatible, non-MSVC compilers: this trick targets glibc's
+// libmvec specifically. MSVC has no libmvec and would choke on redeclaring the
+// CRT's cos/sin; there the sincos calls stay scalar/autovectorized.
+#if defined(__GNUC__) && !defined(_MSC_VER)
 #pragma omp declare simd notinbranch simdlen(4)
 extern "C" double cos(double);
 
 #pragma omp declare simd notinbranch simdlen(4)
 extern "C" double sin(double);
+#endif
 
 // Batched cross-segment Gauss-Legendre quadrature in 3D.
 //
