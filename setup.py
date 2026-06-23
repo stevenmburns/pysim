@@ -1,14 +1,18 @@
+import os
 import sys
 
 from setuptools import setup
 from pybind11.setup_helpers import Pybind11Extension
 
-# The accelerator is built on both platforms. The vectorization strategy
-# differs: Linux/GCC binds the inner sincos to glibc's libmvec (-lmvec) via the
-# `omp declare simd` block in _accelerators.cpp; Windows/MSVC has no libmvec, so
-# it relies on /arch:AVX2 autovectorization plus OpenMP parallelism. The .cpp
-# guards the libmvec-specific declarations to non-MSVC compilers. If the
-# extension fails to build/import, triangular.py falls back to pure Python.
+# The accelerator is built on all three platforms; the vectorization strategy
+# differs per platform. Linux/GCC binds the inner sincos to glibc's libmvec
+# (-lmvec) via the `omp declare simd` block in _accelerators.cpp; Windows/MSVC
+# has no libmvec, so it relies on /arch:AVX2 autovectorization plus OpenMP
+# parallelism; macOS Apple Silicon (arm64) has neither libmvec nor AVX2, so it
+# relies on Homebrew libomp for OpenMP parallelism and lets clang autovectorize
+# the inner loops for NEON. The .cpp guards the libmvec-specific declarations to
+# non-MSVC, non-Apple compilers. If the extension fails to build/import,
+# triangular.py falls back to pure Python.
 if sys.platform == "win32":
     # OpenMP on MSVC is a minefield for this code: /openmp:experimental rejects
     # unsigned loop indices (the kernels use size_t) and silently drops the
@@ -21,6 +25,30 @@ if sys.platform == "win32":
     # AVX2 baseline.
     extra_compile_args = ["/O2", "/arch:AVX2", "/openmp:llvm", "/fp:fast"]
     extra_link_args = []
+elif sys.platform == "darwin":
+    # Apple clang ships no OpenMP runtime and macOS has no libmvec, so this
+    # branch is deliberately the "simple pragmas" port: Homebrew's libomp gives
+    # us the OpenMP parallel-for + omp-simd directives (passed through Apple
+    # clang via -Xpreprocessor -fopenmp), and clang autovectorizes the inner
+    # sincos for NEON on its own. No -mavx2/-mfma (arm64 has no AVX2) and no
+    # -lmvec (no vectorized libm on macOS); the libmvec `declare simd` block in
+    # _accelerators.cpp is #ifdef'd off under __APPLE__. delocate vendors the
+    # libomp dylib into the wheel (the -rpath below points the extension at it).
+    _libomp = os.environ.get("LIBOMP_PREFIX", "/opt/homebrew/opt/libomp")
+    extra_compile_args = [
+        "-O3",
+        "-Xpreprocessor",
+        "-fopenmp",
+        # Same errno rationale as the Linux branch: let the vectorizer run.
+        "-fno-math-errno",
+        "-std=gnu++11",
+        f"-I{os.path.join(_libomp, 'include')}",
+    ]
+    extra_link_args = [
+        f"-L{os.path.join(_libomp, 'lib')}",
+        "-lomp",
+        f"-Wl,-rpath,{os.path.join(_libomp, 'lib')}",
+    ]
 else:
     extra_compile_args = [
         # Force -O3 -- Debian's Python CFLAGS inject -O2 before our flags

@@ -77,6 +77,17 @@ test-command = 'python -c "import momwire._accelerators; from momwire import tri
 # default change can't silently drop libmvec.)
 manylinux-x86_64-image = "manylinux_2_28"
 
+[tool.cibuildwheel.macos]
+# Native Apple Silicon only for this first cut (the macos-14 runner is arm64).
+# Intel macOS (x86_64) is intentionally out of scope.
+archs = ["arm64"]
+# libomp is provided by `brew install libomp` in the workflow; point setup.py's
+# darwin branch at it and pin the deployment target to the runner's floor.
+environment = { LIBOMP_PREFIX = "/opt/homebrew/opt/libomp", MACOSX_DEPLOYMENT_TARGET = "14.0" }
+# delocate (cibuildwheel's default macOS repair tool) vendors the libomp dylib
+# into the wheel. DYLD_LIBRARY_PATH lets it resolve libomp.dylib by its rpath.
+repair-wheel-command = "DYLD_LIBRARY_PATH=$(brew --prefix libomp)/lib delocate-wheel --require-archs {delocate_archs} -w {dest_dir} -v {wheel}"
+
 [tool.ruff.lint]
 ignore = ["E741"]
 # Keep "imported but unused" as a warning instead of auto-stripping.
