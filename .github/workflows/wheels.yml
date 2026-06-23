@@ -1,6 +1,6 @@
 name: wheels
 
-# Build redistributable wheels containing the pysim._accelerators C++ extension
+# Build redistributable wheels containing the momwire._accelerators C++ extension
 # for modern Linux (manylinux_2_28, libmvec path) and Windows (MSVC,
 # /openmp:llvm + /arch:AVX2). cibuildwheel handles the per-Python matrix, the
 # manylinux container, and wheel repair (auditwheel on Linux, delvewheel on
@@ -32,7 +32,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-        # The extension builds from src/pysim only — no external sources. (The
+        # The extension builds from src/momwire only — no external sources. (The
         # PyNEC backend tests, which need a separately-installed PyNEC wheel,
         # are excluded from the wheel test-command.)
       - name: Build wheels
@@ -57,7 +57,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install dist/*.tar.gz
-          python -c "import pysim._accelerators; from pysim import triangular as t; assert t._HAVE_ASSEMBLE_Z and t._HAVE_ASSEMBLE_Z_GENERAL"
+          python -c "import momwire._accelerators; from momwire import triangular as t; assert t._HAVE_ASSEMBLE_Z and t._HAVE_ASSEMBLE_Z_GENERAL"
       - uses: actions/upload-artifact@v4
         with:
           name: sdist

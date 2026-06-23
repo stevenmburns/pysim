@@ -48,8 +48,8 @@ else:
 
 ext_modules = [
     Pybind11Extension(
-        "pysim._accelerators",
-        ["src/pysim/_accelerators.cpp"],
+        "momwire._accelerators",
+        ["src/momwire/_accelerators.cpp"],
         extra_compile_args=extra_compile_args,
         extra_link_args=extra_link_args,
     ),
@@ -57,6 +57,6 @@ ext_modules = [
 
 setup(
     ext_modules=ext_modules,
-    packages=["pysim"],
+    packages=["momwire"],
     package_dir={"": "src/"},
 )

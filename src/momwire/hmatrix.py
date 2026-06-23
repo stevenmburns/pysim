@@ -1,7 +1,7 @@
 """Hierarchical (H-matrix / ACA) B-spline Galerkin MoM solver.
 
-`HMatrixPySim` is a distance-based accelerator built on top of
-`BSplinePySim`. It reuses BSplinePySim's geometry build, basis-polynomial
+`HMatrixSolver` is a distance-based accelerator built on top of
+`BSplineSolver`. It reuses BSplineSolver's geometry build, basis-polynomial
 extraction, kernels, source vectors, and KCL machinery verbatim; the only
 thing it replaces is the *dense* O(N²) impedance-matrix assembly + dense LU
 solve.
@@ -14,7 +14,7 @@ The plan (phased — see project notes):
     moment tensor. Well-separated (admissible) blocks contain no same-edge
     segment pairs, so they need only the off-edge full-kernel quadrature;
     near blocks additionally overwrite same-edge pairs with the analytic
-    static + regularised split, identical to `BSplinePySim._build_J_blocks`.
+    static + regularised split, identical to `BSplineSolver._build_J_blocks`.
     This evaluator is the foundation everything else stands on: ACA can only
     be as correct as the entries it samples.
 
@@ -41,7 +41,7 @@ import numpy as np
 import scipy.sparse as sp
 from scipy.sparse.linalg import splu
 
-from .bspline import BSplinePySim
+from .bspline import BSplineSolver
 from ._bspline_kernels import (
     _seg_seg_full_moments_offedge,
     _seg_seg_reg_moments,
@@ -192,12 +192,12 @@ class _AugmentedFactoredSolve:
         return X, [total_iters] * s
 
 
-class HMatrixPySim(BSplinePySim):
+class HMatrixSolver(BSplineSolver):
     """Distance-based hierarchical accelerator for the B-spline MoM.
 
-    Drop-in for `BSplinePySim` (same constructor); Phase 0 only adds the
+    Drop-in for `BSplineSolver` (same constructor); Phase 0 only adds the
     block-evaluator plumbing. `compute_impedance` / `compute_y_matrix` still
-    resolve to the dense BSplinePySim path until later phases override them,
+    resolve to the dense BSplineSolver path until later phases override them,
     so the class is usable and correct from the start.
     """
 
@@ -300,7 +300,7 @@ class HMatrixPySim(BSplinePySim):
         within-edge segment sub-range [lo, hi] (inclusive) of one edge. Shape
         (d+1, d+1, W, W) with W = hi - lo + 1, indexed by (local_idx - lo).
 
-        Same formula as `BSplinePySim._build_J_blocks`'s same-edge overwrite,
+        Same formula as `BSplineSolver._build_J_blocks`'s same-edge overwrite,
         but restricted to the sub-range a block actually touches — O(W²)
         instead of the full O(N_edge²). A near block spans ~2·leaf_size
         segments, so W stays small and the same-edge fill is O(N·leaf) total
@@ -331,7 +331,7 @@ class HMatrixPySim(BSplinePySim):
     def _moment_subtensor(self, ctx, seg_I, seg_J, k, same_edge=True):
         """Moment tensor J_pq between the global segment lists seg_I, seg_J,
         shape (d+1, d+1, |seg_I|, |seg_J|), matching the corresponding slice
-        of `BSplinePySim._build_J_blocks`.
+        of `BSplineSolver._build_J_blocks`.
 
         Off-edge pairs use the full-kernel GL quadrature. When `same_edge` is
         True, pairs that share an edge are overwritten with the analytic
@@ -390,7 +390,7 @@ class HMatrixPySim(BSplinePySim):
         `supp_*_local` are the wing→local-segment index tables (values index
         into Jsub's last two axes / td_sub), `polys_*` the per-basis poly
         coefficients, `td_sub` the tangent-dot table over the local segments.
-        Bit-for-bit the same arithmetic as `BSplinePySim._assemble_Z`'s numpy
+        Bit-for-bit the same arithmetic as `BSplineSolver._assemble_Z`'s numpy
         fallback, restricted to the block.
         """
         d = self.degree
@@ -477,10 +477,10 @@ class HMatrixPySim(BSplinePySim):
 
         a single combined minus sign capturing both the image current's
         anti-parallel horizontal direction and the image charge sign flip (see
-        `BSplinePySim.compute_impedance`). The mirror always separates the image
+        `BSplineSolver.compute_impedance`). The mirror always separates the image
         from the real geometry, so every pair is off-edge — full GL quadrature
         throughout, no same-edge analytic overwrite (mirrors
-        `BSplinePySim._build_J_image_blocks`)."""
+        `BSplineSolver._build_J_image_blocks`)."""
         if k is None:
             k = self.k
         ctx = self._context()
@@ -521,7 +521,7 @@ class HMatrixPySim(BSplinePySim):
         """The (tx, ty, -tz)-flipped trial tangents as columns, so
         ``t_I @ _image_tangent_dot_cols(t_J)`` is the image tangent-dot table
         (rows = real test, cols = image trial) — the block form of
-        `BSplinePySim._image_tangent_dot`."""
+        `BSplineSolver._image_tangent_dot`."""
         return (tangents_J * np.array([1.0, 1.0, -1.0])).T
 
     # ------------------------------------------------------------------
@@ -862,7 +862,7 @@ class HMatrixPySim(BSplinePySim):
     def _make_preconditioner(self, H, kcl_A):
         """Build the augmented near-field preconditioner for operator `H`. The
         generic H-matrix path uses a single sparse LU; subclasses with block
-        structure (e.g. `ArrayBlockPySim`) override this with a cheaper
+        structure (e.g. `ArrayBlockSolver`) override this with a cheaper
         block-wise factorisation."""
         return _SparseAugPrecond(self._near_sparse(H, H.n), kcl_A)
 
@@ -902,7 +902,7 @@ class HMatrixPySim(BSplinePySim):
     def _build_operator(self):
         """Build the fast operator the constrained solve runs GMRES on. The
         generic accelerator returns its H-matrix; subclasses with a different
-        structural decomposition (e.g. `ArrayBlockPySim`) override this and
+        structural decomposition (e.g. `ArrayBlockSolver`) override this and
         feed the result through the same `_solve_hmatrix` machinery (the solve
         only needs `.n`, `.matvec`, and `.near`/`.precond_extra`)."""
         return self.build_hmatrix()

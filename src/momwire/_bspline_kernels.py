@@ -40,7 +40,7 @@ except ImportError:
 
 # Currently the C++ accelerator has explicit instantiations for D in {1, 2}.
 # Extend by adding `seg_seg_full_moments_bspline_kernel<3>(...)` and a switch
-# case in src/pysim/_accelerators.cpp.
+# case in src/momwire/_accelerators.cpp.
 _BSPLINE_ACCEL_MAX_D = 2
 
 MAX_D_SUPPORTED = 2

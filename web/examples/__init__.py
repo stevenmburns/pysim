@@ -9,7 +9,7 @@ and the matching `from . import <name>` line below.
 The registry is intentionally web-layer (not solver-core) — each example
 parses the request dict, calls shared helpers in `web.server` /
 `web.pynec_backend`, and produces the JSON-shaped response the frontend
-consumes. The solver package `pysim/` stays free of UI concerns.
+consumes. The solver package `momwire/` stays free of UI concerns.
 """
 
 from __future__ import annotations

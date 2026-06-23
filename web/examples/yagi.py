@@ -37,7 +37,7 @@ def _polylines(
 
 def _derive(req: dict, ground_z_offset: float):
     """Pull the request knobs and compute the derived geometry quantities
-    that both pysim_solve and pysim_sweep need."""
+    that both momwire_solve and momwire_sweep need."""
     from web.server import C_LIGHT
 
     n_per_wire = int(req.get("n_per_wire", 30))
@@ -81,13 +81,13 @@ def _derive(req: dict, ground_z_offset: float):
     }
 
 
-def pysim_solve(req: dict) -> dict:
+def momwire_solve(req: dict) -> dict:
     from web.server import (
         C_LIGHT,
         _PEC_GROUND_EPS_R,
         _PEC_GROUND_SIGMA,
-        _make_pysim_sim,
-        _pack_pysim_wires,
+        _make_momwire_sim,
+        _pack_momwire_wires,
         _read_ground,
     )
 
@@ -99,7 +99,7 @@ def pysim_solve(req: dict) -> dict:
     n_per_wire = d["n_per_wire"]
     wavelength_meas = C_LIGHT / (meas_freq_mhz * 1e6)
 
-    sim = _make_pysim_sim(
+    sim = _make_momwire_sim(
         req,
         wires=d["polylines"],
         n_per_edge_per_wire=[[n_per_wire]] * len(d["polylines"]),
@@ -137,9 +137,9 @@ def pysim_solve(req: dict) -> dict:
     for i in range(n_directors):
         knot_arrays.append(_knots_at((i + 1) * dir_spacing_m, h_dir))
         labels.append(f"director {i + 1}" if n_directors > 1 else "director")
-    wires = _pack_pysim_wires(sim, coeffs, knot_arrays, labels)
+    wires = _pack_momwire_wires(sim, coeffs, knot_arrays, labels)
 
-    # Feed: TriangularPySim picks the interior knot of the driver closest to
+    # Feed: TriangularSolver picks the interior knot of the driver closest to
     # the wire midpoint (= h_driver in arc length); for N segments along
     # [-h_driver, +h_driver] that's the middle interior knot at index N//2.
     feed_knot_index = N // 2
@@ -168,15 +168,15 @@ def pysim_solve(req: dict) -> dict:
     }
 
 
-def pysim_sweep(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[float]]:
-    """Batched sweep using the pysim model's compute_impedance_swept."""
-    from web.server import C_LIGHT, _make_pysim_sim, _read_ground
+def momwire_sweep(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[float]]:
+    """Batched sweep using the momwire model's compute_impedance_swept."""
+    from web.server import C_LIGHT, _make_momwire_sim, _read_ground
 
     ground_on, _, z_offset = _read_ground(req)
     d = _derive(req, z_offset)
     n_per_wire = d["n_per_wire"]
 
-    sim = _make_pysim_sim(
+    sim = _make_momwire_sim(
         req,
         wires=d["polylines"],
         n_per_edge_per_wire=[[n_per_wire]] * len(d["polylines"]),
@@ -360,7 +360,7 @@ def pynec_solve(req: dict) -> dict:
             )
         )
 
-    # Feed marker: middle interior knot of driver (matches TriangularPySim).
+    # Feed marker: middle interior knot of driver (matches TriangularSolver).
     interior_arc = np.linspace(0.0, 2 * h_driver, N + 1)[1:-1]
     m_center_interior = int(np.argmin(np.abs(interior_arc - h_driver)))
     feed_knot_index = m_center_interior + 1
@@ -395,8 +395,8 @@ EXAMPLE = register(
     AntennaExample(
         name="yagi",
         label="Yagi",
-        pysim_solve=pysim_solve,
-        pysim_sweep=pysim_sweep,
+        momwire_solve=momwire_solve,
+        momwire_sweep=momwire_sweep,
         pynec_build=pynec_build,
         pynec_solve=pynec_solve,
         param_schema=(

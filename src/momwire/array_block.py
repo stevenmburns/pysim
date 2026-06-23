@@ -1,7 +1,7 @@
 """Element-aware block-low-rank solver for antenna arrays.
 
-`ArrayBlockPySim` is a structural accelerator for the B-spline MoM, a sibling
-of `HMatrixPySim`. Where the generic H-matrix partitions the impedance matrix
+`ArrayBlockSolver` is a structural accelerator for the B-spline MoM, a sibling
+of `HMatrixSolver`. Where the generic H-matrix partitions the impedance matrix
 with a geometry-blind binary space-partition cluster tree, this solver uses the
 *structural* partition an array hands it for free: a `P`-element array is a
 `P x P` grid of blocks — strong dense self-blocks on the diagonal, weak
@@ -17,7 +17,7 @@ measurements behind it. This file is being built up phase by phase:
     routines confirmed the design's load-bearing measurements (self-blocks
     identical within a shape class, weak + low-rank coupling).
 
-  * P1: `ArrayBlockPySim.build_array_blocks()` assembles the impedance matrix
+  * P1: `ArrayBlockSolver.build_array_blocks()` assembles the impedance matrix
     as an `ArrayBlock` — one dense self-block per distinct shape class (reused
     across same-shape elements; the P0-verified ~2e-12 identity) plus an
     ACA-compressed low-rank coupling block per element pair, with the
@@ -25,12 +25,12 @@ measurements behind it. This file is being built up phase by phase:
     fast `matvec` that reproduces the dense `Z @ x`.
 
   * P2: the constrained solve. `ArrayBlock` exposes its dense self-blocks as
-    `.near`, so `ArrayBlockPySim` runs the inherited `_solve_hmatrix`
+    `.near`, so `ArrayBlockSolver` runs the inherited `_solve_hmatrix`
     augmented-GMRES verbatim — the block-diagonal self-blocks become the
     block-Jacobi preconditioner and the KCL junction constraints go in the
     saddle rows. Because coupling is ~1e-4 of the self-blocks, GMRES converges
     in a handful of iterations (5 on `invveearray`, 9 on `bowtiearray2x4`);
-    impedance/Y match dense `BSplinePySim` to ~1e-5.
+    impedance/Y match dense `BSplineSolver` to ~1e-5.
 
   * P3: identical-element + block-Toeplitz reuse. Self-blocks are one-per-shape.
     Coupling blocks are deduplicated by `(shape_a, shape_b, displacement)`:
@@ -50,7 +50,7 @@ measurements behind it. This file is being built up phase by phase:
         the dense self-block assembly is reused across frames and only the
         cheap coupling blocks recompute.
     The factorisation itself is cached on the operator (see
-    `HMatrixPySim._factored_solve`), so a reused operator never refactors.
+    `HMatrixSolver._factored_solve`), so a reused operator never refactors.
 
   * Solve internals (post-profiling): the constrained solve is a
     left-preconditioned *block* GMRES over all RHS at once (batched `matmat` +
@@ -62,9 +62,9 @@ measurements behind it. This file is being built up phase by phase:
     cut the dominant repeated-apply costs the profiler flagged (~2× on the
     preconditioner apply for `bowtiearray2x4`).
 
-`ArrayBlockPySim` subclasses `HMatrixPySim`, reusing its `_context`, `zblock`,
+`ArrayBlockSolver` subclasses `HMatrixSolver`, reusing its `_context`, `zblock`,
 the C++ off-edge block assembler, and `aca_partial` verbatim; the grouping
-reuses BSplinePySim's geometry/basis build. Nothing here touches the kernel.
+reuses BSplineSolver's geometry/basis build. Nothing here touches the kernel.
 """
 
 import numpy as np
@@ -74,7 +74,7 @@ from ._aca import aca_partial
 from .hmatrix import (
     _HAVE_OFFEDGE_BLOCK_ACCEL,
     _OFFEDGE_BLOCK_ACCEL_MAX_D,
-    HMatrixPySim,
+    HMatrixSolver,
 )
 
 
@@ -360,7 +360,7 @@ class ArrayBlock:
         self.shape_blocks = shape_blocks
         self.coupling = coupling
         # Dense self-blocks as (I, J, D) triples, so the block decomposition is
-        # a drop-in for `HMatrixPySim._solve_hmatrix`: its near-field
+        # a drop-in for `HMatrixSolver._solve_hmatrix`: its near-field
         # preconditioner becomes the block-diagonal of Z (block-Jacobi), which
         # — because coupling is ~1e-4 of the self-blocks — drives GMRES to a
         # handful of iterations. `precond_extra` (the H-matrix's first-ring
@@ -511,14 +511,14 @@ class _BlockJacobiAugPrecond:
         return out
 
 
-class ArrayBlockPySim(HMatrixPySim):
+class ArrayBlockSolver(HMatrixSolver):
     """Element-aware block-low-rank accelerator for arrays of identical (or
-    few-shape) elements. Drop-in for `HMatrixPySim` (same constructor).
+    few-shape) elements. Drop-in for `HMatrixSolver` (same constructor).
 
     P1 adds `array_partition()` (cached element grouping) and
     `build_array_blocks()` (the `ArrayBlock` assembly + matvec). The solve and
     `compute_impedance` / `compute_y_matrix` overrides arrive in P2; until then
-    they resolve to the dense `BSplinePySim` path via the base class.
+    they resolve to the dense `BSplineSolver` path via the base class.
     """
 
     def _hmatrix_unsupported(self):
@@ -526,7 +526,7 @@ class ArrayBlockPySim(HMatrixPySim):
         free-space block reuse survives the image method for a grid array — see
         `build_array_blocks`), so it only falls back to the dense path for
         singular enrichment, which still belongs there. This narrows the base
-        `HMatrixPySim` gate, which keeps excluding ground for the generic
+        `HMatrixSolver` gate, which keeps excluding ground for the generic
         hierarchical solver."""
         return self.use_singular_enrichment
 
@@ -576,13 +576,13 @@ class ArrayBlockPySim(HMatrixPySim):
         """Build the array-block operator (cached) for the constrained solve.
 
         `compute_impedance` / `compute_y_matrix` (inherited from
-        `HMatrixPySim`) run the same GMRES on it via `_solve_hmatrix`, with the
+        `HMatrixSolver`) run the same GMRES on it via `_solve_hmatrix`, with the
         block-diagonal self-blocks as the block-Jacobi preconditioner.
 
         The assembled operator is cached at module scope keyed by the full
         geometry + k + tol, so an animation *phase/excitation* sweep — geometry
         fixed, only the RHS changes — reuses both the operator and the
-        factorisation cached on it (`HMatrixPySim._factored_solve`), making each
+        factorisation cached on it (`HMatrixSolver._factored_solve`), making each
         frame a cheap multi-RHS back-substitution."""
         key = (
             self._geometry_cache_key(),

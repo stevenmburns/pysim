@@ -113,13 +113,13 @@ def _derive(req: dict, z_offset: float):
     }
 
 
-def pysim_solve(req: dict) -> dict:
+def momwire_solve(req: dict) -> dict:
     from web.server import (
         C_LIGHT,
         _PEC_GROUND_EPS_R,
         _PEC_GROUND_SIGMA,
-        _make_pysim_sim,
-        _pack_pysim_wires,
+        _make_momwire_sim,
+        _pack_momwire_wires,
         _polyline_knots,
         _read_ground,
     )
@@ -133,7 +133,7 @@ def pysim_solve(req: dict) -> dict:
     n_per_wire = d["n_per_wire"]
     wavelength_meas = C_LIGHT / (meas_freq_mhz * 1e6)
 
-    sim = _make_pysim_sim(
+    sim = _make_momwire_sim(
         req,
         wires=[geom["driver"], geom["reflector"]],
         n_per_edge_per_wire=[geom["npe_driver"], geom["npe_reflector"]],
@@ -162,7 +162,7 @@ def pysim_solve(req: dict) -> dict:
 
     return {
         "geometry": "moxon",
-        "wires": _pack_pysim_wires(
+        "wires": _pack_momwire_wires(
             sim, coeffs, [driver_knots, refl_knots], ["driver", "reflector"]
         ),
         "feed_wire_index": 0,
@@ -185,15 +185,15 @@ def pysim_solve(req: dict) -> dict:
     }
 
 
-def pysim_sweep(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[float]]:
-    from web.server import C_LIGHT, _make_pysim_sim, _read_ground
+def momwire_sweep(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[float]]:
+    from web.server import C_LIGHT, _make_momwire_sim, _read_ground
 
     ground_on, _, z_offset = _read_ground(req)
     d = _derive(req, z_offset)
     geom = d["geom"]
     n_per_wire = d["n_per_wire"]
 
-    sim = _make_pysim_sim(
+    sim = _make_momwire_sim(
         req,
         wires=[geom["driver"], geom["reflector"]],
         n_per_edge_per_wire=[geom["npe_driver"], geom["npe_reflector"]],
@@ -400,8 +400,8 @@ EXAMPLE = register(
     AntennaExample(
         name="moxon",
         label="Moxon",
-        pysim_solve=pysim_solve,
-        pysim_sweep=pysim_sweep,
+        momwire_solve=momwire_solve,
+        momwire_sweep=momwire_sweep,
         pynec_build=pynec_build,
         pynec_solve=pynec_solve,
         param_schema=(

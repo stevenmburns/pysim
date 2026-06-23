@@ -10,7 +10,7 @@ keys so single-feed-aware frontends keep working without change.
 This is the only example so far that uses the multi-feed AntennaExample
 fields (`multi_feed=True`, custom `pynec_pattern_excite`). The shapes it
 adds:
-  - pysim_sweep returns the 4-tuple (primary_re, primary_im, feeds_re,
+  - momwire_sweep returns the 4-tuple (primary_re, primary_im, feeds_re,
     feeds_im); the /sweep endpoint reads multi_feed to know to expect it.
   - pynec_pattern_excite is the multi-source NEC drive (two ex_card calls
     superposed) used in pattern().
@@ -31,7 +31,7 @@ _BOWTIE_EPS = 0.05
 
 
 # ---------------------------------------------------------------------------
-# pysim path
+# momwire path
 # ---------------------------------------------------------------------------
 
 
@@ -135,7 +135,7 @@ def _array_geometry(
 
     Element 1's junction wire-indices are shifted by n_wires_per_element
     (=4 for the bowtie). The returned `feeds` list is what
-    TriangularPySim(feeds=...) consumes.
+    TriangularSolver(feeds=...) consumes.
     """
     elem_l = _element_wires(
         slope, length, n_per_long_edge, y_offset=-del_y, z_offset=z_offset
@@ -195,7 +195,7 @@ def _feed_knot_index(
     feed_wire_global: int, feed_arclength: float, knots_per_wire: list[np.ndarray]
 ) -> int:
     """Interior knot of `feed_wire_global` whose arc-length from the wire's
-    start is closest to `feed_arclength`. Mirrors TriangularPySim's
+    start is closest to `feed_arclength`. Mirrors TriangularSolver's
     feed-basis-index convention so the frontend marker matches the actual
     delta-gap source location."""
     feed_knots = knots_per_wire[feed_wire_global]
@@ -208,13 +208,13 @@ def _feed_knot_index(
     return int(np.argmin(np.abs(interior_arc - feed_arclength))) + 1
 
 
-def pysim_solve(req: dict) -> dict:
+def momwire_solve(req: dict) -> dict:
     from web.server import (
         C_LIGHT,
         _PEC_GROUND_EPS_R,
         _PEC_GROUND_SIGMA,
-        _make_pysim_sim,
-        _pack_pysim_wires,
+        _make_momwire_sim,
+        _pack_momwire_wires,
         _polyline_knots,
         _read_ground,
     )
@@ -237,7 +237,7 @@ def pysim_solve(req: dict) -> dict:
         z_offset=z_offset,
     )
 
-    sim = _make_pysim_sim(
+    sim = _make_momwire_sim(
         req,
         wires=geom["wires"],
         n_per_edge_per_wire=geom["n_per_edge_per_wire"],
@@ -262,7 +262,7 @@ def pysim_solve(req: dict) -> dict:
         for half in ("L", "R")
         for part in ("top_arc", "bot_left_arc", "bot_right_arc", "feed")
     ]
-    wire_records = _pack_pysim_wires(sim, coeffs, knots_per_wire, wire_labels)
+    wire_records = _pack_momwire_wires(sim, coeffs, knots_per_wire, wire_labels)
 
     z_arr = np.atleast_1d(z_per_feed)
     feed_entries = []
@@ -309,12 +309,12 @@ def pysim_solve(req: dict) -> dict:
     }
 
 
-def pysim_sweep(
+def momwire_sweep(
     req: dict, freqs_mhz: list[float]
 ) -> tuple[list[float], list[float], list[list[float]], list[list[float]]]:
     """Multi-feed sweep returning the 4-tuple (primary_re, primary_im,
     feeds_re, feeds_im) where feeds_* is (n_freqs × n_feeds)."""
-    from web.server import C_LIGHT, _make_pysim_sim, _read_ground
+    from web.server import C_LIGHT, _make_momwire_sim, _read_ground
 
     args = _request_args(req)
     design_freq_mhz = float(req.get("design_freq_mhz", 28.47))
@@ -331,7 +331,7 @@ def pysim_sweep(
         args["phase_lr_deg"],
         z_offset=z_offset,
     )
-    sim = _make_pysim_sim(
+    sim = _make_momwire_sim(
         req,
         wires=geom["wires"],
         n_per_edge_per_wire=geom["n_per_edge_per_wire"],
@@ -361,7 +361,7 @@ def _pynec_element_polylines(
     slope: float, length: float, y_offset: float, z_offset: float
 ):
     """Return the 4 polylines of one bowtie element in the y-z plane (x=0)
-    at the given y_offset / z_offset. Same shapes as the pysim helper but
+    at the given y_offset / z_offset. Same shapes as the momwire helper but
     as plain tuples (no numpy arrays) so they round-trip into PyNEC's
     geo.wire() args by splat."""
     eps_b = _BOWTIE_EPS
@@ -383,7 +383,7 @@ def pynec_build(req: dict) -> dict:
 
     Two bowtie elements at y = ±del_y_m. Per element: 10 NEC wire cards
     (one per polyline edge — 5 + 2 + 2 + 1), tags grouped per polyline so
-    the per-polyline current concatenation matches the pysim wire shape
+    the per-polyline current concatenation matches the momwire wire shape
     the frontend already renders. Multi-feed drive applies V_0 = 1+0j on
     element 0's feed and V_1 = exp(j·π·phase_lr_deg/180) on element 1's
     feed — see `pynec_excite()` below.
@@ -634,8 +634,8 @@ EXAMPLE = register(
         name="bowtie",
         label="Bowtie 1×2 array",
         default_view="yz",
-        pysim_solve=pysim_solve,
-        pysim_sweep=pysim_sweep,
+        momwire_solve=momwire_solve,
+        momwire_sweep=momwire_sweep,
         pynec_build=pynec_build,
         pynec_solve=pynec_solve,
         pynec_pattern_excite=pynec_pattern_excite,

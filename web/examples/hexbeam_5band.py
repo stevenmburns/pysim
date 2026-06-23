@@ -175,7 +175,7 @@ def _request_bands(req: dict) -> list[dict]:
 
 def _build_per_band_geometry(req: dict, z_offset_global: float) -> dict:
     """Common driver: pull bands + global knobs, build per-band polylines,
-    and return the bundle both pysim and pynec paths consume.
+    and return the bundle both momwire and pynec paths consume.
     """
     from web.server import C_LIGHT
 
@@ -216,17 +216,17 @@ def _build_per_band_geometry(req: dict, z_offset_global: float) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# pysim path
+# momwire path
 # ---------------------------------------------------------------------------
 
 
-def pysim_solve(req: dict) -> dict:
+def momwire_solve(req: dict) -> dict:
     from web.server import (
         C_LIGHT,
         _PEC_GROUND_EPS_R,
         _PEC_GROUND_SIGMA,
-        _make_pysim_sim,
-        _pack_pysim_wires,
+        _make_momwire_sim,
+        _pack_momwire_wires,
         _polyline_knots,
         _read_ground,
     )
@@ -254,7 +254,7 @@ def pysim_solve(req: dict) -> dict:
         feeds.append((2 * i, band["feed_arclength"], 1.0 + 0.0j))
 
     wavelength_meas = C_LIGHT / (meas_freq_mhz * 1e6)
-    sim = _make_pysim_sim(
+    sim = _make_momwire_sim(
         req,
         wires=wires,
         n_per_edge_per_wire=n_per_edge,
@@ -306,7 +306,7 @@ def pysim_solve(req: dict) -> dict:
         knots_per_wire.append(_polyline_knots(band["reflector"], band["npe_reflector"]))
         wire_labels.append(f"band {i} driver ({band['freq_mhz']:.2f} MHz)")
         wire_labels.append(f"band {i} reflector ({band['freq_mhz']:.2f} MHz)")
-    wire_records = _pack_pysim_wires(sim, coeffs, knots_per_wire, wire_labels)
+    wire_records = _pack_momwire_wires(sim, coeffs, knots_per_wire, wire_labels)
 
     z_arr = np.atleast_1d(z_per_feed)
     feed_entries = []
@@ -362,7 +362,7 @@ def pysim_solve(req: dict) -> dict:
     }
 
 
-def pysim_sweep(
+def momwire_sweep(
     req: dict, freqs_mhz: list[float]
 ) -> tuple[list[float], list[float], list[list[float]], list[list[float]]]:
     """Multi-feed sweep returning the 4-tuple shape (primary_re,
@@ -374,7 +374,7 @@ def pysim_sweep(
     — moving a freq slider in the band group rebuilds geometry; this
     sweep just runs the existing geometry across many meas freqs.
     """
-    from web.server import C_LIGHT, _make_pysim_sim, _read_ground
+    from web.server import C_LIGHT, _make_momwire_sim, _read_ground
 
     design_freq_mhz = float(req.get("design_freq_mhz", 14.300))
     wire_radius = float(req.get("wire_radius", 0.0005))
@@ -392,7 +392,7 @@ def pysim_sweep(
         n_per_edge.append(band["npe_reflector"])
         feeds.append((2 * i, band["feed_arclength"], 1.0 + 0.0j))
 
-    sim = _make_pysim_sim(
+    sim = _make_momwire_sim(
         req,
         wires=wires,
         n_per_edge_per_wire=n_per_edge,
@@ -452,8 +452,8 @@ def pynec_build(req: dict) -> dict:
     G→H). The feed sits on tag `10*i + 3` (the T→S edge).
     """
     if bool(req.get("daisy_chain", False)):
-        # NEC's TL card path gave results inconsistent with pysim's
-        # network analysis in early testing — both pysim engines
+        # NEC's TL card path gave results inconsistent with momwire's
+        # network analysis in early testing — both momwire engines
         # (triangular + sinusoidal) agree with each other and pass
         # analytic checks (λ/4 transformer, parallel combinations),
         # while NEC's Z_in was nearly insensitive to jumper length
@@ -461,10 +461,10 @@ def pynec_build(req: dict) -> dict:
         # limitation when TL endpoints are also EM-coupled by being
         # physically close. Tracking separately. Until that's
         # resolved the PyNEC daisy-chain path raises; the user can
-        # switch to pysim to use this mode.
+        # switch to momwire to use this mode.
         raise NotImplementedError(
             "PyNEC daisy-chain mode is under investigation — "
-            "use the pysim backend (Triangular/B-spline/Sinusoidal) for now."
+            "use the momwire backend (Triangular/B-spline/Sinusoidal) for now."
         )
     from web.pynec_backend import C_LIGHT, nec
 
@@ -748,8 +748,8 @@ EXAMPLE = register(
     AntennaExample(
         name="hexbeam_5band",
         label="Hexbeam 5-band",
-        pysim_solve=pysim_solve,
-        pysim_sweep=pysim_sweep,
+        momwire_solve=momwire_solve,
+        momwire_sweep=momwire_sweep,
         pynec_build=pynec_build,
         pynec_solve=pynec_solve,
         pynec_pattern_excite=pynec_pattern_excite,

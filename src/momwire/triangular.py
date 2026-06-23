@@ -41,7 +41,7 @@ except ImportError:
     _HAVE_ASSEMBLE_Z_GENERAL = False
 
 
-class TriangularPySim:
+class TriangularSolver:
     """N-wire triangular Galerkin MoM, each wire a polyline with bends.
 
     wires: list of (M_w, 3) polyline arrays. M_w >= 2 anchor points per wire.

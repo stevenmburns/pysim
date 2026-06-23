@@ -1,7 +1,7 @@
 """Base types for the antenna-example registry.
 
 An `AntennaExample` bundles everything the web layer needs to serve one
-geometry: parameter schema, pysim solve/sweep, and pynec build/solve. Any
+geometry: parameter schema, momwire solve/sweep, and pynec build/solve. Any
 callable left as None signals the backend doesn't support that operation
 for this geometry.
 
@@ -19,11 +19,11 @@ from typing import Any, Callable, Optional, Tuple, Union
 # solve() and pattern() consume — see web/pynec_backend.py for the shape.
 PynecBuildFn = Callable[[dict], dict]
 
-# pysim solve / pynec solve: take a request dict, return the response dict
+# momwire solve / pynec solve: take a request dict, return the response dict
 # the frontend renders.
 SolveFn = Callable[[dict], dict]
 
-# pysim sweep: take a request dict + frequency list. Single-feed geometries
+# momwire sweep: take a request dict + frequency list. Single-feed geometries
 # return (re, im) — two parallel lists of input impedance. Multi-feed
 # geometries (bowtie 1×2) return (primary_re, primary_im, feeds_re,
 # feeds_im) where feeds_* is (n_freqs × n_feeds). The sweep endpoint
@@ -251,8 +251,8 @@ class ResultGroupSpec:
 class AntennaExample:
     name: str
     label: str
-    pysim_solve: SolveFn
-    pysim_sweep: SweepFn
+    momwire_solve: SolveFn
+    momwire_sweep: SweepFn
     pynec_build: Optional[PynecBuildFn] = None
     pynec_solve: Optional[SolveFn] = None
     # When set, pattern() calls this to excite the NEC context (e.g.

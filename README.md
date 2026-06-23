@@ -1,4 +1,4 @@
-# pysim
+# momwire
 
 A pure-Python method-of-moments antenna simulator with optional C++ accelerators (pybind11).
 
@@ -22,7 +22,7 @@ pytest tests/
 
 ## Optional: PyNEC backend
 
-pysim can be cross-validated against NEC2 via [PyNEC](https://github.com/tmolteno/python-necpp) (the `tests/test_pynec_backend.py` suite); NEC2 also delivers ~5–10× faster single-frequency solves.
+momwire can be cross-validated against NEC2 via [PyNEC](https://github.com/tmolteno/python-necpp) (the `tests/test_pynec_backend.py` suite); NEC2 also delivers ~5–10× faster single-frequency solves.
 
 ### Install the PyNEC wheel
 
@@ -33,7 +33,7 @@ pip install PyNEC --no-index \
     --find-links https://github.com/stevenmburns/python-necpp/releases/expanded_assets/v1.7.4-accel.1
 ```
 
-`--no-index` ensures pip takes the fork's wheel rather than upstream PyNEC on PyPI (same version, but its builds are broken on current Python and it lacks the OpenBLAS/OpenMP work). After install, `from PyNEC import nec_context` works and the cross-validation tests run; without it they're skipped (pysim itself needs no PyNEC).
+`--no-index` ensures pip takes the fork's wheel rather than upstream PyNEC on PyPI (same version, but its builds are broken on current Python and it lacks the OpenBLAS/OpenMP work). After install, `from PyNEC import nec_context` works and the cross-validation tests run; without it they're skipped (momwire itself needs no PyNEC).
 
 ### Runtime thread pinning
 

@@ -1,4 +1,4 @@
-"""Test that the PyNEC web backend agrees with the pysim backend.
+"""Test that the PyNEC web backend agrees with the momwire backend.
 
 Skipped when PyNEC isn't installed. Exercises the dispatch path through
 `web.server.solve` and `web.server.sweep_endpoint`'s helpers as a side
@@ -12,12 +12,12 @@ PyNEC = pytest.importorskip("PyNEC")  # noqa: F841
 from web import pynec_backend  # noqa: E402
 from web.examples import REGISTRY as _EXAMPLES  # noqa: E402
 
-_solve_inverted_v = _EXAMPLES["inverted_v"].pysim_solve
-_sweep_inverted_v = _EXAMPLES["inverted_v"].pysim_sweep
-_solve_yagi = _EXAMPLES["yagi"].pysim_solve
-_sweep_yagi = _EXAMPLES["yagi"].pysim_sweep
-_solve_bowtie = _EXAMPLES["bowtie"].pysim_solve
-_sweep_bowtie = _EXAMPLES["bowtie"].pysim_sweep
+_solve_inverted_v = _EXAMPLES["inverted_v"].momwire_solve
+_sweep_inverted_v = _EXAMPLES["inverted_v"].momwire_sweep
+_solve_yagi = _EXAMPLES["yagi"].momwire_solve
+_sweep_yagi = _EXAMPLES["yagi"].momwire_sweep
+_solve_bowtie = _EXAMPLES["bowtie"].momwire_solve
+_sweep_bowtie = _EXAMPLES["bowtie"].momwire_sweep
 pynec_backend.solve_inverted_v = _EXAMPLES["inverted_v"].pynec_solve
 pynec_backend.solve_yagi = _EXAMPLES["yagi"].pynec_solve
 pynec_backend.solve_fandipole = _EXAMPLES["fan_dipole"].pynec_solve
@@ -25,7 +25,7 @@ pynec_backend.solve_bowtie = _EXAMPLES["bowtie"].pynec_solve
 
 
 # The two backends use different basis functions (NEC2 pulse basis vs
-# pysim's triangular Galerkin) and slightly different feed models, so
+# momwire's triangular Galerkin) and slightly different feed models, so
 # they don't agree bit-for-bit. Near resonance, |Z| is small (~60 Ω) and
 # the delta is ~1 Ω; off-resonance, |Z| can reach ~200 Ω and the delta
 # scales roughly with it. Use a 3% relative tolerance with a 0.5 Ω floor,
@@ -51,10 +51,10 @@ def test_inverted_v_agrees_at_n30():
         "angle_deg": 30.0,
         "wire_radius": 0.0005,
     }
-    z_pysim = _z_complex(_solve_inverted_v(req))
+    z_momwire = _z_complex(_solve_inverted_v(req))
     z_pynec = _z_complex(pynec_backend.solve_inverted_v(req))
-    assert _close(z_pysim, z_pynec), (
-        f"V N=30: pysim={z_pysim}, pynec={z_pynec}, |delta|={abs(z_pysim - z_pynec):.3f}"
+    assert _close(z_momwire, z_pynec), (
+        f"V N=30: momwire={z_momwire}, pynec={z_pynec}, |delta|={abs(z_momwire - z_pynec):.3f}"
     )
 
 
@@ -69,10 +69,10 @@ def test_yagi_agrees_at_n30():
         "spacing_wavelengths": 0.15,
         "wire_radius": 0.0005,
     }
-    z_pysim = _z_complex(_solve_yagi(req))
+    z_momwire = _z_complex(_solve_yagi(req))
     z_pynec = _z_complex(pynec_backend.solve_yagi(req))
-    assert _close(z_pysim, z_pynec), (
-        f"Yagi N=30: pysim={z_pysim}, pynec={z_pynec}, |delta|={abs(z_pysim - z_pynec):.3f}"
+    assert _close(z_momwire, z_pynec), (
+        f"Yagi N=30: momwire={z_momwire}, pynec={z_pynec}, |delta|={abs(z_momwire - z_pynec):.3f}"
     )
 
 
@@ -93,7 +93,7 @@ def test_sweep_inverted_v_agrees():
     for f, rp, ip, rn, ni in zip(freqs, z_re_p, z_im_p, z_re_n, z_im_n):
         zp, zn = complex(rp, ip), complex(rn, ni)
         assert _close(zp, zn), (
-            f"V sweep @ {f} MHz: pysim={zp}, pynec={zn}, |delta|={abs(zp - zn):.3f}"
+            f"V sweep @ {f} MHz: momwire={zp}, pynec={zn}, |delta|={abs(zp - zn):.3f}"
         )
 
 
@@ -113,7 +113,7 @@ def test_sweep_yagi_agrees():
     for f, rp, ip, rn, ni in zip(freqs, z_re_p, z_im_p, z_re_n, z_im_n):
         zp, zn = complex(rp, ip), complex(rn, ni)
         assert _close(zp, zn), (
-            f"Yagi sweep @ {f} MHz: pysim={zp}, pynec={zn}, |delta|={abs(zp - zn):.3f}"
+            f"Yagi sweep @ {f} MHz: momwire={zp}, pynec={zn}, |delta|={abs(zp - zn):.3f}"
         )
 
 
@@ -167,7 +167,7 @@ def test_response_shape_matches():
     }
     p = _solve_inverted_v(req)
     n = pynec_backend.solve_inverted_v(req)
-    # PyNEC backend adds a "solver" field; pysim's _solve_inverted_v doesn't
+    # PyNEC backend adds a "solver" field; momwire's _solve_inverted_v doesn't
     # add it (the dispatch wrapper does), so drop it from the comparison.
     for k in (
         "wires",
@@ -180,7 +180,7 @@ def test_response_shape_matches():
         "lambda_design_m",
         "arm_len_m",
     ):
-        assert k in p, f"pysim response missing {k}"
+        assert k in p, f"momwire response missing {k}"
         assert k in n, f"pynec response missing {k}"
     # Wire structure: same wire count, same knot count per wire.
     assert len(p["wires"]) == len(n["wires"])
@@ -216,7 +216,7 @@ def _feeds_z(res):
 
 
 # The bowtie array discretization differs more than the dipole / Yagi
-# cases — pysim's tent basis lives on a 4-polyline mesh with K=2
+# cases — momwire's tent basis lives on a 4-polyline mesh with K=2
 # junctions while NEC uses 10 wire cards per element with implicit
 # coordinate-match continuity. At antenna_designer's resonant-ish
 # defaults the per-feed delta is ~3 Ω on a ~180 Ω port, so a 5%
@@ -235,7 +235,7 @@ def test_bowtie_in_phase_per_feed_agrees():
     assert len(z_p) == len(z_n) == 2
     for i, (zp, zn) in enumerate(zip(z_p, z_n)):
         assert _close_bowtie(zp, zn), (
-            f"feed {i} in-phase: pysim={zp}, pynec={zn}, |delta|={abs(zp - zn):.3f}"
+            f"feed {i} in-phase: momwire={zp}, pynec={zn}, |delta|={abs(zp - zn):.3f}"
         )
 
 
@@ -251,7 +251,7 @@ def test_bowtie_90deg_phase_per_feed_agrees():
     z_n = _feeds_z(n)
     for i, (zp, zn) in enumerate(zip(z_p, z_n)):
         assert _close_bowtie(zp, zn), (
-            f"feed {i} 90°: pysim={zp}, pynec={zn}, |delta|={abs(zp - zn):.3f}"
+            f"feed {i} 90°: momwire={zp}, pynec={zn}, |delta|={abs(zp - zn):.3f}"
         )
     # Also assert asymmetry actually showed up — otherwise both sides
     # could be failing silently in lockstep.
@@ -278,7 +278,7 @@ def test_bowtie_response_shape_matches():
         "phase_lr_deg",
         "del_y_m",
     ):
-        assert k in p, f"pysim response missing {k}"
+        assert k in p, f"momwire response missing {k}"
         assert k in n, f"pynec response missing {k}"
     assert p["z0_ohms"] == n["z0_ohms"] == 100.0
     assert len(p["wires"]) == len(n["wires"]) == 8
@@ -310,6 +310,6 @@ def test_bowtie_sweep_per_feed_agrees():
             zp = complex(rp[j], ip[j])
             zn = complex(rn[j], ni[j])
             assert _close_bowtie(zp, zn), (
-                f"freq {freqs[fi]} feed {j}: pysim={zp}, pynec={zn}, "
+                f"freq {freqs[fi]} feed {j}: momwire={zp}, pynec={zn}, "
                 f"|delta|={abs(zp - zn):.3f}"
             )

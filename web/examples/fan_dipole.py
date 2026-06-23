@@ -86,7 +86,7 @@ def _geometry(req: dict, z_offset: float):
 
     Pulls just the geometric knobs from the request — band counts, slope,
     cone radius, lengths — and returns the S/T feed anchors plus the
-    per-band (A, B) anchors on the +y and -y sides. Both pysim and pynec
+    per-band (A, B) anchors on the +y and -y sides. Both momwire and pynec
     paths share this so the two backends stay geometrically locked.
     """
     n_per_wire = int(req.get("n_per_wire", 21))
@@ -152,7 +152,7 @@ def _geometry(req: dict, z_offset: float):
     }
 
 
-def _pysim_pack_wires(g, sim, coeffs, polyline_knots, pack_pysim_wires):
+def _momwire_pack_wires(g, sim, coeffs, polyline_knots, pack_momwire_wires):
     n_bands = g["n_bands"]
     n_per = g["n_per_wire"]
     T, S = g["T"], g["S"]
@@ -169,11 +169,11 @@ def _pysim_pack_wires(g, sim, coeffs, polyline_knots, pack_pysim_wires):
             labels.append(
                 f"{_band_label(i, g['band_freqs_mhz'], g['band_lengths_m'][i])} {side}"
             )
-    return pack_pysim_wires(sim, coeffs, knot_arrays, labels)
+    return pack_momwire_wires(sim, coeffs, knot_arrays, labels)
 
 
-def _pysim_build_sim_args(req: dict, z_offset: float, ground_on: bool):
-    """Build the pysim wire/junction structures from the cone geometry."""
+def _momwire_build_sim_args(req: dict, z_offset: float, ground_on: bool):
+    """Build the momwire wire/junction structures from the cone geometry."""
     g = _geometry(req, z_offset)
     n_per_wire = g["n_per_wire"]
     n_bands = g["n_bands"]
@@ -204,13 +204,13 @@ def _pysim_build_sim_args(req: dict, z_offset: float, ground_on: bool):
     }
 
 
-def pysim_solve(req: dict) -> dict:
+def momwire_solve(req: dict) -> dict:
     from web.server import (
         C_LIGHT,
         _PEC_GROUND_EPS_R,
         _PEC_GROUND_SIGMA,
-        _make_pysim_sim,
-        _pack_pysim_wires,
+        _make_momwire_sim,
+        _pack_momwire_wires,
         _polyline_knots,
         _read_ground,
     )
@@ -219,13 +219,13 @@ def pysim_solve(req: dict) -> dict:
     meas_freq_mhz = float(req.get("measurement_freq_mhz", design_freq_mhz))
     wire_radius = float(req.get("wire_radius", 0.0005))
     ground_on, _, z_offset = _read_ground(req)
-    build = _pysim_build_sim_args(req, z_offset, ground_on)
+    build = _momwire_build_sim_args(req, z_offset, ground_on)
     g = build["g"]
 
     wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
     wavelength_meas = C_LIGHT / (meas_freq_mhz * 1e6)
 
-    sim = _make_pysim_sim(
+    sim = _make_momwire_sim(
         req,
         wires=build["wires"],
         n_per_edge_per_wire=build["n_per_edge"],
@@ -244,7 +244,7 @@ def pysim_solve(req: dict) -> dict:
 
     return {
         "geometry": "fan_dipole",
-        "wires": _pysim_pack_wires(g, sim, coeffs, _polyline_knots, _pack_pysim_wires),
+        "wires": _momwire_pack_wires(g, sim, coeffs, _polyline_knots, _pack_momwire_wires),
         "feed_wire_index": 0,
         "feed_knot_index": 1,  # midpoint of the 3-knot feed wire record
         "z_in_re": float(z_in.real),
@@ -266,16 +266,16 @@ def pysim_solve(req: dict) -> dict:
     }
 
 
-def pysim_sweep(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[float]]:
-    from web.server import C_LIGHT, _make_pysim_sim, _read_ground
+def momwire_sweep(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[float]]:
+    from web.server import C_LIGHT, _make_momwire_sim, _read_ground
 
     design_freq_mhz = float(req.get("design_freq_mhz", 14.3))
     wire_radius = float(req.get("wire_radius", 0.0005))
     ground_on, _, z_offset = _read_ground(req)
-    build = _pysim_build_sim_args(req, z_offset, ground_on)
+    build = _momwire_build_sim_args(req, z_offset, ground_on)
     g = build["g"]
 
-    sim = _make_pysim_sim(
+    sim = _make_momwire_sim(
         req,
         wires=build["wires"],
         n_per_edge_per_wire=build["n_per_edge"],
@@ -531,8 +531,8 @@ EXAMPLE = register(
         name="fan_dipole",
         label="Fan Dipole",
         default_view="yz",
-        pysim_solve=pysim_solve,
-        pysim_sweep=pysim_sweep,
+        momwire_solve=momwire_solve,
+        momwire_sweep=momwire_sweep,
         pynec_build=pynec_build,
         pynec_solve=pynec_solve,
         # Multi-band antenna: its design frequency comes from the

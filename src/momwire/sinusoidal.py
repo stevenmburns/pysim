@@ -1,8 +1,8 @@
 """NEC2-style sinusoidal-basis MoM for wires (Section III of the NEC2
 Theory Manual, Burke & Poggio 1981 — see `docs/sinusoidal_basis_design.md`).
 
-This is an OPTIONAL solver alongside `TriangularPySim` (the default). The
-sinusoidal basis is what NEC2 / PyNEC / nec2c use; reproducing it in pysim
+This is an OPTIONAL solver alongside `TriangularSolver` (the default). The
+sinusoidal basis is what NEC2 / PyNEC / nec2c use; reproducing it in momwire
 lets us isolate which parts of NEC's pulse-basis convergence behaviour are
 intrinsic to the basis itself versus its kernel / source / junction
 treatment.
@@ -21,7 +21,7 @@ import scipy.linalg
 import scipy.sparse
 
 try:
-    from pysim import _accelerators as _acc
+    from momwire import _accelerators as _acc
 
     _HAVE_FIELD_TENSOR = hasattr(_acc, "sinusoidal_field_tensor")
 except ImportError:
@@ -36,12 +36,12 @@ _EULER_GAMMA = 0.5772156649015329
 _DENSE_ASSEMBLY_THRESHOLD = 60
 
 
-class SinusoidalPySim:
+class SinusoidalSolver:
     """NEC2's three-term (const + sin + cos) basis on each segment, with
     end-condition coefficients closed-form per Eqs 25-64.
 
     Constructor takes the same `wires` / `n_per_edge_per_wire` / `junctions`
-    interface as `TriangularPySim` for drop-in comparison.
+    interface as `TriangularSolver` for drop-in comparison.
     """
 
     eps = 8.8541878188e-12
@@ -829,7 +829,7 @@ class SinusoidalPySim:
 
     def _image_source_centers_tangents(self, geom):
         """Mirror source segments across z = ground_z and flip their tangent
-        z-components, mirroring the convention TriangularPySim uses for the
+        z-components, mirroring the convention TriangularSolver uses for the
         PEC image build. Same shape ((N, 3), (N, 3)) as the originals.
         """
         seg_c = geom["seg_centers"]
@@ -951,10 +951,10 @@ class SinusoidalPySim:
     def compute_y_matrix(self) -> np.ndarray:
         """Short-circuit admittance matrix [Y_sc] at the configured feeds.
 
-        See `TriangularPySim.compute_y_matrix` for the math + intent.
+        See `TriangularSolver.compute_y_matrix` for the math + intent.
         Implementation mirrors `compute_impedance`: build G once, but
         solve with an N-column RHS where column j has unit excitation
-        at port j's feed segment and zeros elsewhere. SinusoidalPySim
+        at port j's feed segment and zeros elsewhere. SinusoidalSolver
         uses Eq 187's delta-gap source which scales by `-1/h_i`; the
         Y matrix readout via `_feed_segment_current` already accounts
         for the basis arithmetic.

@@ -15,7 +15,7 @@ Three flavours of (N_i, N_j) integrals J_pq[i, j] are exposed here:
 
 Each J_pq integrates u_i^p u_j^q against the kernel, where u_i, u_j are arc
 lengths into each segment from its left endpoint. The four (p, q) combos
-(00, 10, 01, 11) are the building blocks TriangularPySim uses to assemble
+(00, 10, 01, 11) are the building blocks TriangularSolver uses to assemble
 the per-sub-rectangle contributions of the basis-pair matrix.
 
 Static kernel building blocks (without the 1/(4*pi) factor):

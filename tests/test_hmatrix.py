@@ -1,16 +1,16 @@
 """Tests for the hierarchical (H-matrix / ACA) B-spline MoM accelerator.
 
-Phase 0: the on-demand block evaluator `HMatrixPySim.zblock(I, J)` must
+Phase 0: the on-demand block evaluator `HMatrixSolver.zblock(I, J)` must
 reproduce, to machine precision, the corresponding sub-block of the exact
-dense `BSplinePySim` impedance matrix — both the off-edge (far) path and the
+dense `BSplineSolver` impedance matrix — both the off-edge (far) path and the
 same-edge analytic-overwrite (near) path.
 """
 
 import numpy as np
 import pytest
 
-from pysim.bspline import BSplinePySim
-from pysim.hmatrix import HMatrixPySim
+from momwire.bspline import BSplineSolver
+from momwire.hmatrix import HMatrixSolver
 
 
 def _dense_Z(sim):
@@ -24,7 +24,7 @@ def _dense_Z(sim):
 def _dipole(degree, nsegs):
     half = 0.962 * 22 / 4
     wire = np.array([[0.0, 0.0, -half], [0.0, 0.0, half]])
-    return HMatrixPySim(
+    return HMatrixSolver(
         wires=[wire],
         degree=degree,
         n_per_edge_per_wire=[[nsegs]],
@@ -40,7 +40,7 @@ def _bent_wire_with_junction(degree, nsegs):
     w0 = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, h]])
     w1 = np.array([[0.0, 0.0, h], [0.0, h, h]])
     junctions = [[(0, "end"), (1, "start")]]
-    return HMatrixPySim(
+    return HMatrixSolver(
         wires=[w0, w1],
         degree=degree,
         n_per_edge_per_wire=[[nsegs], [nsegs]],
@@ -95,7 +95,7 @@ def test_zblock_matches_dense_random_subblocks(builder, degree):
 def _long_wire(degree, nsegs):
     half = 2.0 * 0.962 * 22 / 4
     wire = np.array([[0.0, 0.0, -half], [0.0, 0.0, half]])
-    return HMatrixPySim(
+    return HMatrixSolver(
         wires=[wire],
         degree=degree,
         n_per_edge_per_wire=[[nsegs]],
@@ -210,7 +210,7 @@ def test_hmatrix_handles_junction_geometry():
 
 
 def _matched_pair(wires, *, degree, n_per_edge_per_wire, **kw):
-    """A BSplinePySim and an HMatrixPySim built identically (same mesh), so
+    """A BSplineSolver and an HMatrixSolver built identically (same mesh), so
     the only difference is the dense vs hierarchical solve path."""
     common = dict(
         wires=wires,
@@ -219,7 +219,7 @@ def _matched_pair(wires, *, degree, n_per_edge_per_wire, **kw):
         wavelength=22.0,
         **kw,
     )
-    return BSplinePySim(**common), HMatrixPySim(aca_tol=1e-7, **common)
+    return BSplineSolver(**common), HMatrixSolver(aca_tol=1e-7, **common)
 
 
 @pytest.mark.parametrize("degree", [1, 2])
@@ -283,8 +283,8 @@ def test_first_ring_preconditioner_reduces_iterations():
         aca_tol=1e-5,
         aca_eta=2.0,
     )
-    plain = HMatrixPySim(precond_eta=2.0, **common)  # ring disabled
-    ring = HMatrixPySim(**common)  # default ring (0.5*aca_eta)
+    plain = HMatrixSolver(precond_eta=2.0, **common)  # ring disabled
+    ring = HMatrixSolver(**common)  # default ring (0.5*aca_eta)
     zp, _ = plain.compute_impedance()
     zr, _ = ring.compute_impedance()
     assert abs(zr - zp) / abs(zp) < 1e-4
@@ -297,7 +297,7 @@ def test_solve_converges_in_few_iterations():
     GMRES iteration counts — the point of the hierarchical solve."""
     half = 2 * 0.962 * 22 / 4
     wires = [np.array([[0.0, 0.0, -half], [0.0, 0.0, half]])]
-    hmat = HMatrixPySim(
+    hmat = HMatrixSolver(
         wires=wires, degree=1, n_per_edge_per_wire=[[300]], wavelength=22.0
     )
     hmat.compute_impedance()
@@ -337,7 +337,7 @@ def test_ground_hmatrix_to_dense_matches_dense_pec():
     the dense PEC Z."""
     half = 0.962 * 22 / 4
     wires = [np.array([[0.0, 0.0, 2.0], [0.0, 0.0, 2.0 + 2 * half]])]
-    sim = HMatrixPySim(
+    sim = HMatrixSolver(
         wires=wires,
         degree=2,
         n_per_edge_per_wire=[[200]],
@@ -356,7 +356,7 @@ def test_ground_hmatrix_to_dense_matches_dense_pec():
 
 @pytest.mark.parametrize("degree", [1, 2])
 def test_ground_compute_impedance_matches_dense_pec(degree):
-    """HMatrixPySim + PEC ground matches dense BSplinePySim + PEC ground."""
+    """HMatrixSolver + PEC ground matches dense BSplineSolver + PEC ground."""
     half = 0.962 * 22 / 4
     wires = [np.array([[0.0, 0.0, 1.5], [0.0, 0.0, 1.5 + 2 * half]])]
     dense, hmat = _matched_pair(
@@ -394,13 +394,13 @@ def test_ground_iteration_count_near_free_space():
     GMRES under PEC ground converges in about as many iterations as free
     space."""
     half = 2 * 0.962 * 22 / 4
-    free = HMatrixPySim(
+    free = HMatrixSolver(
         wires=[np.array([[0.0, 0.0, -half], [0.0, 0.0, half]])],
         degree=1,
         n_per_edge_per_wire=[[300]],
         wavelength=22.0,
     )
-    grnd = HMatrixPySim(
+    grnd = HMatrixSolver(
         wires=[np.array([[0.0, 0.0, 2.0], [0.0, 0.0, 2.0 + 2 * half]])],
         degree=1,
         n_per_edge_per_wire=[[300]],
@@ -419,7 +419,7 @@ def test_ground_hmatrix_still_compresses():
     (the dense-fallback guard makes the degradation graceful, not wrong)."""
     half = 2 * 0.962 * 22 / 4
     # normal height: image is far, compression close to free space
-    tall = HMatrixPySim(
+    tall = HMatrixSolver(
         wires=[np.array([[0.0, 0.0, 3.0], [0.0, 0.0, 3.0 + 2 * half]])],
         degree=1,
         n_per_edge_per_wire=[[400]],
@@ -431,7 +431,7 @@ def test_ground_hmatrix_still_compresses():
     assert tall._hmatrix.stats()["compression"] < 0.9  # genuinely compressed
 
     # low horizontal wire: image is near, but the answer is still correct
-    low = HMatrixPySim(
+    low = HMatrixSolver(
         wires=[np.array([[0.0, -half, 0.1], [0.0, half, 0.1]])],
         degree=1,
         n_per_edge_per_wire=[[400]],
@@ -439,7 +439,7 @@ def test_ground_hmatrix_still_compresses():
         ground_z=0.0,
         aca_tol=1e-6,
     )
-    dense_low = BSplinePySim(
+    dense_low = BSplineSolver(
         wires=[np.array([[0.0, -half, 0.1], [0.0, half, 0.1]])],
         degree=1,
         n_per_edge_per_wire=[[400]],
@@ -457,7 +457,7 @@ def test_ground_does_not_break_free_space_path():
     gated strictly on ground_z, no leakage)."""
     half = 0.962 * 22 / 4
     wires = [np.array([[0.0, 0.0, 2.0], [0.0, 0.0, 2.0 + 2 * half]])]
-    HMatrixPySim(
+    HMatrixSolver(
         wires=wires,
         degree=2,
         n_per_edge_per_wire=[[80]],

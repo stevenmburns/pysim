@@ -1,6 +1,6 @@
-"""Integration tests for the web/server.py pysim solver paths.
+"""Integration tests for the web/server.py momwire solver paths.
 
-The solver-level pysim API has its own unit coverage in tests/test_pysim.py;
+The solver-level momwire API has its own unit coverage in tests/test_momwire.py;
 this file pins the *response schema* and array-assembly logic the frontend
 depends on. Catches regressions in the bowtie 1×2 geometry build, the
 multi-feed response shape, the multi-feed sweep tuple shape, and the
@@ -20,16 +20,16 @@ pytest.importorskip("fastapi")
 from web.examples import REGISTRY as _EXAMPLES  # noqa: E402
 from web.server import solve  # noqa: E402
 
-_solve_bowtie = _EXAMPLES["bowtie"].pysim_solve
-_sweep_bowtie = _EXAMPLES["bowtie"].pysim_sweep
+_solve_bowtie = _EXAMPLES["bowtie"].momwire_solve
+_sweep_bowtie = _EXAMPLES["bowtie"].momwire_sweep
 
 
 def _bowtie_req(**over) -> dict:
     """Minimal bowtie request body matching the live frontend payload."""
     req = {
         "geometry": "bowtie",
-        "solver": "pysim",
-        "pysim_model": "triangular",
+        "solver": "momwire",
+        "momwire_model": "triangular",
         "n_per_wire": 15,
         "design_freq_mhz": 28.47,
         "measurement_freq_mhz": 28.47,
@@ -144,7 +144,7 @@ def test_solve_dispatch_routes_bowtie_geometry():
     directivity_norm tacks on without crashing on multi-feed coeffs."""
     res = solve(_bowtie_req())
     assert res["geometry"] == "bowtie"
-    assert res["solver"] == "pysim"
+    assert res["solver"] == "momwire"
     assert "directivity_norm" in res
     assert res["directivity_norm"] > 0
     assert len(res["feeds"]) == 2
@@ -155,8 +155,8 @@ def test_bowtie_single_feed_geometries_still_have_no_feeds_key():
     not leak into single-feed geometries."""
     req = {
         "geometry": "inverted_v",
-        "solver": "pysim",
-        "pysim_model": "triangular",
+        "solver": "momwire",
+        "momwire_model": "triangular",
         "n_per_wire": 20,
         "design_freq_mhz": 14.3,
         "measurement_freq_mhz": 14.3,

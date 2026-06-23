@@ -4,7 +4,7 @@ Migrated from web/server.py (_inverted_v_polyline, _solve_inverted_v,
 _sweep_inverted_v) and web/pynec_backend.py (_build_inverted_v,
 solve_inverted_v) as the pilot for the registry-based example layout.
 
-Helpers (_make_pysim_sim, _read_ground, _pack_pysim_wires, _polyline_knots,
+Helpers (_make_momwire_sim, _read_ground, _pack_momwire_wires, _polyline_knots,
 _run_solve, _segment_centers_to_knot_currents, etc.) are imported lazily
 inside each function to break the import cycle: the dispatchers in
 web.server import this package, so this module can't pull from web.server
@@ -36,13 +36,13 @@ def _polyline(arm_len: float, angle_deg: float, z_offset: float = 0.0) -> np.nda
     return np.vstack([left, apex, right])
 
 
-def pysim_solve(req: dict) -> dict:
+def momwire_solve(req: dict) -> dict:
     from web.server import (
         C_LIGHT,
         _PEC_GROUND_EPS_R,
         _PEC_GROUND_SIGMA,
-        _make_pysim_sim,
-        _pack_pysim_wires,
+        _make_momwire_sim,
+        _pack_momwire_wires,
         _polyline_knots,
         _read_ground,
     )
@@ -60,7 +60,7 @@ def pysim_solve(req: dict) -> dict:
     arm_len = halfdriver_factor * wavelength_design / 4.0
 
     polyline = _polyline(arm_len, angle_deg, z_offset=z_offset)
-    sim = _make_pysim_sim(
+    sim = _make_momwire_sim(
         req,
         wires=[polyline],
         n_per_edge_per_wire=[[n_per_wire, n_per_wire]],
@@ -81,7 +81,7 @@ def pysim_solve(req: dict) -> dict:
 
     return {
         "geometry": "inverted_v",
-        "wires": _pack_pysim_wires(sim, coeffs, [knots], ["wire"]),
+        "wires": _pack_momwire_wires(sim, coeffs, [knots], ["wire"]),
         "feed_wire_index": 0,
         "feed_knot_index": feed_knot_index,
         "z_in_re": float(z_in.real),
@@ -98,9 +98,9 @@ def pysim_solve(req: dict) -> dict:
     }
 
 
-def pysim_sweep(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[float]]:
-    """Batched sweep using the pysim model's compute_impedance_swept."""
-    from web.server import C_LIGHT, _make_pysim_sim, _read_ground
+def momwire_sweep(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[float]]:
+    """Batched sweep using the momwire model's compute_impedance_swept."""
+    from web.server import C_LIGHT, _make_momwire_sim, _read_ground
 
     angle_deg = float(req.get("angle_deg", 30.0))
     n_per_wire = int(req.get("n_per_wire", 30))
@@ -112,7 +112,7 @@ def pysim_sweep(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[fl
     wavelength_design = C_LIGHT / (design_freq_mhz * 1e6)
     arm_len = halfdriver_factor * wavelength_design / 4.0
 
-    sim = _make_pysim_sim(
+    sim = _make_momwire_sim(
         req,
         wires=[_polyline(arm_len, angle_deg, z_offset=z_offset)],
         n_per_edge_per_wire=[[n_per_wire, n_per_wire]],
@@ -209,7 +209,7 @@ def pynec_solve(req: dict) -> dict:
     fed_global_idx = wire1_idx[feed_seg - 1]
     z_in = complex(1.0 / cur_arr[fed_global_idx])
 
-    # Knot positions and currents, matching pysim's response shape: one
+    # Knot positions and currents, matching momwire's response shape: one
     # continuous wire (left arm + right arm), feed at apex.
     arm1_knots = np.linspace(b["left"], b["apex"], n_per_wire + 1)
     arm2_knots = np.linspace(b["apex"], b["right"], n_per_wire + 1)
@@ -255,8 +255,8 @@ EXAMPLE = register(
         name="inverted_v",
         label="Inverted V",
         default_view="yz",
-        pysim_solve=pysim_solve,
-        pysim_sweep=pysim_sweep,
+        momwire_solve=momwire_solve,
+        momwire_sweep=momwire_sweep,
         pynec_build=pynec_build,
         pynec_solve=pynec_solve,
         param_schema=(

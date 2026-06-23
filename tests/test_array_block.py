@@ -8,10 +8,10 @@ The real array designs are exercised by scripts/array_block_verify.py.
 import numpy as np
 import pytest
 
-from pysim.bspline import BSplinePySim
-from pysim.hmatrix import HMatrixPySim
-from pysim.array_block import (
-    ArrayBlockPySim,
+from momwire.bspline import BSplineSolver
+from momwire.hmatrix import HMatrixSolver
+from momwire.array_block import (
+    ArrayBlockSolver,
     cache_stats,
     element_groups,
     reset_array_caches,
@@ -35,7 +35,7 @@ def _array_sim(offsets, halves, nsegs=12, degree=2):
     half-lengths match, a distinct shape when they differ. `offsets` are
     (y, z) element centres far enough apart to be electrically separate."""
     wires = [_dipole_wire(h, y=y, z=z) for (y, z), h in zip(offsets, halves)]
-    return ArrayBlockPySim(
+    return ArrayBlockSolver(
         wires=wires,
         degree=degree,
         n_per_edge_per_wire=[[nsegs]] * len(wires),
@@ -46,7 +46,7 @@ def _array_sim(offsets, halves, nsegs=12, degree=2):
 
 
 def _array_solver(offsets, halves, voltages, solver, nsegs=14, degree=2):
-    """Build `solver` (ArrayBlockPySim or BSplinePySim) for a dipole array with
+    """Build `solver` (ArrayBlockSolver or BSplineSolver) for a dipole array with
     explicit per-feed voltages (so a 'phase sweep' is just changing voltages on
     a fixed geometry)."""
     wires = [_dipole_wire(h, y=y, z=z) for (y, z), h in zip(offsets, halves)]
@@ -131,7 +131,7 @@ def test_single_structure_is_one_element():
     """A lone dipole is a degenerate 1-element array (no structure to
     exploit, but well-defined)."""
     half = 0.962 * 22 / 4
-    sim = HMatrixPySim(
+    sim = HMatrixSolver(
         wires=[_dipole_wire(half)],
         degree=2,
         n_per_edge_per_wire=[[16]],
@@ -254,7 +254,7 @@ def test_compute_y_matrix_matches_dense_no_junction():
     dense = _array_sim(offsets, [half] * 4, nsegs=16)
     arr = _array_sim(offsets, [half] * 4, nsegs=16)
     # the dense reference is the base solver on the same mesh
-    yd = BSplinePySim(
+    yd = BSplineSolver(
         wires=[w for w in dense.wires_polylines],
         degree=2,
         n_per_edge_per_wire=[[16]] * 4,
@@ -272,8 +272,8 @@ def test_compute_y_matrix_matches_dense_with_junctions(degree):
     block-Jacobi preconditioner augmented with the KCL saddle rows."""
     h = 0.962 * 22 / 4
     common = _bent_array(3, h, nsegs=14, degree=degree)
-    yd = BSplinePySim(**common).compute_y_matrix()
-    ya = ArrayBlockPySim(**common).compute_y_matrix()
+    yd = BSplineSolver(**common).compute_y_matrix()
+    ya = ArrayBlockSolver(**common).compute_y_matrix()
     assert np.abs(ya - yd).max() / np.abs(yd).max() < 1e-4
 
 
@@ -283,12 +283,12 @@ def test_block_jacobi_precond_matches_sparse(with_junctions):
     matrix as the generic sparse-LU preconditioner — it just exploits the
     element block-diagonal structure — so applying either to the same vector
     must agree (and hence GMRES convergence is identical)."""
-    from pysim.array_block import _BlockJacobiAugPrecond
-    from pysim.hmatrix import _SparseAugPrecond
+    from momwire.array_block import _BlockJacobiAugPrecond
+    from momwire.hmatrix import _SparseAugPrecond
 
     half = 0.962 * 22 / 4
     if with_junctions:
-        sim = ArrayBlockPySim(**_bent_array(3, half, nsegs=14))
+        sim = ArrayBlockSolver(**_bent_array(3, half, nsegs=14))
     else:
         sim = _array_sim([(-9.0, 0.0), (-3.0, 0.0), (3.0, 0.0)], [half] * 3, nsegs=14)
     H = sim.build_array_blocks()
@@ -322,7 +322,7 @@ def test_compute_impedance_swept_matches_dense():
     half = 0.962 * 22 / 4
     offsets = [(-9.0, 0.0), (-3.0, 0.0), (3.0, 0.0), (9.0, 0.0)]
     arr = _array_sim(offsets, [half] * 4, nsegs=16)
-    dense = BSplinePySim(
+    dense = BSplineSolver(
         wires=list(arr.wires_polylines),
         degree=2,
         n_per_edge_per_wire=[[16]] * 4,
@@ -394,13 +394,13 @@ def test_phase_sweep_reuses_operator_and_factorization():
     z_frames = []
     for ph_deg in (0.0, 45.0, 90.0):
         v1 = np.exp(1j * np.deg2rad(ph_deg))
-        sim = _array_solver(offsets, [half, half], [1.0 + 0j, v1], ArrayBlockPySim)
+        sim = _array_solver(offsets, [half, half], [1.0 + 0j, v1], ArrayBlockSolver)
         z_frames.append(np.atleast_1d(sim.compute_impedance()[0]))
     st = cache_stats()
     assert st["operator_build"] - s0 == 1  # built once
     assert st["operator_hit"] >= 2  # reused on the later frames
     # the factorization is cached on the operator (reused, not refactored)
-    op = ArrayBlockPySim(
+    op = ArrayBlockSolver(
         wires=[_dipole_wire(half, *o) for o in [(-6, 0), (6, 0)]],
         degree=2,
         n_per_edge_per_wire=[[14], [14]],
@@ -419,9 +419,9 @@ def test_phase_sweep_cached_result_matches_dense():
     for ph_deg in (0.0, 60.0, 120.0):
         v = [1.0 + 0j, np.exp(1j * np.deg2rad(ph_deg))]
         za = _array_solver(
-            offsets, [half, half], v, ArrayBlockPySim
+            offsets, [half, half], v, ArrayBlockSolver
         ).compute_impedance()[0]
-        zd = _array_solver(offsets, [half, half], v, BSplinePySim).compute_impedance()[
+        zd = _array_solver(offsets, [half, half], v, BSplineSolver).compute_impedance()[
             0
         ]
         za, zd = np.atleast_1d(za), np.atleast_1d(zd)
@@ -437,8 +437,8 @@ def test_spacing_sweep_reuses_self_blocks():
     for spacing in (6.0, 8.0, 10.0):
         offs = [(-spacing, 0.0), (spacing, 0.0)]
         v = [1.0 + 0j, 1.0 + 0j]
-        ya = _array_solver(offs, [half, half], v, ArrayBlockPySim).compute_y_matrix()
-        yd = _array_solver(offs, [half, half], v, BSplinePySim).compute_y_matrix()
+        ya = _array_solver(offs, [half, half], v, ArrayBlockSolver).compute_y_matrix()
+        yd = _array_solver(offs, [half, half], v, BSplineSolver).compute_y_matrix()
         assert np.abs(ya - yd).max() / np.abs(yd).max() < 1e-3
     st = cache_stats()
     # one shape, built once, then reused on the two later spacings
@@ -451,7 +451,7 @@ def test_reset_array_caches_clears_state():
     reset_array_caches()
     half = 0.962 * 22 / 4
     _array_solver(
-        [(-6.0, 0.0), (6.0, 0.0)], [half, half], [1, 1], ArrayBlockPySim
+        [(-6.0, 0.0), (6.0, 0.0)], [half, half], [1, 1], ArrayBlockSolver
     ).compute_y_matrix()
     assert sum(cache_stats().values()) > 0
     reset_array_caches()
@@ -493,7 +493,7 @@ def test_ground_array_block_matvec_matches_dense():
     reset_array_caches()
     half = 0.962 * 22 / 4
     offsets = [(-9.0, 3.0), (-3.0, 3.0), (3.0, 3.0), (9.0, 3.0)]
-    sim = _ground_array(offsets, [half] * 4, ArrayBlockPySim, nsegs=16)
+    sim = _ground_array(offsets, [half] * 4, ArrayBlockSolver, nsegs=16)
     Z = _dense_Z_ground(sim)
     AB = sim.build_array_blocks(tol=1e-7)
     rng = np.random.default_rng(0)
@@ -508,9 +508,9 @@ def test_ground_compute_y_matrix_matches_dense():
     half = 0.962 * 22 / 4
     offsets = [(-9.0, 3.0), (-3.0, 3.0), (3.0, 3.0), (9.0, 3.0)]
     ya = _ground_array(
-        offsets, [half] * 4, ArrayBlockPySim, nsegs=16
+        offsets, [half] * 4, ArrayBlockSolver, nsegs=16
     ).compute_y_matrix()
-    yd = _ground_array(offsets, [half] * 4, BSplinePySim, nsegs=16).compute_y_matrix()
+    yd = _ground_array(offsets, [half] * 4, BSplineSolver, nsegs=16).compute_y_matrix()
     assert np.abs(ya - yd).max() / np.abs(yd).max() < 1e-4
 
 
@@ -520,10 +520,10 @@ def test_ground_compute_impedance_matches_dense():
     half = 0.962 * 22 / 4
     offsets = [(-6.0, 3.0), (6.0, 3.0)]
     za = np.atleast_1d(
-        _ground_array(offsets, [half] * 2, ArrayBlockPySim).compute_impedance()[0]
+        _ground_array(offsets, [half] * 2, ArrayBlockSolver).compute_impedance()[0]
     )
     zd = np.atleast_1d(
-        _ground_array(offsets, [half] * 2, BSplinePySim).compute_impedance()[0]
+        _ground_array(offsets, [half] * 2, BSplineSolver).compute_impedance()[0]
     )
     assert np.max(np.abs(za - zd) / np.abs(zd)) < 1e-3
 
@@ -538,7 +538,7 @@ def test_ground_iteration_count_near_free_space():
     offsets = [(-9.0, 3.0), (-3.0, 3.0), (3.0, 3.0), (9.0, 3.0)]
     free = _array_sim([(y, 0.0) for y, _z in offsets], [half] * 4, nsegs=16)
     free.compute_y_matrix()
-    grnd = _ground_array(offsets, [half] * 4, ArrayBlockPySim, nsegs=16)
+    grnd = _ground_array(offsets, [half] * 4, ArrayBlockSolver, nsegs=16)
     grnd.compute_y_matrix()
     assert abs(max(grnd._last_solve_iters) - max(free._last_solve_iters)) <= 2
 
@@ -550,7 +550,7 @@ def test_ground_single_height_grid_reuses_one_block_per_shape():
     reset_array_caches()
     half = 0.962 * 22 / 4
     offsets = [(-9.0, 3.0), (-3.0, 3.0), (3.0, 3.0), (9.0, 3.0)]
-    sim = _ground_array(offsets, [half] * 4, ArrayBlockPySim, nsegs=16)
+    sim = _ground_array(offsets, [half] * 4, ArrayBlockSolver, nsegs=16)
     AB = sim.build_array_blocks()
     assert len(AB.shape_blocks) == 1  # one shape, one height
     assert sim._last_n_coupling_aca == 3  # displacements {1,2,3}·spacing
@@ -563,14 +563,14 @@ def test_ground_mixed_height_refines_blocks_and_stays_correct():
     reset_array_caches()
     half = 0.962 * 22 / 4
     offsets = [(-6.0, 3.0), (6.0, 3.0), (-6.0, 9.0), (6.0, 9.0)]
-    sim = _ground_array(offsets, [half] * 4, ArrayBlockPySim, nsegs=14)
+    sim = _ground_array(offsets, [half] * 4, ArrayBlockSolver, nsegs=14)
     AB = sim.build_array_blocks()
     # one geometric shape, but two heights ⇒ two block-shape classes
     assert len(AB.shape_blocks) == 2
     ya = _ground_array(
-        offsets, [half] * 4, ArrayBlockPySim, nsegs=14
+        offsets, [half] * 4, ArrayBlockSolver, nsegs=14
     ).compute_y_matrix()
-    yd = _ground_array(offsets, [half] * 4, BSplinePySim, nsegs=14).compute_y_matrix()
+    yd = _ground_array(offsets, [half] * 4, BSplineSolver, nsegs=14).compute_y_matrix()
     assert np.abs(ya - yd).max() / np.abs(yd).max() < 1e-4
 
 
@@ -582,7 +582,7 @@ def test_ground_and_free_self_blocks_do_not_alias():
     offsets = [(-6.0, 3.0), (6.0, 3.0)]
     free = _array_sim([(y, z) for y, z in offsets], [half] * 2, nsegs=14)
     free.build_array_blocks()
-    grnd = _ground_array(offsets, [half] * 2, ArrayBlockPySim, nsegs=14)
+    grnd = _ground_array(offsets, [half] * 2, ArrayBlockSolver, nsegs=14)
     grnd.build_array_blocks()
     # the grounded build must assemble its own self-block, not reuse the
     # free-space one cached under the same translation-invariant signature

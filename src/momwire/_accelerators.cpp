@@ -776,9 +776,9 @@ assemble_Z_general(
 //   G(R) = exp(-j*k*R) / (4*pi*R)
 //   ui[q] = t_q * len_i,  uj[r] = t_r * len_j  (local arc lengths)
 //
-// Used by BSplinePySim._build_J_blocks for the all-pairs off-edge piece
+// Used by BSplineSolver._build_J_blocks for the all-pairs off-edge piece
 // (same a^2 wire-radius regularization handles touching segments at kinks
-// and at junctions). Single-k for now (BSplinePySim hasn't grown a swept
+// and at junctions). Single-k for now (BSplineSolver hasn't grown a swept
 // path yet); add a batched k_array variant later if/when needed.
 //
 // Template parameter D = B-spline degree (1 or 2 currently — explicit
@@ -978,7 +978,7 @@ seg_seg_full_moments_bspline_kernel(
 // and D+1 polynomial moments per wing. Hardcoding NM as a compile-time
 // constant unrolls the (D+1)^4 inner muladd loop.
 //
-// Single-k for now (BSplinePySim doesn't have a swept path yet); the inputs
+// Single-k for now (BSplineSolver doesn't have a swept path yet); the inputs
 // are scalar omega instead of an omega_array.
 template<int D>
 static py::array_t<std::complex<double>>
@@ -1792,7 +1792,7 @@ assemble_Z_enrich(
 // extraction: ∫ 1/r_0 dz' = arcsinh((H-z)/ρ) - arcsinh((-H-z)/ρ); regular
 // remainder via Gauss-Legendre on the (G_0 - 1/r_0) integrand. Sin/cos
 // sources are fully closed-form per Eqs 76-79 of the LLNL theory manual
-// (mirrored by the numpy reference in src/pysim/sinusoidal.py _field_tensor).
+// (mirrored by the numpy reference in src/momwire/sinusoidal.py _field_tensor).
 //
 // Parallelism: each (m, n) pair is independent. OpenMP collapse(2) over the
 // (m, n) grid; per-n constants (H_n, sin(kH_n), cos(kH_n)) are precomputed

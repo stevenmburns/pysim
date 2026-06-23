@@ -31,8 +31,8 @@ def _geometry(
     n_per_long_edge: int,
     z_offset: float = 0.0,
 ) -> dict:
-    """Build the 5 pysim wires, per-edge segment counts, and the K=2/K=3
-    junction descriptors that TriangularPySim needs."""
+    """Build the 5 momwire wires, per-edge segment counts, and the K=2/K=3
+    junction descriptors that TriangularSolver needs."""
     half_w = wavelength_design * width_factor / 2.0
     z_mid = wavelength_design * (mid_height_factor - top_height_factor) + z_offset
     z_top = z_offset
@@ -61,7 +61,7 @@ def _geometry(
     # either undersample the cross-bar or wildly oversample the verticals —
     # uniform-per-edge matches the reference NEC card layout.
     #
-    # Feed-wire parity: pysim's tent basis carries the source on an interior
+    # Feed-wire parity: momwire's tent basis carries the source on an interior
     # knot. For that knot to sit exactly on the gap's geometric centre the
     # segment count must be EVEN; n_feed=2 puts the single interior knot at
     # z=0. Minimum 2 (n_feed=1 leaves no interior knot to feed on).
@@ -127,13 +127,13 @@ def _derive(req: dict, z_offset: float):
     }
 
 
-def pysim_solve(req: dict) -> dict:
+def momwire_solve(req: dict) -> dict:
     from web.server import (
         C_LIGHT,
         _PEC_GROUND_EPS_R,
         _PEC_GROUND_SIGMA,
-        _make_pysim_sim,
-        _pack_pysim_wires,
+        _make_momwire_sim,
+        _pack_momwire_wires,
         _polyline_knots,
         _read_ground,
     )
@@ -147,7 +147,7 @@ def pysim_solve(req: dict) -> dict:
     n_per_wire = d["n_per_wire"]
     wavelength_meas = C_LIGHT / (meas_freq_mhz * 1e6)
 
-    sim = _make_pysim_sim(
+    sim = _make_momwire_sim(
         req,
         wires=geom["wires"],
         n_per_edge_per_wire=geom["n_per_edge_per_wire"],
@@ -169,7 +169,7 @@ def pysim_solve(req: dict) -> dict:
         for w, npe in zip(geom["wires"], geom["n_per_edge_per_wire"])
     ]
     wire_labels = ["feed", "cross_right", "upper", "cross_left", "lower"]
-    wire_records = _pack_pysim_wires(sim, coeffs, knots_per_wire, wire_labels)
+    wire_records = _pack_momwire_wires(sim, coeffs, knots_per_wire, wire_labels)
 
     feed_knots = knots_per_wire[geom["feed_wire_index"]]
     arc_at_knot = np.concatenate(
@@ -203,15 +203,15 @@ def pysim_solve(req: dict) -> dict:
     }
 
 
-def pysim_sweep(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[float]]:
-    from web.server import C_LIGHT, _make_pysim_sim, _read_ground
+def momwire_sweep(req: dict, freqs_mhz: list[float]) -> tuple[list[float], list[float]]:
+    from web.server import C_LIGHT, _make_momwire_sim, _read_ground
 
     ground_on, _, z_offset = _read_ground(req)
     d = _derive(req, z_offset)
     geom = d["geom"]
     n_per_wire = d["n_per_wire"]
 
-    sim = _make_pysim_sim(
+    sim = _make_momwire_sim(
         req,
         wires=geom["wires"],
         n_per_edge_per_wire=geom["n_per_edge_per_wire"],
@@ -418,8 +418,8 @@ EXAMPLE = register(
         name="hentenna",
         label="Hentenna",
         default_view="yz",
-        pysim_solve=pysim_solve,
-        pysim_sweep=pysim_sweep,
+        momwire_solve=momwire_solve,
+        momwire_sweep=momwire_sweep,
         pynec_build=pynec_build,
         pynec_solve=pynec_solve,
         param_schema=(

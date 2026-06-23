@@ -1,6 +1,6 @@
 """Higher-order B-spline Galerkin MoM solver.
 
-`TriangularPySim` is the degree-1 B-spline (tent) special case; this
+`TriangularSolver` is the degree-1 B-spline (tent) special case; this
 module extends to arbitrary degree d on multi-wire polylines with K-wire
 junctions, primarily as an in-codebase arbiter for the hentenna question
 (NEXT_STEPS.md items 9, 13, 14): does the tent basis converge to the
@@ -15,7 +15,7 @@ Scope:
   * K-wire junctions with KCL constraint (Σ outflow currents = 0)
   * NO ground plane (yet)
 
-Same as TriangularPySim, but with a polynomial-of-degree-d on each segment
+Same as TriangularSolver, but with a polynomial-of-degree-d on each segment
 instead of just a linear ramp. Each interior basis Φ_m spans up to d+1
 contiguous segments within a single wire; on each segment in its support
 ("wing") the basis equals Σ_p C[m, w, p] · u^p with u local arc length.
@@ -32,7 +32,7 @@ Galerkin assembly:
 Junction directional bases: at every junction node with K connected wire-
 ends we add K boundary bases (B_0 or B_{N+d-1} of each connected wire,
 the ones with value 1 at the junction) and enforce KCL via a Lagrange-
-multiplier row, mirroring TriangularPySim's treatment.
+multiplier row, mirroring TriangularSolver's treatment.
 
 Feed: v_m = Φ_m(s_f), Z_drive = 1 / (v^T c).
 """
@@ -81,7 +81,7 @@ _V_UNIT_INV: dict[int, np.ndarray] = {
 # don't depend on `k` / wavelength / feed location. The instance-level
 # caches in `_cached_geometry` / `_cached_basis_polynomials` only help the
 # swept path (where one solver instance handles many k's). The engine
-# wrapper instantiates a fresh BSplinePySim per impedance() call, so the
+# wrapper instantiates a fresh BSplineSolver per impedance() call, so the
 # instance cache is dead for the interactive UI sweep. These module-level
 # caches survive across instances and turn a band-sweep of N freqs into
 # 1 cold call + (N−1) hot calls for the geometry/basis stages.
@@ -153,7 +153,7 @@ def _xfem_projection_coeffs(d):
     return coeffs
 
 
-class BSplinePySim:
+class BSplineSolver:
     """Degree-d B-spline Galerkin MoM, multi-wire polylines with junctions.
 
     Parameters
@@ -170,12 +170,12 @@ class BSplinePySim:
         Φ_m(s_f). Default: feed wire midpoint.
     junctions : list of [(wire_idx, "start"|"end"), ...] tuples, each entry
         one junction node where K wire endpoints meet. Same convention as
-        TriangularPySim.
+        TriangularSolver.
     n_qp_pair : Gauss-Legendre nodes per segment per axis for the smooth-
         kernel piece of same-edge pairs and for all cross-edge / cross-wire
         pairs (full kernel with a² regularization).
     wavelength, halfdriver_factor, wire_radius, nsegs : as in
-        TriangularPySim.
+        TriangularSolver.
     """
 
     eps = 8.8541878188e-12
@@ -765,7 +765,7 @@ class BSplinePySim:
         """All polynomial moment integrals J_pq[i, j] for p, q ∈ {0..d} and
         every (i, j) global segment pair. Returns shape (d+1, d+1, N, N).
 
-        Fused build mirroring TriangularPySim._build_J_blocks: first compute
+        Fused build mirroring TriangularSolver._build_J_blocks: first compute
         every pair by full GL quadrature on the regularized full kernel
         G = exp(-jkR)/(4πR), R² = |Δr|² + a²; then overwrite same-edge
         blocks with the analytic static + GL-regularized split (essential
@@ -992,7 +992,7 @@ class BSplinePySim:
     def _solve_with_kcl(self, Z, v, kcl_A):
         """Constrained solve [Z A^T; A 0] [I; λ] = [v; 0] via Schur.
 
-        Identical structure to TriangularPySim._solve_with_kcl. If kcl_A
+        Identical structure to TriangularSolver._solve_with_kcl. If kcl_A
         is empty (no junctions), do a plain solve.
         """
         if kcl_A.shape[0] == 0:
@@ -1124,9 +1124,9 @@ class BSplinePySim:
         Mirrors the C++ structure (precompute Φ_sing values/derivatives
         and 3D positions at the enrichment-side quadrature nodes, then
         nested-loop Galerkin sums for Z_ee / Z_pe / Z_ep) so the parity
-        test in tests/test_pysim.py catches any drift between the two.
+        test in tests/test_momwire.py catches any drift between the two.
 
-        Also lets BSplinePySim(use_singular_enrichment=True) work without
+        Also lets BSplineSolver(use_singular_enrichment=True) work without
         the C++ accelerator at all — Windows users hit this path because
         setup.py skips the Pybind11Extension under MSVC (the GCC-only
         `-fopenmp` / `-mavx2` / `-lmvec` flags don't link there).
@@ -1291,7 +1291,7 @@ class BSplinePySim:
         self, geom, supp_seg_poly, polys_poly, active_junction_indices=None
     ):
         """Assemble the (Z_pe, Z_ep, Z_ee) enrichment blocks via the C++
-        accelerator (`pysim._accelerators.assemble_Z_enrich`).
+        accelerator (`momwire._accelerators.assemble_Z_enrich`).
 
         Z = [[Z_pp, Z_pe],
              [Z_ep, Z_ee]]
@@ -1489,7 +1489,7 @@ class BSplinePySim:
     def compute_y_matrix(self) -> np.ndarray:
         """Short-circuit admittance matrix [Y_sc] at the configured feeds.
 
-        See `TriangularPySim.compute_y_matrix` for the math + intent.
+        See `TriangularSolver.compute_y_matrix` for the math + intent.
         BSpline's per-feed driving-point current uses the Galerkin
         reciprocity I_i = v_i^T · coeffs (inner product of feed i's
         source vector with the solution). Stacking the N source
@@ -1506,7 +1506,7 @@ class BSplinePySim:
         """
         if self.use_singular_enrichment:
             raise NotImplementedError(
-                "BSplinePySim.compute_y_matrix doesn't yet support enrichment"
+                "BSplineSolver.compute_y_matrix doesn't yet support enrichment"
             )
 
         geom = self._build_geometry()
@@ -1549,7 +1549,7 @@ class BSplinePySim:
         still gated."""
         if self.use_singular_enrichment:
             raise NotImplementedError(
-                "BSplinePySim.compute_y_matrix_swept doesn't yet support enrichment"
+                "BSplineSolver.compute_y_matrix_swept doesn't yet support enrichment"
             )
 
         k_array = np.asarray(k_array, dtype=float)

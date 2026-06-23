@@ -7,9 +7,9 @@ os.environ["MKL_NUM_THREADS"] = "8"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "8"
 os.environ["NUMEXPR_NUM_THREADS"] = "8"
 
-from pysim.bspline import BSplinePySim
-from pysim.sinusoidal import SinusoidalPySim
-from pysim.triangular import TriangularPySim
+from momwire.bspline import BSplineSolver
+from momwire.sinusoidal import SinusoidalSolver
+from momwire.triangular import TriangularSolver
 
 import numpy as np
 
@@ -17,7 +17,7 @@ import numpy as np
 @pytest.mark.parametrize("nsegs", [20, 40, 80])
 def test_triangular_dipole_smoke(nsegs):
     L = 2 * 0.962 * 22 / 4
-    sim = TriangularPySim(
+    sim = TriangularSolver(
         wires=[np.array([[0.0, 0.0, 0.0], [0.0, L, 0.0]])],
         n_per_edge_per_wire=[[nsegs]],
         nsegs=nsegs,
@@ -38,11 +38,11 @@ def test_triangular_two_wire_yagi_smoke(nsegs):
     # Driver + 1.05x reflector at 1 halfdriver spacing — the classic 2-element
     # Yagi case. Mutual coupling pushes the driver Z away from bare-dipole
     # 69.6 - j18.2 toward roughly 77 + j6.
-    hd = 0.962 * 22 / 4  # matches TriangularPySim defaults
+    hd = 0.962 * 22 / 4  # matches TriangularSolver defaults
     sp = hd
     driver = np.array([[0.0, -hd, 0.0], [0.0, hd, 0.0]])
     refl = np.array([[-sp, -1.05 * hd, 0.0], [-sp, 1.05 * hd, 0.0]])
-    z, c = TriangularPySim(
+    z, c = TriangularSolver(
         wires=[driver, refl],
         n_per_edge_per_wire=[[nsegs], [nsegs]],
         nsegs=nsegs,
@@ -63,12 +63,12 @@ def test_triangular_collinear_polyline(nsegs):
     L = 2 * 0.962 * 22 / 4
     straight = np.array([[0.0, 0.0, 0.0], [0.0, L, 0.0]])
     polyline = np.array([[0.0, 0.0, 0.0], [0.0, L / 2, 0.0], [0.0, L, 0.0]])
-    z_straight, _ = TriangularPySim(
+    z_straight, _ = TriangularSolver(
         wires=[straight], n_per_edge_per_wire=[[nsegs]], nsegs=nsegs
     ).compute_impedance()
     # Use n_qp_off=8 so the artificial cross-edge quadrature at the fake
     # corner has the same precision as the analytic same-edge path.
-    z_bent, _ = TriangularPySim(
+    z_bent, _ = TriangularSolver(
         wires=[polyline],
         n_per_edge_per_wire=[[nsegs // 2, nsegs // 2]],
         nsegs=nsegs,
@@ -91,7 +91,7 @@ def test_triangular_v_dipole_smoke():
             [0.0, +half * cos_a, -half * sin_a],
         ]
     )
-    z, c = TriangularPySim(
+    z, c = TriangularSolver(
         wires=[polyline], n_per_edge_per_wire=[[40, 40]], nsegs=80
     ).compute_impedance()
     assert c.shape == (79,)
@@ -126,7 +126,7 @@ def test_triangular_swept_matches_per_freq(nsegs):
             [-0.2, -halfL, 0.0],
         ]
     )
-    sim = TriangularPySim(
+    sim = TriangularSolver(
         wires=[driver, refl],
         n_per_edge_per_wire=[[4, nsegs, 1, nsegs, 4], [4, nsegs, 4]],
         nsegs=nsegs,
@@ -176,7 +176,7 @@ def test_triangular_moxon_smoke():
     driver = np.array([G, H, T, S, A, B], dtype=float)
     reflector = np.array([Cc, D, E, F], dtype=float)
 
-    sim = TriangularPySim(
+    sim = TriangularSolver(
         wires=[driver, reflector],
         n_per_edge_per_wire=[[8, 21, 1, 21, 8], [8, 21, 8]],
         feed_wire_index=0,
@@ -237,7 +237,7 @@ def test_triangular_hexbeam_smoke():
     driver = np.array([I_, J, T, S, A, B], dtype=float)
     reflector = np.array([Cc, D, E, F, G, H], dtype=float)
 
-    sim = TriangularPySim(
+    sim = TriangularSolver(
         wires=[driver, reflector],
         n_per_edge_per_wire=[[15, 21, 1, 21, 15], [3, 21, 21, 21, 3]],
         feed_wire_index=0,
@@ -264,7 +264,7 @@ def test_triangular_k2_junction_equivalent_to_single_polyline():
     """
     # Bent dipole, kink at (0, 0, -2), feed mid-arm (NOT at the kink).
     pl_single = np.array([[0.0, -5.0, 0.0], [0.0, 0.0, -2.0], [0.0, 5.0, 0.0]])
-    sim_single = TriangularPySim(
+    sim_single = TriangularSolver(
         wires=[pl_single],
         n_per_edge_per_wire=[[15, 15]],
         feed_wire_index=0,
@@ -278,7 +278,7 @@ def test_triangular_k2_junction_equivalent_to_single_polyline():
     # Same geometry split into 2 wires joined by a K=2 junction at the kink.
     pl0 = np.array([[0.0, -5.0, 0.0], [0.0, 0.0, -2.0]])
     pl1 = np.array([[0.0, 0.0, -2.0], [0.0, 5.0, 0.0]])
-    sim_junction = TriangularPySim(
+    sim_junction = TriangularSolver(
         wires=[pl0, pl1],
         n_per_edge_per_wire=[[15], [15]],
         feed_wire_index=0,
@@ -311,9 +311,9 @@ def test_triangular_y_matrix_with_junctions_single_feed():
         wire_radius=0.0005,
         junctions=[[(0, "end"), (1, "start")]],
     )
-    sim = TriangularPySim(**common)
+    sim = TriangularSolver(**common)
     z, _ = sim.compute_impedance()
-    Y = TriangularPySim(**common).compute_y_matrix()
+    Y = TriangularSolver(**common).compute_y_matrix()
     assert Y.shape == (1, 1)
     assert abs(Y[0, 0] - 1.0 / z) < 1e-10, f"Y[0,0]={Y[0, 0]}, 1/Z={1.0 / z}"
 
@@ -334,7 +334,7 @@ def test_triangular_y_matrix_with_junctions_multi_feed():
         junctions=[[(0, "end"), (1, "start")]],
     )
 
-    Y = TriangularPySim(**common).compute_y_matrix()
+    Y = TriangularSolver(**common).compute_y_matrix()
     assert Y.shape == (2, 2)
     assert abs(Y[0, 1] - Y[1, 0]) < 1e-10, "Y not symmetric (reciprocity)"
 
@@ -345,7 +345,7 @@ def test_triangular_y_matrix_with_junctions_multi_feed():
             for k, (w, arc, _) in enumerate(common["feeds"])
         ]
         ref_kwargs = {**common, "feeds": feeds_j}
-        sim_j = TriangularPySim(**ref_kwargs)
+        sim_j = TriangularSolver(**ref_kwargs)
         _z, coeffs = sim_j.compute_impedance()
         m_indices = sim_j._feed_basis_indices(sim_j._build_geometry())
         Y_ref[:, j] = [coeffs[m] for m in m_indices]
@@ -369,12 +369,12 @@ def test_triangular_y_matrix_swept_with_junctions_matches_per_freq():
     freqs_mhz = np.array([10.0, 14.0, 20.0])
     k_array = 2 * np.pi * freqs_mhz * 1e6 / C_LIGHT
 
-    sim_swept = TriangularPySim(wavelength=22, **common)
+    sim_swept = TriangularSolver(wavelength=22, **common)
     Y_swept = sim_swept.compute_y_matrix_swept(k_array)
     assert Y_swept.shape == (3, 2, 2)
 
     for i, f in enumerate(freqs_mhz):
-        sim_f = TriangularPySim(wavelength=C_LIGHT / (f * 1e6), **common)
+        sim_f = TriangularSolver(wavelength=C_LIGHT / (f * 1e6), **common)
         Y_f = sim_f.compute_y_matrix()
         assert np.allclose(Y_swept[i], Y_f, atol=1e-10), (
             f"f={f}: swept Y differs from per-k Y"
@@ -382,7 +382,7 @@ def test_triangular_y_matrix_swept_with_junctions_matches_per_freq():
 
 
 def test_sinusoidal_y_matrix_with_junctions_single_feed():
-    """SinusoidalPySim handles junctions structurally (via the N±(i) neighbour
+    """SinusoidalSolver handles junctions structurally (via the N±(i) neighbour
     topology with σ=±1 signs) rather than via a Lagrange-augmented KCL, so
     compute_y_matrix doesn't need a separate junction path. Lock that in:
     Y[0,0] = 1/Z on a K=2-junction bent dipole."""
@@ -397,8 +397,8 @@ def test_sinusoidal_y_matrix_with_junctions_single_feed():
         wire_radius=0.0005,
         junctions=[[(0, "end"), (1, "start")]],
     )
-    z, _ = SinusoidalPySim(**common).compute_impedance()
-    Y = SinusoidalPySim(**common).compute_y_matrix()
+    z, _ = SinusoidalSolver(**common).compute_impedance()
+    Y = SinusoidalSolver(**common).compute_y_matrix()
     assert Y.shape == (1, 1)
     assert abs(Y[0, 0] - 1.0 / z) < 1e-9, f"Y[0,0]={Y[0, 0]}, 1/Z={1.0 / z}"
 
@@ -419,7 +419,7 @@ def test_sinusoidal_y_matrix_with_junctions_multi_feed():
         junctions=[[(0, "end"), (1, "start")]],
     )
 
-    Y = SinusoidalPySim(**common).compute_y_matrix()
+    Y = SinusoidalSolver(**common).compute_y_matrix()
     assert Y.shape == (2, 2)
     assert abs(Y[0, 1] - Y[1, 0]) < 1e-6, "Y not symmetric within MoM tolerance"
 
@@ -430,7 +430,7 @@ def test_sinusoidal_y_matrix_with_junctions_multi_feed():
             for k, (w, arc, _) in enumerate(common["feeds"])
         ]
         ref_kwargs = {**common, "feeds": feeds_j}
-        sim_j = SinusoidalPySim(**ref_kwargs)
+        sim_j = SinusoidalSolver(**ref_kwargs)
         _z, alpha = sim_j.compute_impedance()
         geom = sim_j._build_geometry()
         _G, seg_view = sim_j._assemble_Z(geom, sim_j.k)
@@ -454,12 +454,12 @@ def test_sinusoidal_y_matrix_swept_with_junctions_matches_per_freq():
     freqs_mhz = np.array([10.0, 14.0, 20.0])
     k_array = 2 * np.pi * freqs_mhz * 1e6 / C_LIGHT
 
-    sim_swept = SinusoidalPySim(wavelength=22, **common)
+    sim_swept = SinusoidalSolver(wavelength=22, **common)
     Y_swept = sim_swept.compute_y_matrix_swept(k_array)
     assert Y_swept.shape == (3, 2, 2)
 
     for i, f in enumerate(freqs_mhz):
-        sim_f = SinusoidalPySim(wavelength=C_LIGHT / (f * 1e6), **common)
+        sim_f = SinusoidalSolver(wavelength=C_LIGHT / (f * 1e6), **common)
         Y_f = sim_f.compute_y_matrix()
         assert np.allclose(Y_swept[i], Y_f, atol=1e-10), (
             f"f={f}: swept Y differs from per-k Y"
@@ -485,8 +485,8 @@ def test_bspline_y_matrix_with_junctions_single_feed(degree):
         junctions=[[(0, "end"), (1, "start")]],
         degree=degree,
     )
-    z, _ = BSplinePySim(**common).compute_impedance()
-    Y = BSplinePySim(**common).compute_y_matrix()
+    z, _ = BSplineSolver(**common).compute_impedance()
+    Y = BSplineSolver(**common).compute_y_matrix()
     assert Y.shape == (1, 1)
     assert abs(Y[0, 0] - 1.0 / z) < 1e-10, (
         f"d={degree}: Y[0,0]={Y[0, 0]}, 1/Z={1.0 / z}"
@@ -509,7 +509,7 @@ def test_bspline_y_matrix_with_junctions_multi_feed(degree):
         degree=degree,
     )
 
-    Y = BSplinePySim(**common).compute_y_matrix()
+    Y = BSplineSolver(**common).compute_y_matrix()
     assert Y.shape == (2, 2)
     assert abs(Y[0, 1] - Y[1, 0]) < 1e-10, f"d={degree}: Y not symmetric (reciprocity)"
 
@@ -520,7 +520,7 @@ def test_bspline_y_matrix_with_junctions_multi_feed(degree):
             (w, arc, 1.0 + 0j if k == j else 0.0 + 0j)
             for k, (w, arc, _) in enumerate(common["feeds"])
         ]
-        sim_j = BSplinePySim(**{**common, "feeds": feeds_j})
+        sim_j = BSplineSolver(**{**common, "feeds": feeds_j})
         _z, coeffs = sim_j.compute_impedance()
         geom = sim_j._build_geometry()
         supp_seg, polys, _kcl, wk, wbg = sim_j._build_basis_polynomials(geom)
@@ -549,12 +549,12 @@ def test_bspline_y_matrix_swept_with_junctions_matches_per_freq(degree):
     freqs_mhz = np.array([10.0, 14.0, 20.0])
     k_array = 2 * np.pi * freqs_mhz * 1e6 / C_LIGHT
 
-    sim_swept = BSplinePySim(wavelength=22, **common)
+    sim_swept = BSplineSolver(wavelength=22, **common)
     Y_swept = sim_swept.compute_y_matrix_swept(k_array)
     assert Y_swept.shape == (3, 2, 2)
 
     for i, f in enumerate(freqs_mhz):
-        sim_f = BSplinePySim(wavelength=C_LIGHT / (f * 1e6), **common)
+        sim_f = BSplineSolver(wavelength=C_LIGHT / (f * 1e6), **common)
         Y_f = sim_f.compute_y_matrix()
         assert np.allclose(Y_swept[i], Y_f, atol=1e-10), (
             f"d={degree}, f={f}: swept Y differs from per-k Y"
@@ -574,13 +574,13 @@ def test_triangular_k2_junction_swept_matches_per_freq():
         wire_radius=0.0005,
         junctions=[[(0, "end"), (1, "start")]],
     )
-    sim_sweep = TriangularPySim(wavelength=22, **common)
+    sim_sweep = TriangularSolver(wavelength=22, **common)
     C_LIGHT = 299_792_458.0
     freqs_mhz = np.array([10.0, 14.0, 20.0])
     k_array = 2 * np.pi * freqs_mhz * 1e6 / C_LIGHT
     z_swept = sim_sweep.compute_impedance_swept(k_array)
     for f, zs in zip(freqs_mhz, z_swept):
-        sim_f = TriangularPySim(wavelength=C_LIGHT / (f * 1e6), **common)
+        sim_f = TriangularSolver(wavelength=C_LIGHT / (f * 1e6), **common)
         z_f, _ = sim_f.compute_impedance()
         assert abs(zs - z_f) < 1e-9, f"f={f}: swept={zs}, single={z_f}"
 
@@ -643,7 +643,7 @@ def test_triangular_hentenna_smoke():
         [(2, "end"), (3, "end"), (4, "start")],  # at D (K=3)
     ]
 
-    sim = TriangularPySim(
+    sim = TriangularSolver(
         wires=wires,
         n_per_edge_per_wire=n_per_edge_per_wire,
         feed_wire_index=0,
@@ -666,17 +666,17 @@ def test_triangular_hentenna_smoke():
 def test_bspline_cpp_assemble_z_matches_numpy():
     """The C++ assemble_Z_bspline accelerator must agree with the numpy
     reference path bit-exactly (modulo floating-point reduction order ~1e-12
-    relative). Run by toggling the dispatch flag in pysim.bspline.
+    relative). Run by toggling the dispatch flag in momwire.bspline.
     """
-    import pysim.bspline as bmod
-    from pysim.bspline import BSplinePySim
+    import momwire.bspline as bmod
+    from momwire.bspline import BSplineSolver
 
     if not bmod._HAVE_BSPLINE_ASSEMBLE_ACCEL:
         pytest.skip("Z assembly accelerator not built")
 
     L = 2 * 0.962 * 22 / 4
     wires = [np.array([[0.0, -L / 2, 0.0], [0.0, L / 2, 0.0]])]
-    sim = BSplinePySim(wires=wires, n_per_edge_per_wire=[[21]], nsegs=21, degree=2)
+    sim = BSplineSolver(wires=wires, n_per_edge_per_wire=[[21]], nsegs=21, degree=2)
 
     # Driver impedance via C++ path
     z_cpp, _ = sim.compute_impedance()
@@ -686,7 +686,7 @@ def test_bspline_cpp_assemble_z_matches_numpy():
     try:
         bmod._HAVE_BSPLINE_ASSEMBLE_ACCEL = False
         # Re-build sim to invalidate any cached Z (compute_impedance is stateless re Z)
-        z_np, _ = BSplinePySim(
+        z_np, _ = BSplineSolver(
             wires=wires, n_per_edge_per_wire=[[21]], nsegs=21, degree=2
         ).compute_impedance()
     finally:
@@ -702,7 +702,7 @@ def test_bspline_cpp_kernel_matches_numpy():
     reduction-order error is below GL quadrature precision and the closed-form
     arithmetic precision).
     """
-    from pysim._bspline_kernels import (
+    from momwire._bspline_kernels import (
         _seg_seg_full_moments_offedge,
         _seg_seg_static_moments,
         _HAVE_BSPLINE_ACCEL,
@@ -713,7 +713,7 @@ def test_bspline_cpp_kernel_matches_numpy():
         pytest.skip("C++ accelerators not built")
 
     # Force the numpy reference paths via monkeypatching the module-level flags
-    import pysim._bspline_kernels as kmod
+    import momwire._bspline_kernels as kmod
 
     N = 12
     seg = np.linspace(0, 6.0, N + 1)
@@ -753,10 +753,10 @@ def test_bspline_cpp_degree1_matches_numpy():
     max_d=1, and assemble_Z_bspline_kernel<1> -- which the degree=2 tests
     never reach. Each must agree with the pure-numpy reference path.
     """
-    import pysim.bspline as bmod
-    from pysim.bspline import BSplinePySim
-    import pysim._bspline_kernels as kmod
-    from pysim._bspline_kernels import (
+    import momwire.bspline as bmod
+    from momwire.bspline import BSplineSolver
+    import momwire._bspline_kernels as kmod
+    from momwire._bspline_kernels import (
         _seg_seg_full_moments_offedge,
         _seg_seg_static_moments,
     )
@@ -801,14 +801,14 @@ def test_bspline_cpp_degree1_matches_numpy():
     # --- assemble_Z_bspline_kernel<1> via a full degree=1 dipole solve --------
     L = 2 * 0.962 * 22 / 4
     wires = [np.array([[0.0, -L / 2, 0.0], [0.0, L / 2, 0.0]])]
-    z_cpp, _ = BSplinePySim(
+    z_cpp, _ = BSplineSolver(
         wires=wires, n_per_edge_per_wire=[[21]], nsegs=21, degree=1
     ).compute_impedance()
 
     saved_asm = bmod._HAVE_BSPLINE_ASSEMBLE_ACCEL
     try:
         bmod._HAVE_BSPLINE_ASSEMBLE_ACCEL = False
-        z_np, _ = BSplinePySim(
+        z_np, _ = BSplineSolver(
             wires=wires, n_per_edge_per_wire=[[21]], nsegs=21, degree=1
         ).compute_impedance()
     finally:
@@ -825,8 +825,8 @@ def test_triangular_reg_and_offedge_numpy_matches_cpp():
     _HAVE_*_ACCEL flags also exercises the numpy fallbacks themselves (taken
     on platforms where the extension isn't built).
     """
-    import pysim._triangular_kernels as tk
-    from pysim._triangular_kernels import (
+    import momwire._triangular_kernels as tk
+    from momwire._triangular_kernels import (
         _seg_seg_reg_all_batch,
         _seg_seg_offedge_quad_batch,
     )
@@ -905,14 +905,14 @@ def test_triangular_reg_and_offedge_numpy_matches_cpp():
 
 @pytest.mark.parametrize("degree,nsegs", [(2, 21), (2, 81)])
 def test_bspline_dipole_converges_to_nec(degree, nsegs):
-    """BSplinePySim degree-2 (quadratic) on the default half-wave dipole.
+    """BSplineSolver degree-2 (quadratic) on the default half-wave dipole.
     With higher-order bases and analytic singularity subtraction we expect
     rapid convergence to the NEC reference 69.64 - j18.21; even N=21 should
     be within ~1 Ω.
     """
     L = 2 * 0.962 * 22 / 4
     wires = [np.array([[0.0, -L / 2, 0.0], [0.0, L / 2, 0.0]])]
-    sim = BSplinePySim(
+    sim = BSplineSolver(
         wires=wires,
         n_per_edge_per_wire=[[nsegs]],
         nsegs=nsegs,
@@ -945,7 +945,7 @@ def test_bspline_d2_dipole_smoothed_source():
     def sweep(alpha, ns):
         Zs = []
         for n in ns:
-            z, _ = BSplinePySim(
+            z, _ = BSplineSolver(
                 wires=wires,
                 n_per_edge_per_wire=[[n]],
                 nsegs=n,
@@ -1030,7 +1030,7 @@ def test_bspline_d2_hentenna_arbitrates_against_triangular():
     # tent and bspline both want EVEN nfeed (interior knot at z=0).
     nfeed = 2
     npe = [[nfeed], [n], [n, n, n], [n], [n, n, n]]
-    z_tri, _ = TriangularPySim(
+    z_tri, _ = TriangularSolver(
         wires=wires,
         n_per_edge_per_wire=npe,
         feed_wire_index=0,
@@ -1040,7 +1040,7 @@ def test_bspline_d2_hentenna_arbitrates_against_triangular():
         nsegs=n,
         junctions=junctions,
     ).compute_impedance()
-    z_b2, _ = BSplinePySim(
+    z_b2, _ = BSplineSolver(
         degree=2,
         wires=wires,
         n_per_edge_per_wire=npe,
@@ -1090,7 +1090,7 @@ def test_bspline_d2_hentenna_singular_enrichment():
       n=161 → 43.0845 + j38.8749
     Rate fit on R over the four points gives p ≈ 2.74.
     """
-    pytest.importorskip("pysim._accelerators")
+    pytest.importorskip("momwire._accelerators")
     C_LIGHT = 299_792_458.0
     freq_mhz = 28.47
     wavelength = C_LIGHT / (freq_mhz * 1e6)
@@ -1129,7 +1129,7 @@ def test_bspline_d2_hentenna_singular_enrichment():
     Xs = []
     for n in ns:
         npe = [[nfeed], [n], [n, n, n], [n], [n, n, n]]
-        z, _ = BSplinePySim(
+        z, _ = BSplineSolver(
             degree=2,
             wires=wires,
             n_per_edge_per_wire=npe,
@@ -1227,10 +1227,10 @@ def test_bspline_d2_hentenna_enrichment_stable_variant():
         junctions=junctions,
         use_singular_enrichment=True,
     )
-    z_raw, _ = BSplinePySim(
+    z_raw, _ = BSplineSolver(
         degree=2, enrichment_variant="raw", **common
     ).compute_impedance()
-    z_stb, _ = BSplinePySim(
+    z_stb, _ = BSplineSolver(
         degree=2, enrichment_variant="stable", **common
     ).compute_impedance()
     # (a) Both variants converge to the same Z; pin stable's value and the
@@ -1242,10 +1242,10 @@ def test_bspline_d2_hentenna_enrichment_stable_variant():
     assert abs(z_raw - z_stb) < 5e-3
 
     # (b) At d=1 the bubble subspace is empty → stable = raw bit-exact.
-    z1_raw, _ = BSplinePySim(
+    z1_raw, _ = BSplineSolver(
         degree=1, enrichment_variant="raw", **common
     ).compute_impedance()
-    z1_stb, _ = BSplinePySim(
+    z1_stb, _ = BSplineSolver(
         degree=1, enrichment_variant="stable", **common
     ).compute_impedance()
     assert z1_raw == z1_stb
@@ -1305,17 +1305,17 @@ def test_bspline_d2_hentenna_enrichment_tikhonov_variant():
         nsegs=n,
         junctions=junctions,
     )
-    z_raw, _ = BSplinePySim(
+    z_raw, _ = BSplineSolver(
         **common, use_singular_enrichment=True, enrichment_variant="raw"
     ).compute_impedance()
-    z_tik_zero, _ = BSplinePySim(
+    z_tik_zero, _ = BSplineSolver(
         **common,
         use_singular_enrichment=True,
         enrichment_variant="tikhonov",
         tikhonov_lambda=0.0,
     ).compute_impedance()
-    z_off, _ = BSplinePySim(**common, use_singular_enrichment=False).compute_impedance()
-    z_tik_big, _ = BSplinePySim(
+    z_off, _ = BSplineSolver(**common, use_singular_enrichment=False).compute_impedance()
+    z_tik_big, _ = BSplineSolver(
         **common,
         use_singular_enrichment=True,
         enrichment_variant="tikhonov",
@@ -1388,8 +1388,8 @@ def test_bspline_enrichment_auto_two_pass_selects_correctly():
         nsegs=n,
         junctions=h_juncs,
     )
-    z_h_off, _ = BSplinePySim(**h_kw, use_singular_enrichment=False).compute_impedance()
-    sim_h_auto = BSplinePySim(
+    z_h_off, _ = BSplineSolver(**h_kw, use_singular_enrichment=False).compute_impedance()
+    sim_h_auto = BSplineSolver(
         **h_kw, use_singular_enrichment=True, enrichment_variant="auto"
     )
     z_h_auto, _ = sim_h_auto.compute_impedance()
@@ -1428,10 +1428,10 @@ def test_bspline_enrichment_auto_two_pass_selects_correctly():
         junctions=y_juncs,
         enrichment_min_k=3,
     )
-    z_y_raw, _ = BSplinePySim(
+    z_y_raw, _ = BSplineSolver(
         **y_kw, use_singular_enrichment=True, enrichment_variant="raw"
     ).compute_impedance()
-    sim_y_auto = BSplinePySim(
+    sim_y_auto = BSplineSolver(
         **y_kw, use_singular_enrichment=True, enrichment_variant="auto"
     )
     z_y_auto, _ = sim_y_auto.compute_impedance()
@@ -1463,7 +1463,7 @@ def test_bspline_assemble_z_enrich_cpp_matches_numpy():
     two implementations differ only in floating-point reduction order
     (numpy's pairwise vs C++'s sequential).
     """
-    import pysim.bspline as bmod
+    import momwire.bspline as bmod
 
     # If the C++ extension wasn't built (Windows wheel, or local build
     # without pybind11), there's no C++ kernel to compare against. The
@@ -1546,7 +1546,7 @@ def test_bspline_assemble_z_enrich_cpp_matches_numpy():
     )
 
     def run(kw, variant):
-        z, _ = BSplinePySim(
+        z, _ = BSplineSolver(
             **kw,
             use_singular_enrichment=True,
             enrichment_variant=variant,
@@ -1582,7 +1582,7 @@ def test_bspline_hentenna_enrichment_left_right_symmetry():
     only converging to zero as N→∞. Caught here at modest N so any
     re-introduction of the bug fails loudly.
     """
-    pytest.importorskip("pysim._accelerators")
+    pytest.importorskip("momwire._accelerators")
     design_freq_mhz = 28.47
     C_LIGHT = 299_792_458.0
     wavelength = C_LIGHT / (design_freq_mhz * 1e6)
@@ -1617,7 +1617,7 @@ def test_bspline_hentenna_enrichment_left_right_symmetry():
 
     n = 21
     npe = [[4], [n], [n, n, n], [n], [n, n, n]]
-    sim = BSplinePySim(
+    sim = BSplineSolver(
         wires=wires,
         n_per_edge_per_wire=npe,
         feed_wire_index=0,
@@ -1664,7 +1664,7 @@ def test_sinusoidal_field_tensor_cpp_matches_numpy():
     on representative geometries. Anything looser than ~1e-13 relative
     indicates the C++ kernel diverged from the formula in sinusoidal.py.
     """
-    import pysim.sinusoidal as sin_mod
+    import momwire.sinusoidal as sin_mod
 
     if not sin_mod._HAVE_FIELD_TENSOR:
         pytest.skip("C++ accelerator not built")
@@ -1672,7 +1672,7 @@ def test_sinusoidal_field_tensor_cpp_matches_numpy():
     # Bent two-edge polyline so the (m, n) loop sees varying tangents.
     wires = [np.array([[0.0, 0.0, -5.0], [0.5, 0.0, 0.0], [0.0, 0.0, 5.0]])]
     for n in (15, 41):
-        sim = SinusoidalPySim(
+        sim = SinusoidalSolver(
             wires=wires,
             n_per_edge_per_wire=[[n, n]],
             wavelength=22.0,
@@ -1699,7 +1699,7 @@ def test_sinusoidal_field_tensor_cpp_matches_numpy():
 
 
 def test_sinusoidal_hentenna_left_right_symmetry():
-    """Hentenna is mirror-symmetric about y=0, so SinusoidalPySim's per-knot
+    """Hentenna is mirror-symmetric about y=0, so SinusoidalSolver's per-knot
     currents on the cross-bar halves (wires 1 and 3) and on the upper /
     lower rectangles (wires 2 and 4) must be mirror-symmetric to machine
     precision.
@@ -1745,7 +1745,7 @@ def test_sinusoidal_hentenna_left_right_symmetry():
         [(2, "end"), (3, "end"), (4, "start")],
     ]
     n = 21
-    sim = SinusoidalPySim(
+    sim = SinusoidalSolver(
         wires=wires,
         n_per_edge_per_wire=[[3], [n], [n, n, n], [n], [n, n, n]],
         feed_wire_index=0,
@@ -1786,9 +1786,9 @@ def test_sinusoidal_hentenna_left_right_symmetry():
 @pytest.mark.parametrize(
     "model_cls,kwargs",
     [
-        (TriangularPySim, {}),
-        (SinusoidalPySim, {}),
-        (BSplinePySim, {"degree": 2}),
+        (TriangularSolver, {}),
+        (SinusoidalSolver, {}),
+        (BSplineSolver, {"degree": 2}),
     ],
 )
 def test_currents_at_knots_s_array_matches_default_at_knots(model_cls, kwargs):
@@ -1811,7 +1811,7 @@ def test_currents_at_knots_s_array_matches_default_at_knots(model_cls, kwargs):
     knot_default = sim.currents_at_knots(coeffs)
 
     geom = sim._build_geometry()
-    if isinstance(sim, SinusoidalPySim):
+    if isinstance(sim, SinusoidalSolver):
         first = geom["wire_first"][0]
         last = geom["wire_last"][0]
         wire_h = geom["seg_h"][first : last + 1]
@@ -1837,12 +1837,12 @@ def test_currents_at_knots_s_array_matches_default_at_knots(model_cls, kwargs):
 
 @pytest.mark.parametrize("nsegs", [21, 41, 101])
 def test_sinusoidal_dipole_matches_nec2(nsegs):
-    """SinusoidalPySim implements NEC2's three-term basis (Eqs 43-64 of the
+    """SinusoidalSolver implements NEC2's three-term basis (Eqs 43-64 of the
     LLNL theory manual). On a straight dipole it should match PyNEC/nec2c
     to <0.1 Ohm — the only differences are floating-point and quadrature.
     """
     wires = [np.array([[0.0, 0.0, -5.291], [0.0, 0.0, 5.291]], dtype=float)]
-    sim = SinusoidalPySim(
+    sim = SinusoidalSolver(
         wires=wires,
         n_per_edge_per_wire=[[nsegs]],
         wavelength=22.0,
@@ -1857,7 +1857,7 @@ def test_sinusoidal_dipole_matches_nec2(nsegs):
 
 
 def test_sinusoidal_hentenna_reproduces_pynec():
-    """Sinusoidal-basis pysim reproduces PyNEC's hentenna numbers to
+    """Sinusoidal-basis momwire reproduces PyNEC's hentenna numbers to
     ~0.05 Ohm. Validates the K=2/K=3 junction-basis path against the
     NEXT_STEPS.md item 13 PyNEC reference.
     """
@@ -1895,7 +1895,7 @@ def test_sinusoidal_hentenna_reproduces_pynec():
     n = 21
     # Sinusoidal basis: ODD n_feed parity → delta-gap segment centred at z=0.
     nfeed = 3
-    sim = SinusoidalPySim(
+    sim = SinusoidalSolver(
         wires=wires,
         n_per_edge_per_wire=[[nfeed], [n], [n, n, n], [n], [n, n, n]],
         feed_wire_index=0,
@@ -1913,7 +1913,7 @@ def test_sinusoidal_hentenna_reproduces_pynec():
 
 def test_triangular_fandipole_two_band_smoke():
     """Two-band fan dipole (cone arrangement from antenna_designer) modelled
-    with pysim junctions at S and T. Verifies the K=3 path runs, converges,
+    with momwire junctions at S and T. Verifies the K=3 path runs, converges,
     and produces plausible Z near the design freq (resonant 20m band).
     """
     import math
@@ -1964,7 +1964,7 @@ def test_triangular_fandipole_two_band_smoke():
     ]
     for fmhz in [14.3, 28.47]:
         wavelength = C_LIGHT / (fmhz * 1e6)
-        sim = TriangularPySim(
+        sim = TriangularSolver(
             wires=wires,
             n_per_edge_per_wire=n_per_edge,
             feed_wire_index=0,
@@ -1985,12 +1985,12 @@ def test_triangular_fandipole_two_band_smoke():
         assert -50.0 < z.imag < 60.0, f"f={fmhz}: X={z.imag} out of plausible range"
 
 
-def _fandipole_two_band_sim(N, wavelength, solver_cls=TriangularPySim, **solver_kwargs):
+def _fandipole_two_band_sim(N, wavelength, solver_cls=TriangularSolver, **solver_kwargs):
     """Helper: build the same K=3 two-band fan dipole used in the smoke test.
     Returned simulator has junctions=[S, T] each connecting 3 wire ends.
 
     `solver_cls`/`solver_kwargs` let callers build the same geometry with a
-    different basis (e.g. BSplinePySim(degree=...)).
+    different basis (e.g. BSplineSolver(degree=...)).
     """
     import math
 
@@ -2055,9 +2055,9 @@ def test_assemble_Z_general_cpp_matches_python():
     through both paths so any kernel divergence shows up here as ULP-level
     error.
     """
-    pytest.importorskip("pysim._accelerators")
-    from pysim import triangular as _trimod
-    from pysim._accelerators import assemble_Z_general as _cpp_general
+    pytest.importorskip("momwire._accelerators")
+    from momwire import triangular as _trimod
+    from momwire._accelerators import assemble_Z_general as _cpp_general
 
     C_LIGHT = 299_792_458.0
     sim = _fandipole_two_band_sim(N=11, wavelength=C_LIGHT / 14.3e6)
@@ -2128,12 +2128,12 @@ def test_bspline_fandipole_swept_matches_per_freq(degree):
     freqs_mhz = np.array([12.0, 14.3, 21.0, 28.47])
     k_array = 2 * np.pi * freqs_mhz * 1e6 / C_LIGHT
     sim_sweep = _fandipole_two_band_sim(
-        N=11, wavelength=22.0, solver_cls=BSplinePySim, degree=degree
+        N=11, wavelength=22.0, solver_cls=BSplineSolver, degree=degree
     )
     z_swept = sim_sweep.compute_impedance_swept(k_array)
     for f, zs in zip(freqs_mhz, z_swept):
         sim_f = _fandipole_two_band_sim(
-            N=11, wavelength=C_LIGHT / (f * 1e6), solver_cls=BSplinePySim, degree=degree
+            N=11, wavelength=C_LIGHT / (f * 1e6), solver_cls=BSplineSolver, degree=degree
         )
         z_f, _ = sim_f.compute_impedance()
         # Batched-over-k reg einsum changes the floating-point reduction order,
@@ -2154,10 +2154,10 @@ def test_ground_none_matches_free_space_bit_exact():
     # ground_z=None must take the same code path as the no-argument case.
     L = 2 * 0.962 * 22 / 4
     poly = _h_dipole(L, 0.0)
-    z_no, _ = TriangularPySim(
+    z_no, _ = TriangularSolver(
         wires=[poly], n_per_edge_per_wire=[[40]], nsegs=40
     ).compute_impedance()
-    z_none, _ = TriangularPySim(
+    z_none, _ = TriangularSolver(
         wires=[poly], n_per_edge_per_wire=[[40]], nsegs=40, ground_z=None
     ).compute_impedance()
     assert z_no == z_none
@@ -2167,10 +2167,10 @@ def test_ground_horizontal_dipole_at_height_recovers_free_space():
     # As h -> infinity above PEC, the image vanishes and Z -> Z_free.
     L = 2 * 0.962 * 22 / 4
     N = 30
-    z_free, _ = TriangularPySim(
+    z_free, _ = TriangularSolver(
         wires=[_h_dipole(L, 0.0)], n_per_edge_per_wire=[[N]], nsegs=N
     ).compute_impedance()
-    z_high, _ = TriangularPySim(
+    z_high, _ = TriangularSolver(
         wires=[_h_dipole(L, 100.0)],  # ~5 wavelengths up
         n_per_edge_per_wire=[[N]],
         nsegs=N,
@@ -2186,7 +2186,7 @@ def test_ground_horizontal_dipole_at_zero_height_shorts_out():
     # As h -> 0 above PEC, the anti-parallel image cancels the antenna and
     # the radiated power (and hence the input resistance) goes to zero.
     L = 2 * 0.962 * 22 / 4
-    z_lo, _ = TriangularPySim(
+    z_lo, _ = TriangularSolver(
         wires=[_h_dipole(L, 0.01)],
         n_per_edge_per_wire=[[40]],
         nsegs=40,
@@ -2199,7 +2199,7 @@ def test_ground_swept_matches_single_freq_with_ground():
     L = 2 * 0.962 * 22 / 4
     N = 30
     h = 5.0
-    sim = TriangularPySim(
+    sim = TriangularSolver(
         wires=[_h_dipole(L, h)],
         n_per_edge_per_wire=[[N]],
         nsegs=N,
@@ -2210,16 +2210,16 @@ def test_ground_swept_matches_single_freq_with_ground():
     assert abs(z_single - z_swept) < 1e-9
 
 
-# ---- PEC ground on BSplinePySim (image method, mirrors Triangular) ----
+# ---- PEC ground on BSplineSolver (image method, mirrors Triangular) ----
 
 
 def test_bspline_ground_none_matches_free_space_bit_exact():
     L = 2 * 0.962 * 22 / 4
     poly = _h_dipole(L, 0.0)
-    z_no, _ = BSplinePySim(
+    z_no, _ = BSplineSolver(
         wires=[poly], n_per_edge_per_wire=[[40]], nsegs=40, degree=2
     ).compute_impedance()
-    z_none, _ = BSplinePySim(
+    z_none, _ = BSplineSolver(
         wires=[poly],
         n_per_edge_per_wire=[[40]],
         nsegs=40,
@@ -2232,10 +2232,10 @@ def test_bspline_ground_none_matches_free_space_bit_exact():
 def test_bspline_ground_horizontal_dipole_at_height_recovers_free_space():
     L = 2 * 0.962 * 22 / 4
     N = 30
-    z_free, _ = BSplinePySim(
+    z_free, _ = BSplineSolver(
         wires=[_h_dipole(L, 0.0)], n_per_edge_per_wire=[[N]], nsegs=N, degree=2
     ).compute_impedance()
-    z_high, _ = BSplinePySim(
+    z_high, _ = BSplineSolver(
         wires=[_h_dipole(L, 100.0)],  # ~5 wavelengths up
         n_per_edge_per_wire=[[N]],
         nsegs=N,
@@ -2248,7 +2248,7 @@ def test_bspline_ground_horizontal_dipole_at_height_recovers_free_space():
 
 def test_bspline_ground_horizontal_dipole_at_zero_height_shorts_out():
     L = 2 * 0.962 * 22 / 4
-    z_lo, _ = BSplinePySim(
+    z_lo, _ = BSplineSolver(
         wires=[_h_dipole(L, 0.01)],
         n_per_edge_per_wire=[[40]],
         nsegs=40,
@@ -2267,13 +2267,13 @@ def test_bspline_ground_agrees_with_triangular_at_moderate_height():
     L = 2 * 0.962 * 22 / 4
     N = 40
     h = 7.0
-    z_tri, _ = TriangularPySim(
+    z_tri, _ = TriangularSolver(
         wires=[_h_dipole(L, h)],
         n_per_edge_per_wire=[[N]],
         nsegs=N,
         ground_z=0.0,
     ).compute_impedance()
-    z_bsp, _ = BSplinePySim(
+    z_bsp, _ = BSplineSolver(
         wires=[_h_dipole(L, h)],
         n_per_edge_per_wire=[[N]],
         nsegs=N,
@@ -2288,7 +2288,7 @@ def test_bspline_ground_swept_matches_single_freq():
     L = 2 * 0.962 * 22 / 4
     N = 30
     h = 5.0
-    sim = BSplinePySim(
+    sim = BSplineSolver(
         wires=[_h_dipole(L, h)],
         n_per_edge_per_wire=[[N]],
         nsegs=N,
@@ -2300,16 +2300,16 @@ def test_bspline_ground_swept_matches_single_freq():
     assert abs(z_single - z_swept) < 1e-9
 
 
-# ---- PEC ground on SinusoidalPySim (NEC three-term basis, image method) ----
+# ---- PEC ground on SinusoidalSolver (NEC three-term basis, image method) ----
 
 
 def test_sinusoidal_ground_none_matches_free_space_bit_exact():
     L = 2 * 0.962 * 22 / 4
     poly = _h_dipole(L, 0.0)
-    z_no, _ = SinusoidalPySim(
+    z_no, _ = SinusoidalSolver(
         wires=[poly], n_per_edge_per_wire=[[40]], nsegs=40
     ).compute_impedance()
-    z_none, _ = SinusoidalPySim(
+    z_none, _ = SinusoidalSolver(
         wires=[poly], n_per_edge_per_wire=[[40]], nsegs=40, ground_z=None
     ).compute_impedance()
     assert z_no == z_none
@@ -2318,10 +2318,10 @@ def test_sinusoidal_ground_none_matches_free_space_bit_exact():
 def test_sinusoidal_ground_horizontal_dipole_at_height_recovers_free_space():
     L = 2 * 0.962 * 22 / 4
     N = 30
-    z_free, _ = SinusoidalPySim(
+    z_free, _ = SinusoidalSolver(
         wires=[_h_dipole(L, 0.0)], n_per_edge_per_wire=[[N]], nsegs=N
     ).compute_impedance()
-    z_high, _ = SinusoidalPySim(
+    z_high, _ = SinusoidalSolver(
         wires=[_h_dipole(L, 100.0)],
         n_per_edge_per_wire=[[N]],
         nsegs=N,
@@ -2333,7 +2333,7 @@ def test_sinusoidal_ground_horizontal_dipole_at_height_recovers_free_space():
 
 def test_sinusoidal_ground_horizontal_dipole_at_zero_height_shorts_out():
     L = 2 * 0.962 * 22 / 4
-    z_lo, _ = SinusoidalPySim(
+    z_lo, _ = SinusoidalSolver(
         wires=[_h_dipole(L, 0.01)],
         n_per_edge_per_wire=[[40]],
         nsegs=40,
@@ -2346,13 +2346,13 @@ def test_sinusoidal_ground_agrees_with_triangular_at_moderate_height():
     L = 2 * 0.962 * 22 / 4
     N = 40
     h = 7.0
-    z_tri, _ = TriangularPySim(
+    z_tri, _ = TriangularSolver(
         wires=[_h_dipole(L, h)],
         n_per_edge_per_wire=[[N]],
         nsegs=N,
         ground_z=0.0,
     ).compute_impedance()
-    z_sin, _ = SinusoidalPySim(
+    z_sin, _ = SinusoidalSolver(
         wires=[_h_dipole(L, h)],
         n_per_edge_per_wire=[[N]],
         nsegs=N,
@@ -2366,7 +2366,7 @@ def test_sinusoidal_ground_swept_matches_single_freq():
     L = 2 * 0.962 * 22 / 4
     N = 30
     h = 5.0
-    sim = SinusoidalPySim(
+    sim = SinusoidalSolver(
         wires=[_h_dipole(L, h)],
         n_per_edge_per_wire=[[N]],
         nsegs=N,
@@ -2382,7 +2382,7 @@ def test_bspline_ground_with_enrichment_raises():
     import pytest
 
     with pytest.raises(NotImplementedError):
-        BSplinePySim(
+        BSplineSolver(
             wires=[_h_dipole(L, 5.0)],
             n_per_edge_per_wire=[[20]],
             nsegs=20,
@@ -2407,10 +2407,10 @@ def test_triangular_single_feed_via_feeds_kwarg_matches_legacy():
     L = 2 * 0.962 * 22 / 4
     nsegs = 40
     wires = [np.array([[0.0, 0.0, 0.0], [0.0, L, 0.0]])]
-    z_legacy, _ = TriangularPySim(
+    z_legacy, _ = TriangularSolver(
         wires=wires, n_per_edge_per_wire=[[nsegs]], nsegs=nsegs
     ).compute_impedance()
-    z_new, _ = TriangularPySim(
+    z_new, _ = TriangularSolver(
         wires=wires,
         n_per_edge_per_wire=[[nsegs]],
         nsegs=nsegs,
@@ -2425,7 +2425,7 @@ def test_triangular_multifeed_two_dipoles_in_phase():
     hd = 0.962 * 22 / 4
     nsegs = 40
     wires = _two_dipoles(hd, spacing=2.0)
-    sim = TriangularPySim(
+    sim = TriangularSolver(
         wires=wires,
         n_per_edge_per_wire=[[nsegs], [nsegs]],
         nsegs=nsegs,
@@ -2448,14 +2448,14 @@ def test_triangular_multifeed_phase_shift_changes_driving_point():
     nsegs = 40
     wires = _two_dipoles(hd, spacing=2.0)
 
-    z_inphase, _ = TriangularPySim(
+    z_inphase, _ = TriangularSolver(
         wires=wires,
         n_per_edge_per_wire=[[nsegs], [nsegs]],
         nsegs=nsegs,
         feeds=[(0, None, 1.0 + 0.0j), (1, None, 1.0 + 0.0j)],
     ).compute_impedance()
 
-    z_anti, _ = TriangularPySim(
+    z_anti, _ = TriangularSolver(
         wires=wires,
         n_per_edge_per_wire=[[nsegs], [nsegs]],
         nsegs=nsegs,
@@ -2478,12 +2478,12 @@ def test_triangular_multifeed_consistency_via_port_z_matrix():
     kw = dict(wires=wires, n_per_edge_per_wire=[[nsegs], [nsegs]], nsegs=nsegs)
 
     # Column 0: V=(1,0).
-    sim_a = TriangularPySim(**kw, feeds=[(0, None, 1.0 + 0.0j), (1, None, 0.0 + 0.0j)])
+    sim_a = TriangularSolver(**kw, feeds=[(0, None, 1.0 + 0.0j), (1, None, 0.0 + 0.0j)])
     _, coeffs_a = sim_a.compute_impedance()
     m = sim_a._feed_basis_indices(sim_a._build_geometry())
     I_a = coeffs_a[m]
     # Column 1: V=(0,1).
-    sim_b = TriangularPySim(**kw, feeds=[(0, None, 0.0 + 0.0j), (1, None, 1.0 + 0.0j)])
+    sim_b = TriangularSolver(**kw, feeds=[(0, None, 0.0 + 0.0j), (1, None, 1.0 + 0.0j)])
     _, coeffs_b = sim_b.compute_impedance()
     I_b = coeffs_b[m]
 
@@ -2493,7 +2493,7 @@ def test_triangular_multifeed_consistency_via_port_z_matrix():
 
     # Arbitrary phased excitation: V = (1, exp(j*60deg)).
     V = np.array([1.0 + 0j, np.exp(1j * np.pi / 3)])
-    sim_c = TriangularPySim(
+    sim_c = TriangularSolver(
         **kw,
         feeds=[(0, None, V[0]), (1, None, V[1])],
     )
@@ -2514,7 +2514,7 @@ def test_triangular_multifeed_swept_matches_single_k():
     nsegs = 30
     wires = _two_dipoles(hd, spacing=2.5)
     feeds = [(0, None, 1.0 + 0.0j), (1, None, np.exp(1j * np.pi / 4))]
-    sim = TriangularPySim(
+    sim = TriangularSolver(
         wires=wires,
         n_per_edge_per_wire=[[nsegs], [nsegs]],
         nsegs=nsegs,
@@ -2527,7 +2527,7 @@ def test_triangular_multifeed_swept_matches_single_k():
 
 
 # ---------------------------------------------------------------------------
-# Same multi-feed checks against BSplinePySim and SinusoidalPySim.
+# Same multi-feed checks against BSplineSolver and SinusoidalSolver.
 # ---------------------------------------------------------------------------
 
 
@@ -2539,13 +2539,13 @@ def _mk_sim(cls, *, wires, n_per_edge_per_wire, nsegs, feeds=None, **extra):
     )
     if feeds is not None:
         kw["feeds"] = feeds
-    if cls is BSplinePySim:
+    if cls is BSplineSolver:
         kw["degree"] = 2
     kw.update(extra)
     return cls(**kw)
 
 
-@pytest.mark.parametrize("cls", [BSplinePySim, SinusoidalPySim])
+@pytest.mark.parametrize("cls", [BSplineSolver, SinusoidalSolver])
 def test_multifeed_single_feed_via_feeds_kwarg_matches_legacy(cls):
     L = 2 * 0.962 * 22 / 4
     nsegs = 40
@@ -2563,7 +2563,7 @@ def test_multifeed_single_feed_via_feeds_kwarg_matches_legacy(cls):
     assert abs(z_new - z_legacy) < 1e-9
 
 
-@pytest.mark.parametrize("cls", [BSplinePySim, SinusoidalPySim])
+@pytest.mark.parametrize("cls", [BSplineSolver, SinusoidalSolver])
 def test_multifeed_two_dipoles_in_phase(cls):
     hd = 0.962 * 22 / 4
     nsegs = 40
@@ -2582,7 +2582,7 @@ def test_multifeed_two_dipoles_in_phase(cls):
     assert 30.0 < z_per_feed[0].real < 200.0
 
 
-@pytest.mark.parametrize("cls", [BSplinePySim, SinusoidalPySim])
+@pytest.mark.parametrize("cls", [BSplineSolver, SinusoidalSolver])
 def test_multifeed_phase_shift_changes_driving_point(cls):
     hd = 0.962 * 22 / 4
     nsegs = 40
@@ -2604,7 +2604,7 @@ def test_multifeed_phase_shift_changes_driving_point(cls):
     assert abs(z_inphase[0] - z_anti[0]) > 5.0
 
 
-@pytest.mark.parametrize("cls", [BSplinePySim, SinusoidalPySim])
+@pytest.mark.parametrize("cls", [BSplineSolver, SinusoidalSolver])
 def test_multifeed_homogeneity_in_voltage(cls):
     # Driving-point impedance V/I is a ratio; scaling all voltages by a
     # common (complex) factor must leave Z_i unchanged. This is a
@@ -2627,7 +2627,7 @@ def test_multifeed_homogeneity_in_voltage(cls):
     assert np.isfinite(z1).all()
 
 
-@pytest.mark.parametrize("cls", [BSplinePySim, SinusoidalPySim])
+@pytest.mark.parametrize("cls", [BSplineSolver, SinusoidalSolver])
 def test_multifeed_swept_matches_single_k(cls):
     hd = 0.962 * 22 / 4
     nsegs = 30
@@ -2665,7 +2665,7 @@ def test_triangular_bowtiearray_1x2_phased():
     left = elem_tmpl + np.array([0.0, -del_y, 0.0])
     right = elem_tmpl + np.array([0.0, +del_y, 0.0])
 
-    sim = TriangularPySim(
+    sim = TriangularSolver(
         wires=[left, right],
         n_per_edge_per_wire=[[nsegs, nsegs], [nsegs, nsegs]],
         nsegs=nsegs,

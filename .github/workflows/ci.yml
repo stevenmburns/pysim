@@ -31,7 +31,7 @@ jobs:
       - run: pytest tests/ -m "not slow and not plot"
 
   test-pynec:
-    # Validate that the PyNEC web backend agrees with pysim
+    # Validate that the PyNEC web backend agrees with momwire
     # (tests/test_pynec_backend.py). PyNEC is no longer compiled here — it's
     # installed as a prebuilt wheel from the python-necpp fork's GitHub Release
     # (OpenBLAS via scipy-openblas32, OpenMP matrix-fill). That dropped the

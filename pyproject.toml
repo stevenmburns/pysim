@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel", "pybind11"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pysim"
+name = "momwire"
 version = "0.0.1"
 authors = [
   { name="Steven M. Burns", email="smburns47@gmail.com" },
@@ -17,7 +17,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 # Core runtime deps: the solver and its helpers import these unconditionally
-# (numpy/scipy throughout src/pysim). The C++ _accelerators extension is an
+# (numpy/scipy throughout src/momwire). The C++ _accelerators extension is an
 # optional speedup, not required for import.
 dependencies = [
     "numpy>=1.21",
@@ -37,8 +37,8 @@ validation = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/stevenmburns/pysim"
-Issues = "https://github.com/stevenmburns/pysim/issues"
+Homepage = "https://github.com/stevenmburns/momwire"
+Issues = "https://github.com/stevenmburns/momwire/issues"
 
 [tool.pytest.ini_options]
 # Only collect the project's own tests.
@@ -67,8 +67,8 @@ test-requires = "pytest"
 # Then run only the three core solver modules — they exercise the accelerator
 # without the web/PyNEC integration deps (fastapi + a separately-built PyNEC).
 # -m skips slow/plot. cibuildwheel runs this from a temp dir against the
-# installed wheel, so `import pysim` resolves to the wheel, not src/.
-test-command = 'python -c "import pysim._accelerators; from pysim import triangular as t; assert t._HAVE_ASSEMBLE_Z and t._HAVE_ASSEMBLE_Z_GENERAL" && pytest {project}/tests/test_pysim.py {project}/tests/test_hmatrix.py {project}/tests/test_array_block.py -m "not slow and not plot"'
+# installed wheel, so `import momwire` resolves to the wheel, not src/.
+test-command = 'python -c "import momwire._accelerators; from momwire import triangular as t; assert t._HAVE_ASSEMBLE_Z and t._HAVE_ASSEMBLE_Z_GENERAL" && pytest {project}/tests/test_momwire.py {project}/tests/test_hmatrix.py {project}/tests/test_array_block.py -m "not slow and not plot"'
 
 [tool.cibuildwheel.linux]
 # glibc >= 2.28 ships libmvec; manylinux2014 (glibc 2.17) does NOT, so the

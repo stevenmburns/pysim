@@ -1,7 +1,7 @@
 """Kernel-agnostic hierarchical-matrix primitives: cluster tree, block
 cluster tree (admissible/inadmissible partition), and (later) ACA.
 
-Geometry only here — nothing about the MoM kernel. `HMatrixPySim` feeds in
+Geometry only here — nothing about the MoM kernel. `HMatrixSolver` feeds in
 per-basis axis-aligned bounding boxes (the extent of each basis function's
 wire support) and gets back a partition of the index product [n]x[n] into
 *admissible* (far, low-rank-able) and *inadmissible* (near, dense) leaf
