@@ -28,8 +28,11 @@ namespace py = pybind11;
 //
 // Gated to GNU-compatible, non-MSVC compilers: this trick targets glibc's
 // libmvec specifically. MSVC has no libmvec and would choke on redeclaring the
-// CRT's cos/sin; there the sincos calls stay scalar/autovectorized.
-#if defined(__GNUC__) && !defined(_MSC_VER)
+// CRT's cos/sin; there the sincos calls stay scalar/autovectorized. macOS is
+// also excluded: Apple clang defines __GNUC__ but there is no libmvec on
+// macOS (and arm64 has no AVX2 simdlen(4) form either), so the sincos calls
+// stay scalar/NEON-autovectorized there too.
+#if defined(__GNUC__) && !defined(_MSC_VER) && !defined(__APPLE__)
 #pragma omp declare simd notinbranch simdlen(4)
 extern "C" double cos(double);
 

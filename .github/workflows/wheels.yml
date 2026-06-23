@@ -1,10 +1,11 @@
 name: wheels
 
 # Build redistributable wheels containing the momwire._accelerators C++ extension
-# for modern Linux (manylinux_2_28, libmvec path) and Windows (MSVC,
-# /openmp:llvm + /arch:AVX2). cibuildwheel handles the per-Python matrix, the
-# manylinux container, and wheel repair (auditwheel on Linux, delvewheel on
-# Windows).
+# for modern Linux (manylinux_2_28, libmvec path), Windows (MSVC, /openmp:llvm +
+# /arch:AVX2), and macOS Apple Silicon (arm64, Homebrew libomp + NEON
+# autovectorization). cibuildwheel handles the per-Python matrix, the manylinux
+# container, and wheel repair (auditwheel on Linux, delvewheel on Windows,
+# delocate on macOS).
 #
 # Triggers (deliberately NOT pull_request — the 4-8 min cross-platform matrix
 # must never block PR feedback):
@@ -29,12 +30,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # macos-14 is the native Apple Silicon (arm64) runner. Intel macOS is
+        # intentionally out of scope for this first cut.
+        os: [ubuntu-latest, windows-latest, macos-14]
     steps:
       - uses: actions/checkout@v4
         # The extension builds from src/momwire only — no external sources. (The
         # PyNEC backend tests, which need a separately-installed PyNEC wheel,
         # are excluded from the wheel test-command.)
+      - name: Install libomp (macOS OpenMP runtime)
+        # Apple clang has no bundled OpenMP runtime; setup.py's darwin branch
+        # links Homebrew's libomp (LIBOMP_PREFIX) and delocate vendors the dylib
+        # into the wheel. No-op on the other runners.
+        if: runner.os == 'macOS'
+        run: brew install libomp
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.1.0
       - uses: actions/upload-artifact@v4
