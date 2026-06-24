@@ -439,6 +439,133 @@ seg_seg_reg_quad_batch_1d(
 }
 
 
+// Streaming swept reg-moment kernel for the B-spline Galerkin MoM.
+//
+// Computes, for every wavenumber k in k_array, the same-edge regularized
+// smooth-kernel polynomial moment block
+//
+//   J[k, p, P, i, j] = sum_{q,r} wu_pow[p, i, q] * Greg(k; iq, jr)
+//                                 * wu_pow[P, j, r]
+//
+// with Greg = (exp(-j k R) - 1) / (4 pi R) on the precomputed pair-distance
+// table R (shape (N*n_qp, N*n_qp)) and the weight-folded local-coordinate
+// powers wu_pow (shape (n_d, N, n_qp)) produced by the Python
+// _seg_seg_reg_geometry. This is the streaming C++ replacement for numpy's
+// _seg_seg_reg_moments_from_geometry_swept einsum "piq,kiqjr,Pjr->kpPij": it
+// evaluates exp(-jkR) once per (iq, jr, k) and accumulates straight into the
+// (n_d x n_d) moment block, never materializing the (n_k, N*n_qp, N*n_qp)
+// phase intermediate the numpy path builds (and chunks at 256 MB). Output is
+// the identical (n_k, n_d, n_d, N, N) tensor.
+//
+// Loop order (kk, i) collapse-parallel, inner j: the o(kk, p, P, i, j) writes
+// run contiguously over the trailing (i, j) axes, and the (N*n_qp)^2 R table
+// stays L2-resident as it is re-read across the k axis.
+static py::array_t<std::complex<double>>
+seg_seg_reg_moments_bspline_swept(
+    py::array_t<double, py::array::c_style | py::array::forcecast> R,
+    py::array_t<double, py::array::c_style | py::array::forcecast> wu_pow,
+    py::array_t<double, py::array::c_style | py::array::forcecast> k_array
+) {
+    auto Rr = R.unchecked<2>();
+    auto wu = wu_pow.unchecked<3>();
+    auto ka = k_array.unchecked<1>();
+
+    size_t n_d  = wu.shape(0);
+    size_t N    = wu.shape(1);
+    size_t n_qp = wu.shape(2);
+    size_t n_k  = ka.shape(0);
+
+    if (Rr.shape(0) != (py::ssize_t)(N * n_qp) ||
+        Rr.shape(1) != (py::ssize_t)(N * n_qp)) {
+        throw std::runtime_error(
+            "R must be (N*n_qp, N*n_qp) consistent with wu_pow (n_d, N, n_qp)");
+    }
+    if (n_d > 8) {
+        throw std::runtime_error("n_d too large (max_d must be <= 7)");
+    }
+
+    size_t n_pairs = n_qp * n_qp;
+    if (n_pairs > 64) {
+        throw std::runtime_error("n_qp too large (n_qp^2 must be <= 64)");
+    }
+
+    const double inv_4pi = 1.0 / (4.0 * M_PI);
+
+    py::array_t<std::complex<double>> out({n_k, n_d, n_d, N, N});
+    auto o = out.mutable_unchecked<5>();
+
+    // (i, j) parallel; the per-(i, j) R block is hoisted out of the k loop and
+    // the inner sincos runs as `omp simd` so GCC substitutes the libmvec
+    // vectorized cos/sin (same pattern as seg_seg_reg_quad_batch_1d). The
+    // n_d^2 moment accumulation reuses each (q, r) Greg value across all
+    // polynomial orders — the streaming property that avoids the numpy
+    // einsum's (n_k, N*n_qp, N*n_qp) phase intermediate.
+    PYSIM_OMP_PARALLEL_FOR_COLLAPSE2
+    for (size_t i = 0; i < N; i++) {
+        for (size_t j = 0; j < N; j++) {
+            alignas(32) double R[64];
+            alignas(32) double inv_R_4pi[64];
+            alignas(32) double phases[64];
+            alignas(32) double cos_phases[64];
+            alignas(32) double sin_phases[64];
+            alignas(32) double Gre[64];
+            alignas(32) double Gim[64];
+
+            for (size_t q = 0; q < n_qp; q++) {
+                size_t iq = i * n_qp + q;
+                for (size_t r = 0; r < n_qp; r++) {
+                    R[q * n_qp + r] = Rr(iq, j * n_qp + r);
+                }
+            }
+            PYSIM_OMP_SIMD()
+            for (size_t qr = 0; qr < n_pairs; qr++) {
+                inv_R_4pi[qr] = inv_4pi / R[qr];
+            }
+
+            for (size_t kk = 0; kk < n_k; kk++) {
+                double k = ka(kk);
+                PYSIM_OMP_SIMD()
+                for (size_t qr = 0; qr < n_pairs; qr++) {
+                    phases[qr] = -k * R[qr];
+                }
+                PYSIM_OMP_SIMD()
+                for (size_t qr = 0; qr < n_pairs; qr++) {
+                    cos_phases[qr] = std::cos(phases[qr]);
+                }
+                PYSIM_OMP_SIMD()
+                for (size_t qr = 0; qr < n_pairs; qr++) {
+                    sin_phases[qr] = std::sin(phases[qr]);
+                }
+                PYSIM_OMP_SIMD()
+                for (size_t qr = 0; qr < n_pairs; qr++) {
+                    // exp(-j k R) - 1 = (cos(-kR) - 1) + j sin(-kR)
+                    Gre[qr] = (cos_phases[qr] - 1.0) * inv_R_4pi[qr];
+                    Gim[qr] = sin_phases[qr] * inv_R_4pi[qr];
+                }
+
+                // J[p,P,i,j] = sum_{q,r} wu[p,i,q] Greg[q,r] wu[P,j,r].
+                for (size_t p = 0; p < n_d; p++) {
+                    for (size_t P = 0; P < n_d; P++) {
+                        double mre = 0.0, mim = 0.0;
+                        for (size_t q = 0; q < n_qp; q++) {
+                            double wp = wu(p, i, q);
+                            for (size_t r = 0; r < n_qp; r++) {
+                                double w = wp * wu(P, j, r);
+                                size_t qr = q * n_qp + r;
+                                mre += w * Gre[qr];
+                                mim += w * Gim[qr];
+                            }
+                        }
+                        o(kk, p, P, i, j) = std::complex<double>(mre, mim);
+                    }
+                }
+            }
+        }
+    }
+    return out;
+}
+
+
 // Assemble the (n_k, n_basis, n_basis) Z matrix from the four J tensors,
 // per-segment h, the segment tangent-dot-product table, the left/right
 // segment index of each basis, and omega(k).
@@ -2131,6 +2258,16 @@ PYBIND11_MODULE(_accelerators, m) {
           py::arg("seg_endpoints"), py::arg("a"),
           py::arg("k_array"),
           py::arg("gl_t"), py::arg("gl_w"));
+    m.def("seg_seg_reg_moments_bspline_swept",
+          &seg_seg_reg_moments_bspline_swept,
+          "Streaming swept reg-moment kernel for the B-spline Galerkin MoM. "
+          "From the precomputed pair-distance table R (N*n_qp, N*n_qp) and "
+          "weight-folded local-coordinate powers wu_pow (n_d, N, n_qp), "
+          "compute J[k,p,P,i,j] = sum_{q,r} wu_pow[p,i,q] (exp(-jkR)-1)/(4 pi "
+          "R) wu_pow[P,j,r] for every k. Returns (n_k, n_d, n_d, N, N) "
+          "complex — the streaming C++ replacement for the numpy einsum in "
+          "_seg_seg_reg_moments_from_geometry_swept.",
+          py::arg("R"), py::arg("wu_pow"), py::arg("k_array"));
     m.def("assemble_Z", &assemble_Z,
           "Assemble the (n_k, n_basis, n_basis) Z matrix from the four J "
           "tensors, per-segment h, tangent-dot table, left/right basis-to-"

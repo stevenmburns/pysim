@@ -34,9 +34,11 @@ try:
 
     _HAVE_BSPLINE_ACCEL = hasattr(_acc, "seg_seg_full_moments_bspline")
     _HAVE_BSPLINE_STATIC_ACCEL = hasattr(_acc, "seg_seg_static_moments_bspline_uniform")
+    _HAVE_BSPLINE_REG_SWEPT_ACCEL = hasattr(_acc, "seg_seg_reg_moments_bspline_swept")
 except ImportError:
     _HAVE_BSPLINE_ACCEL = False
     _HAVE_BSPLINE_STATIC_ACCEL = False
+    _HAVE_BSPLINE_REG_SWEPT_ACCEL = False
 
 # Currently the C++ accelerator has explicit instantiations for D in {1, 2}.
 # Extend by adding `seg_seg_full_moments_bspline_kernel<3>(...)` and a switch
@@ -178,6 +180,18 @@ def _seg_seg_reg_moments_from_geometry_swept(geo, k_array, max_chunk_bytes=256 <
     n_d = wu_pow.shape[0]
     k_array = np.asarray(k_array, dtype=float)
     n_k = k_array.shape[0]
+
+    # Streaming C++ kernel: evaluates exp(-jkR) once per (iq, jr, k) and
+    # accumulates straight into the (n_d, n_d) moment block, so it never
+    # materializes the (chunk, N*n_qp, N*n_qp) phase intermediate this numpy
+    # path has to chunk under max_chunk_bytes. Bit-close (different reduction
+    # order) to the einsum below, which stays as the fallback.
+    if _HAVE_BSPLINE_REG_SWEPT_ACCEL:
+        return _acc.seg_seg_reg_moments_bspline_swept(
+            np.ascontiguousarray(R, dtype=np.float64),
+            np.ascontiguousarray(wu_pow, dtype=np.float64),
+            np.ascontiguousarray(k_array, dtype=np.float64),
+        )
 
     out = np.empty((n_k, n_d, n_d, N, N), dtype=np.complex128)
     bytes_per_k = R.size * 16  # complex128 phase table for one k
