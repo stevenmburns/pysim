@@ -151,6 +151,16 @@ def _seg_seg_reg_moments_from_geometry(geo, k):
     wu_pow = geo["wu_pow"]
     N = geo["N"]
     n_qp = geo["n_qp"]
+    # Single-k case (the non-swept compute_impedance): the same streaming C++
+    # kernel serves it with a length-1 k axis, which we squeeze back off. This
+    # is the ~65% of a single d=2 solve that the numpy einsum below otherwise
+    # dominates. Bit-close (different reduction order); numpy stays the fallback.
+    if _HAVE_BSPLINE_REG_SWEPT_ACCEL:
+        return _acc.seg_seg_reg_moments_bspline_swept(
+            np.ascontiguousarray(R, dtype=np.float64),
+            np.ascontiguousarray(wu_pow, dtype=np.float64),
+            np.ascontiguousarray(np.asarray([k], dtype=np.float64)),
+        )[0]
     # (exp(-jkR) - 1) / (4π R). At R = a small, this is bounded → -jk/(4π) in
     # the a → 0, kR → 0 limit; no quadrature pathology.
     G_reg = (np.exp(-1j * k * R) - 1.0) / (4 * np.pi * R)
