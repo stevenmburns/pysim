@@ -80,6 +80,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install setuptools wheel pybind11 numpy scipy pytest
 
+      - name: Toolchain probe (does Apple clang's -fveclib support SLEEF?)
+        run: |
+          clang --version
+          printf 'extern double cos(double);typedef unsigned long size_t;\nvoid k(const double*p,double*c,size_t n){\n#pragma omp simd\nfor(size_t i=0;i<n;i++)c[i]=cos(p[i]);}\n' > /tmp/probe.c
+          echo "=== compile probe with -fveclib=SLEEF (stderr shows any 'unsupported argument' warning): ==="
+          clang -O3 -fopenmp-simd -fno-math-errno -fveclib=SLEEF -S -o /tmp/probe.s /tmp/probe.c 2>&1 | head -20 || true
+          echo "=== vector sincos symbols clang emitted (expect __ZGVnN2v_cos if SLEEF veclib is supported): ==="
+          grep -oE 'bl[[:space:]]+_[A-Za-z0-9_$.]*(ZGV|[Ss]leef|cos)[A-Za-z0-9_$.]*' /tmp/probe.s | sort -u || echo "(no vector substitution — scalar only)"
+
       - name: Build scalar baseline (no SLEEF) + benchmark
         env:
           LIBOMP_PREFIX: /opt/homebrew/opt/libomp
@@ -100,6 +109,11 @@ jobs:
           # keeps pointing at src/, so it picks the new binary up.
           python setup.py build_ext --inplace --force
           python scripts/bench_sincos.py --json | tee sleef.json
+
+      - name: Dump extension sincos-related symbols
+        run: |
+          echo "--- all sin/cos/sleef/ZGV symbols in the SLEEF-built .so ---"
+          nm src/momwire/_accelerators*.so | grep -iE 'sleef|ZGV|_cos|_sin' | sort -u | head -40 || echo "(none)"
 
       - name: Assert SLEEF vector symbols are linked
         run: |
