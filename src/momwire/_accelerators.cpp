@@ -1089,6 +1089,191 @@ seg_seg_full_moments_bspline_kernel(
     return J;
 }
 
+// Batched (swept-k) variant of seg_seg_full_moments_bspline_kernel.
+//
+// The per-(i, j) geometry — segment quadrature positions, the (q, r) distance
+// table R, the 1/(4 pi R) factor, and the weight-folded moment weights wuwu —
+// is all k-independent, so it is built once per (i, j) and reused across the
+// whole k_array; only the exp(-jkR) phase varies per frequency. This is the
+// off-edge analog of triangular's seg_seg_quad_batch_3d: it lets
+// BSplineSolver.compute_impedance_swept build the off-edge moments in one call
+// for the whole sweep instead of one single-k call per frequency.
+//
+// Output: (n_k, NM, NM, N_i, N_j) complex. Memory note: this materializes the
+// full off-edge moment tensor for every frequency at once (n_k * NM^2 * N^2
+// complex); the UI sweep chunker bounds the sweep width when N is large.
+//
+// n_qp <= 8 assumed (n_qp^2 <= 64 scratch buffer size).
+template<int D>
+static py::array_t<std::complex<double>>
+seg_seg_full_moments_bspline_swept_kernel(
+    py::array_t<double, py::array::c_style | py::array::forcecast> seg_l_i,
+    py::array_t<double, py::array::c_style | py::array::forcecast> seg_r_i,
+    py::array_t<double, py::array::c_style | py::array::forcecast> seg_l_j,
+    py::array_t<double, py::array::c_style | py::array::forcecast> seg_r_j,
+    double a_squared,
+    py::array_t<double, py::array::c_style | py::array::forcecast> k_array,
+    py::array_t<double, py::array::c_style | py::array::forcecast> gl_t,
+    py::array_t<double, py::array::c_style | py::array::forcecast> gl_w
+) {
+    static constexpr int NM = D + 1;
+    static constexpr int NMM = NM * NM;
+
+    auto sli = seg_l_i.unchecked<2>();
+    auto sri = seg_r_i.unchecked<2>();
+    auto slj = seg_l_j.unchecked<2>();
+    auto srj = seg_r_j.unchecked<2>();
+    auto ka  = k_array.unchecked<1>();
+    auto glt = gl_t.unchecked<1>();
+    auto glw = gl_w.unchecked<1>();
+
+    if (sli.shape(1) != 3 || sri.shape(1) != 3 ||
+        slj.shape(1) != 3 || srj.shape(1) != 3) {
+        throw std::runtime_error("segment endpoint arrays must have shape (N, 3)");
+    }
+    if (sli.shape(0) != sri.shape(0) || slj.shape(0) != srj.shape(0)) {
+        throw std::runtime_error("seg_l and seg_r must have matching N");
+    }
+    if (glt.shape(0) != glw.shape(0)) {
+        throw std::runtime_error("gl_t and gl_w must have matching length");
+    }
+    size_t n_qp = glt.shape(0);
+    if (n_qp > 8) {
+        throw std::runtime_error("n_qp > 8 not supported (scratch buffer size)");
+    }
+
+    size_t N_i = sli.shape(0);
+    size_t N_j = slj.shape(0);
+    size_t n_k = ka.shape(0);
+
+    py::array_t<std::complex<double>> J({n_k, (size_t)NM, (size_t)NM, N_i, N_j});
+    auto j_view = J.mutable_unchecked<5>();
+
+    const double inv_4pi = 1.0 / (4.0 * M_PI);
+
+    // k-independent per-segment quadrature positions and lengths.
+    std::vector<double> pos_i(N_i * n_qp * 3);
+    std::vector<double> pos_j(N_j * n_qp * 3);
+    std::vector<double> len_i(N_i);
+    std::vector<double> len_j(N_j);
+    for (size_t i = 0; i < N_i; i++) {
+        double dx = sri(i,0) - sli(i,0);
+        double dy = sri(i,1) - sli(i,1);
+        double dz = sri(i,2) - sli(i,2);
+        len_i[i] = std::sqrt(dx*dx + dy*dy + dz*dz);
+        for (size_t q = 0; q < n_qp; q++) {
+            double t = glt(q);
+            pos_i[(i*n_qp + q)*3 + 0] = (1.0 - t) * sli(i,0) + t * sri(i,0);
+            pos_i[(i*n_qp + q)*3 + 1] = (1.0 - t) * sli(i,1) + t * sri(i,1);
+            pos_i[(i*n_qp + q)*3 + 2] = (1.0 - t) * sli(i,2) + t * sri(i,2);
+        }
+    }
+    for (size_t j = 0; j < N_j; j++) {
+        double dx = srj(j,0) - slj(j,0);
+        double dy = srj(j,1) - slj(j,1);
+        double dz = srj(j,2) - slj(j,2);
+        len_j[j] = std::sqrt(dx*dx + dy*dy + dz*dz);
+        for (size_t r = 0; r < n_qp; r++) {
+            double t = glt(r);
+            pos_j[(j*n_qp + r)*3 + 0] = (1.0 - t) * slj(j,0) + t * srj(j,0);
+            pos_j[(j*n_qp + r)*3 + 1] = (1.0 - t) * slj(j,1) + t * srj(j,1);
+            pos_j[(j*n_qp + r)*3 + 2] = (1.0 - t) * slj(j,2) + t * srj(j,2);
+        }
+    }
+
+    PYSIM_OMP_PARALLEL_FOR_COLLAPSE2
+    for (size_t i = 0; i < N_i; i++) {
+        for (size_t j = 0; j < N_j; j++) {
+            alignas(32) double R[64];
+            alignas(32) double inv_R_4pi[64];
+            alignas(32) double phases[64];
+            alignas(32) double cos_phases[64];
+            alignas(32) double sin_phases[64];
+            alignas(32) double G_re[64], G_im[64];
+            alignas(32) double wuwu[NMM * 64];
+
+            size_t n_pairs = n_qp * n_qp;
+            const double *pi = &pos_i[i * n_qp * 3];
+            const double *pj = &pos_j[j * n_qp * 3];
+
+            // k-independent: R table, 1/(4 pi R), and the moment weights.
+            for (size_t q = 0; q < n_qp; q++) {
+                double pix = pi[q*3 + 0], piy = pi[q*3 + 1], piz = pi[q*3 + 2];
+                for (size_t r = 0; r < n_qp; r++) {
+                    double dx = pix - pj[r*3 + 0];
+                    double dy = piy - pj[r*3 + 1];
+                    double dz = piz - pj[r*3 + 2];
+                    R[q*n_qp + r] = std::sqrt(dx*dx + dy*dy + dz*dz + a_squared);
+                }
+            }
+            PYSIM_OMP_SIMD()
+            for (size_t qr = 0; qr < n_pairs; qr++) {
+                inv_R_4pi[qr] = inv_4pi / R[qr];
+            }
+
+            double Li = len_i[i];
+            double Lj = len_j[j];
+            for (size_t q = 0; q < n_qp; q++) {
+                double wi = glw(q) * Li;
+                double ui = glt(q) * Li;
+                double ui_pow[NM];
+                ui_pow[0] = 1.0;
+                for (int p = 1; p < NM; p++) ui_pow[p] = ui_pow[p-1] * ui;
+                for (size_t r = 0; r < n_qp; r++) {
+                    double wj = glw(r) * Lj;
+                    double uj = glt(r) * Lj;
+                    double uj_pow[NM];
+                    uj_pow[0] = 1.0;
+                    for (int P = 1; P < NM; P++) uj_pow[P] = uj_pow[P-1] * uj;
+                    double wij = wi * wj;
+                    size_t qr = q * n_qp + r;
+                    for (int p = 0; p < NM; p++) {
+                        for (int P = 0; P < NM; P++) {
+                            wuwu[(p * NM + P) * n_pairs + qr] = wij * ui_pow[p] * uj_pow[P];
+                        }
+                    }
+                }
+            }
+
+            // Per-k: only the exp(-jkR) phase changes.
+            for (size_t kk = 0; kk < n_k; kk++) {
+                double k = ka(kk);
+                PYSIM_OMP_SIMD()
+                for (size_t qr = 0; qr < n_pairs; qr++) {
+                    phases[qr] = -k * R[qr];
+                }
+                PYSIM_OMP_SIMD()
+                for (size_t qr = 0; qr < n_pairs; qr++) {
+                    cos_phases[qr] = std::cos(phases[qr]);
+                }
+                PYSIM_OMP_SIMD()
+                for (size_t qr = 0; qr < n_pairs; qr++) {
+                    sin_phases[qr] = std::sin(phases[qr]);
+                }
+                PYSIM_OMP_SIMD()
+                for (size_t qr = 0; qr < n_pairs; qr++) {
+                    G_re[qr] = cos_phases[qr] * inv_R_4pi[qr];
+                    G_im[qr] = sin_phases[qr] * inv_R_4pi[qr];
+                }
+                for (int pP = 0; pP < NMM; pP++) {
+                    double sr = 0.0, si = 0.0;
+                    const double *w_row = &wuwu[pP * n_pairs];
+                    PYSIM_OMP_SIMD(reduction(+:sr,si))
+                    for (size_t qr = 0; qr < n_pairs; qr++) {
+                        sr += w_row[qr] * G_re[qr];
+                        si += w_row[qr] * G_im[qr];
+                    }
+                    j_view(kk, pP / NM, pP % NM, i, j) =
+                        std::complex<double>(sr, si);
+                }
+            }
+        }
+    }
+
+    return J;
+}
+
+
 // Templated B-spline Z assembly kernel.
 //
 // For each (m, n) basis pair, assembles the EFIE Galerkin entry from the
@@ -1198,6 +1383,96 @@ assemble_Z_bspline_kernel(
     return Z;
 }
 
+
+// Batched (swept-k) variant of assemble_Z_bspline_kernel. J carries a leading
+// k axis (n_k, NM, NM, N, N) and omega is an array; the basis tables
+// (support_seg, polys, td_all) are k-independent and reused across the sweep.
+// Returns (n_k, n_basis, n_basis). Lets compute_impedance_swept assemble the
+// whole sweep in one call instead of one per frequency, the bspline analog of
+// triangular's batched assemble_Z.
+template<int D>
+static py::array_t<std::complex<double>>
+assemble_Z_bspline_swept_kernel(
+    py::array_t<std::complex<double>, py::array::c_style | py::array::forcecast> J,
+    py::array_t<int64_t, py::array::c_style | py::array::forcecast> support_seg,
+    py::array_t<double, py::array::c_style | py::array::forcecast> polys,
+    py::array_t<double, py::array::c_style | py::array::forcecast> td_all,
+    py::array_t<double, py::array::c_style | py::array::forcecast> omega_array,
+    double eps_,
+    double mu_
+) {
+    static constexpr int NM = D + 1;
+
+    auto j_view = J.unchecked<5>();
+    auto ss_view = support_seg.unchecked<2>();
+    auto p_view = polys.unchecked<3>();
+    auto td_view = td_all.unchecked<2>();
+    auto om = omega_array.unchecked<1>();
+
+    size_t n_k = (size_t)J.shape(0);
+    size_t n_basis = (size_t)support_seg.shape(0);
+    if (support_seg.shape(1) != NM) {
+        throw std::runtime_error("support_seg.shape(1) must equal D+1");
+    }
+    if (J.shape(1) != NM || J.shape(2) != NM) {
+        throw std::runtime_error("J.shape(1:3) must be (D+1, D+1)");
+    }
+    if ((size_t)om.shape(0) != n_k) {
+        throw std::runtime_error("omega_array length must match J.shape(0)");
+    }
+
+    py::array_t<std::complex<double>> Z({n_k, n_basis, n_basis});
+    auto z_view = Z.mutable_unchecked<3>();
+
+    PYSIM_OMP_PARALLEL_FOR_COLLAPSE2
+    for (size_t m = 0; m < n_basis; m++) {
+        for (size_t n = 0; n < n_basis; n++) {
+            for (size_t kk = 0; kk < n_k; kk++) {
+                const double omega_mu = om(kk) * mu_;
+                const double inv_omega_eps = 1.0 / (om(kk) * eps_);
+                double zA_re = 0.0, zA_im = 0.0;
+                double zPhi_re = 0.0, zPhi_im = 0.0;
+
+                for (int a = 0; a < NM; a++) {
+                    int64_t sm = ss_view(m, a);
+                    for (int b = 0; b < NM; b++) {
+                        int64_t sn = ss_view(n, b);
+                        double td = td_view(sm, sn);
+                        double wA_re = 0.0, wA_im = 0.0;
+                        double wPhi_re = 0.0, wPhi_im = 0.0;
+                        for (int p = 0; p < NM; p++) {
+                            double mp_ap = p_view(m, a, p);
+                            for (int q = 0; q < NM; q++) {
+                                double nq_bq = p_view(n, b, q);
+                                std::complex<double> Jpq = j_view(kk, p, q, sm, sn);
+                                double prod = mp_ap * nq_bq;
+                                wA_re += prod * Jpq.real();
+                                wA_im += prod * Jpq.imag();
+                                if (p >= 1 && q >= 1) {
+                                    std::complex<double> Jm =
+                                        j_view(kk, p - 1, q - 1, sm, sn);
+                                    double pq = (double)(p * q) * prod;
+                                    wPhi_re += pq * Jm.real();
+                                    wPhi_im += pq * Jm.imag();
+                                }
+                            }
+                        }
+                        zA_re += td * wA_re;
+                        zA_im += td * wA_im;
+                        zPhi_re += wPhi_re;
+                        zPhi_im += wPhi_im;
+                    }
+                }
+                double Zre = -omega_mu * zA_im + zPhi_im * inv_omega_eps;
+                double Zim = omega_mu * zA_re - zPhi_re * inv_omega_eps;
+                z_view(kk, m, n) = std::complex<double>(Zre, Zim);
+            }
+        }
+    }
+
+    return Z;
+}
+
 static py::array_t<std::complex<double>>
 assemble_Z_bspline(
     py::array_t<std::complex<double>, py::array::c_style | py::array::forcecast> J,
@@ -1217,6 +1492,32 @@ assemble_Z_bspline(
         default:
             throw std::runtime_error(
                 "assemble_Z_bspline: max_d must be 1 or 2");
+    }
+}
+
+
+// Runtime dispatch wrapper for the batched (swept-k) assemble.
+static py::array_t<std::complex<double>>
+assemble_Z_bspline_swept(
+    py::array_t<std::complex<double>, py::array::c_style | py::array::forcecast> J,
+    py::array_t<int64_t, py::array::c_style | py::array::forcecast> support_seg,
+    py::array_t<double, py::array::c_style | py::array::forcecast> polys,
+    py::array_t<double, py::array::c_style | py::array::forcecast> td_all,
+    py::array_t<double, py::array::c_style | py::array::forcecast> omega_array,
+    double eps_,
+    double mu_,
+    int max_d
+) {
+    switch (max_d) {
+        case 1:
+            return assemble_Z_bspline_swept_kernel<1>(
+                J, support_seg, polys, td_all, omega_array, eps_, mu_);
+        case 2:
+            return assemble_Z_bspline_swept_kernel<2>(
+                J, support_seg, polys, td_all, omega_array, eps_, mu_);
+        default:
+            throw std::runtime_error(
+                "assemble_Z_bspline_swept: max_d must be 1 or 2");
     }
 }
 
@@ -1468,6 +1769,34 @@ seg_seg_full_moments_bspline(
         default:
             throw std::runtime_error(
                 "seg_seg_full_moments_bspline: max_d must be 1 or 2 "
+                "(add an explicit template instantiation in _accelerators.cpp)");
+    }
+}
+
+
+// Runtime dispatch wrapper for the batched (swept-k) off-edge kernel.
+static py::array_t<std::complex<double>>
+seg_seg_full_moments_bspline_swept(
+    py::array_t<double, py::array::c_style | py::array::forcecast> seg_l_i,
+    py::array_t<double, py::array::c_style | py::array::forcecast> seg_r_i,
+    py::array_t<double, py::array::c_style | py::array::forcecast> seg_l_j,
+    py::array_t<double, py::array::c_style | py::array::forcecast> seg_r_j,
+    double a_squared,
+    py::array_t<double, py::array::c_style | py::array::forcecast> k_array,
+    int max_d,
+    py::array_t<double, py::array::c_style | py::array::forcecast> gl_t,
+    py::array_t<double, py::array::c_style | py::array::forcecast> gl_w
+) {
+    switch (max_d) {
+        case 1:
+            return seg_seg_full_moments_bspline_swept_kernel<1>(
+                seg_l_i, seg_r_i, seg_l_j, seg_r_j, a_squared, k_array, gl_t, gl_w);
+        case 2:
+            return seg_seg_full_moments_bspline_swept_kernel<2>(
+                seg_l_i, seg_r_i, seg_l_j, seg_r_j, a_squared, k_array, gl_t, gl_w);
+        default:
+            throw std::runtime_error(
+                "seg_seg_full_moments_bspline_swept: max_d must be 1 or 2 "
                 "(add an explicit template instantiation in _accelerators.cpp)");
     }
 }
@@ -2300,6 +2629,18 @@ PYBIND11_MODULE(_accelerators, m) {
           py::arg("a_squared"), py::arg("k"),
           py::arg("max_d"),
           py::arg("gl_t"), py::arg("gl_w"));
+    m.def("seg_seg_full_moments_bspline_swept",
+          &seg_seg_full_moments_bspline_swept,
+          "Batched (swept-k) off-edge full-kernel polynomial moments for the "
+          "B-spline Galerkin MoM. The per-(i,j) geometry (R table, moment "
+          "weights) is built once and reused across k_array; only exp(-jkR) "
+          "varies per frequency. Returns (n_k, max_d+1, max_d+1, N_i, N_j) "
+          "complex — the off-edge analog of seg_seg_quad_batch_3d.",
+          py::arg("seg_l_i"), py::arg("seg_r_i"),
+          py::arg("seg_l_j"), py::arg("seg_r_j"),
+          py::arg("a_squared"), py::arg("k_array"),
+          py::arg("max_d"),
+          py::arg("gl_t"), py::arg("gl_w"));
     m.def("seg_seg_static_moments_bspline_uniform",
           &seg_seg_static_moments_bspline_uniform,
           "Closed-form same-edge static-kernel polynomial moments J_pq for a "
@@ -2316,6 +2657,15 @@ PYBIND11_MODULE(_accelerators, m) {
           py::arg("J"), py::arg("support_seg"),
           py::arg("polys"), py::arg("td_all"),
           py::arg("omega"), py::arg("eps"), py::arg("mu"),
+          py::arg("max_d"));
+    m.def("assemble_Z_bspline_swept", &assemble_Z_bspline_swept,
+          "Batched (swept-k) assemble: J is (n_k, max_d+1, max_d+1, N, N) and "
+          "omega is an array; the basis tables are k-independent. Returns "
+          "(n_k, n_basis, n_basis) — the bspline analog of triangular's "
+          "batched assemble_Z.",
+          py::arg("J"), py::arg("support_seg"),
+          py::arg("polys"), py::arg("td_all"),
+          py::arg("omega_array"), py::arg("eps"), py::arg("mu"),
           py::arg("max_d"));
     m.def("bspline_assemble_offedge_block", &bspline_assemble_offedge_block,
           "Fused off-edge Z[I, J] block assembly for the H-matrix / ACA "

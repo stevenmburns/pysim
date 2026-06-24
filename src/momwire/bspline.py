@@ -43,6 +43,7 @@ from scipy.interpolate import BSpline
 
 from ._bspline_kernels import (
     _seg_seg_full_moments_offedge,
+    _seg_seg_full_moments_offedge_swept,
     _seg_seg_reg_geometry,
     _seg_seg_reg_moments,
     _seg_seg_reg_moments_from_geometry,
@@ -56,9 +57,15 @@ try:
 
     _HAVE_BSPLINE_ASSEMBLE_ACCEL = hasattr(_acc, "assemble_Z_bspline")
     _HAVE_ENRICH_ACCEL = hasattr(_acc, "assemble_Z_enrich")
+    _HAVE_BSPLINE_SWEPT_ASSEMBLE_ACCEL = hasattr(_acc, "assemble_Z_bspline_swept")
+    _HAVE_BSPLINE_OFFEDGE_SWEPT_ACCEL = hasattr(
+        _acc, "seg_seg_full_moments_bspline_swept"
+    )
 except ImportError:
     _HAVE_BSPLINE_ASSEMBLE_ACCEL = False
     _HAVE_ENRICH_ACCEL = False
+    _HAVE_BSPLINE_SWEPT_ASSEMBLE_ACCEL = False
+    _HAVE_BSPLINE_OFFEDGE_SWEPT_ACCEL = False
 
 _BSPLINE_ASSEMBLE_ACCEL_MAX_D = 2
 
@@ -761,7 +768,7 @@ class BSplineSolver:
                 prep.append((sl, A_st, reg_geo))
         return prep
 
-    def _build_J_blocks(self, geom, k, same_edge_prep=None):
+    def _build_J_blocks(self, geom, k, same_edge_prep=None, offedge_full=None):
         """All polynomial moment integrals J_pq[i, j] for p, q ∈ {0..d} and
         every (i, j) global segment pair. Returns shape (d+1, d+1, N, N).
 
@@ -774,6 +781,13 @@ class BSplineSolver:
         `same_edge_prep` (from `_same_edge_prep`) lets a swept-k caller share
         the k-independent static + reg-geometry across frequencies; when None
         the same quantities are computed inline (single-k path).
+
+        `offedge_full` lets a swept-k caller pass this frequency's pre-built
+        all-pairs off-edge block (from the batched
+        `_seg_seg_full_moments_offedge_swept`), so the off-edge moments are
+        computed once for the whole sweep instead of once per k. It is
+        overwritten in place by the same-edge blocks below — the caller must
+        pass a slice it does not reuse.
         """
         d = self.degree
         a = self.wire_radius
@@ -783,9 +797,12 @@ class BSplineSolver:
         # All-pairs full kernel (same a² regularization handles touching
         # segments at kink corners and at junctions to within ~1e-5 at
         # antenna scales; off-segment-pair accuracy is what GL is good at).
-        J = _seg_seg_full_moments_offedge(
-            seg_l, seg_r, seg_l, seg_r, a, k, d, self.n_qp_pair
-        )  # (d+1, d+1, N, N) complex
+        if offedge_full is not None:
+            J = offedge_full
+        else:
+            J = _seg_seg_full_moments_offedge(
+                seg_l, seg_r, seg_l, seg_r, a, k, d, self.n_qp_pair
+            )  # (d+1, d+1, N, N) complex
 
         # Overwrite each same-edge block with analytic static + reg
         if same_edge_prep is None:
@@ -1369,14 +1386,18 @@ class BSplineSolver:
     # Driver impedance
     # ------------------------------------------------------------------
 
-    def compute_impedance(self, same_edge_prep=None):
+    def compute_impedance(
+        self, same_edge_prep=None, offedge_full=None, image_full=None
+    ):
         geom = self._build_geometry()
         supp_seg, polys, kcl_A, wire_knots, wire_basis_global = (
             self._build_basis_polynomials(geom)
         )
         n_basis_total = supp_seg.shape[0]
 
-        J = self._build_J_blocks(geom, self.k, same_edge_prep=same_edge_prep)
+        J = self._build_J_blocks(
+            geom, self.k, same_edge_prep=same_edge_prep, offedge_full=offedge_full
+        )
         Z = self._assemble_Z(J, supp_seg, polys, geom)
 
         if self.ground_z is not None:
@@ -1384,8 +1405,14 @@ class BSplineSolver:
             # J integrals over image segments + (tx, ty, -tz)-modified
             # tangent dot products. The minus sign captures both the
             # image current's horizontal anti-parallel direction and the
-            # image charge's sign flip (one minus combined).
-            J_img = self._build_J_image_blocks(geom, self.k)
+            # image charge's sign flip (one minus combined). `image_full`
+            # lets a swept caller pass this k's pre-built image block (the
+            # image is pure off-edge — no same-edge overwrite).
+            J_img = (
+                image_full
+                if image_full is not None
+                else self._build_J_image_blocks(geom, self.k)
+            )
             td_img = self._image_tangent_dot(geom["tangents"])
             Z = Z - self._assemble_Z(J_img, supp_seg, polys, geom, td_all=td_img)
 
@@ -1609,6 +1636,118 @@ class BSplineSolver:
         self.omega = omega_save
         return out
 
+    def _compute_impedance_swept_batched(self, k_array):
+        """Triangular-style fully batched swept solve for the common case
+        (no enrichment, no junctions): build the whole sweep's J and Z in
+        batched C++ calls and do one stacked LAPACK solve, instead of looping
+        compute_impedance per frequency. Returns z_out, or None to fall back
+        if an unexpected KCL constraint appears.
+        """
+        d = self.degree
+        n_feeds = len(self.feeds)
+        n_k = k_array.shape[0]
+
+        geom = self._build_geometry()
+        supp_seg, polys, kcl_A, wire_knots, wire_basis_global = (
+            self._build_basis_polynomials(geom)
+        )
+        if kcl_A.shape[0] != 0:
+            return None
+        n_basis_total = supp_seg.shape[0]
+        seg_l, seg_r = geom["seg_l"], geom["seg_r"]
+        tangents = geom["tangents"]
+        N = seg_l.shape[0]
+        nm = d + 1
+
+        # k-independent: same-edge reg geometry, source vectors, tangent-dot
+        # tables, image segments — all built once for the whole sweep.
+        prep = self._same_edge_prep(geom)
+        td_free = tangents @ tangents.T
+        td_img = (
+            self._image_tangent_dot(tangents) if self.ground_z is not None else None
+        )
+        if self.ground_z is not None:
+            seg_l_img = self._image_positions(seg_l)
+            seg_r_img = self._image_positions(seg_r)
+        v_per_feed = []
+        for w_i, arc_i, _v in self.feeds:
+            arc_at_knot = geom["per_wire"][w_i]["arc_at_knot"]
+            s_f_i = arc_i if arc_i is not None else arc_at_knot[-1] / 2.0
+            v_per_feed.append(
+                self._build_source_vector(
+                    geom,
+                    wire_knots,
+                    wire_basis_global,
+                    n_basis_total,
+                    wi=w_i,
+                    s_f=s_f_i,
+                )
+            )
+        voltages = np.array([v for _, _, v in self.feeds], dtype=np.complex128)
+        v = np.zeros(n_basis_total, dtype=np.complex128)
+        for V_i, v_i in zip(voltages, v_per_feed):
+            v += V_i * v_i
+        vpf_T = np.array(v_per_feed).T  # (n_basis, n_feeds)
+
+        # Chunk the sweep so the batched moment tensor J (chunk, nm, nm, N, N)
+        # stays cache-resident — past a few MB the per-frequency memory traffic
+        # on the big tensor outweighs the batching win (worst on large
+        # single-edge wires). Target ~32 MB of J per chunk.
+        bytes_per_k = nm * nm * N * N * 16
+        chunk = max(1, min(n_k, (32 << 20) // max(bytes_per_k, 1)))
+
+        z_out = (
+            np.zeros(n_k, dtype=np.complex128)
+            if n_feeds == 1
+            else np.zeros((n_k, n_feeds), dtype=np.complex128)
+        )
+
+        def _assemble_swept(J_tensor, td, omega_chunk):
+            return _acc.assemble_Z_bspline_swept(
+                np.ascontiguousarray(J_tensor, dtype=np.complex128),
+                np.ascontiguousarray(supp_seg, dtype=np.int64),
+                np.ascontiguousarray(polys, dtype=np.float64),
+                np.ascontiguousarray(td, dtype=np.float64),
+                np.ascontiguousarray(omega_chunk, dtype=np.float64),
+                float(self.eps),
+                float(self.mu),
+                int(d),
+            )
+
+        for c0 in range(0, n_k, chunk):
+            ks = k_array[c0 : c0 + chunk]
+            omega_chunk = ks * self.c
+            reg_chunk = [
+                _seg_seg_reg_moments_from_geometry_swept(reg_geo, ks)
+                for _sl, _A_st, reg_geo in prep
+            ]
+            J = _seg_seg_full_moments_offedge_swept(
+                seg_l, seg_r, seg_l, seg_r, self.wire_radius, ks, d, self.n_qp_pair
+            )
+            for e, (sl, A_st, _g) in enumerate(prep):
+                J[:, :, :, sl, sl] = A_st[None] + reg_chunk[e]
+            Z = _assemble_swept(J, td_free, omega_chunk)
+            if self.ground_z is not None:
+                J_img = _seg_seg_full_moments_offedge_swept(
+                    seg_l,
+                    seg_r,
+                    seg_l_img,
+                    seg_r_img,
+                    self.wire_radius,
+                    ks,
+                    d,
+                    self.n_qp_pair,
+                )
+                Z = Z - _assemble_swept(J_img, td_img, omega_chunk)
+
+            rhs = np.broadcast_to(v[None, :, None], (ks.shape[0], n_basis_total, 1))
+            coeffs = np.linalg.solve(Z, rhs)[:, :, 0]
+            currents = coeffs @ vpf_T  # (chunk, n_feeds)
+            z_per = voltages[None, :] / currents
+            z_out[c0 : c0 + chunk] = z_per[:, 0] if n_feeds == 1 else z_per
+
+        return z_out
+
     def compute_impedance_swept(self, k_array):
         """Loop over wavenumbers (no batched assembly here yet). Rebinds
         self.k / self.omega / self.wavelength per call and restores them.
@@ -1622,14 +1761,63 @@ class BSplineSolver:
         k_save = self.k
         wl_save = self.wavelength
         omega_save = self.omega
+
+        # Fully batched fast path (triangular-style): build the whole sweep's
+        # J / Z / solve in batched calls instead of looping compute_impedance
+        # per frequency. Restricted to the common case — no singular enrichment
+        # and no wire junctions (the KCL-constrained solve collapses to a plain
+        # solve), with the batched accelerators present.
+        if (
+            not self.use_singular_enrichment
+            and not self.junctions
+            and _HAVE_BSPLINE_SWEPT_ASSEMBLE_ACCEL
+            and _HAVE_BSPLINE_OFFEDGE_SWEPT_ACCEL
+            and self.degree <= _BSPLINE_ASSEMBLE_ACCEL_MAX_D
+        ):
+            out = self._compute_impedance_swept_batched(k_array)
+            if out is not None:
+                return out
+
         # k-independent static + reg-geometry, shared across the sweep; the
         # reg-kernel moment blocks are batched over all k up front (one einsum
         # per edge instead of one per (edge, k)).
-        prep = self._same_edge_prep(self._build_geometry())
+        geom = self._build_geometry()
+        prep = self._same_edge_prep(geom)
         reg_all = [
             _seg_seg_reg_moments_from_geometry_swept(reg_geo, k_array)
             for _sl, _A_st, reg_geo in prep
         ]
+        # All-pairs off-edge moments batched over the whole sweep (one call
+        # instead of one per k). The same-edge blocks get overwritten per k
+        # from reg_all below, so each k consumes its own off-edge slice. With
+        # a ground plane the image off-edge is the same kernel with the
+        # j-segments mirrored — it has no same-edge overwrite, so its slices
+        # are consumed read-only.
+        seg_l, seg_r = geom["seg_l"], geom["seg_r"]
+        offedge_all = _seg_seg_full_moments_offedge_swept(
+            seg_l,
+            seg_r,
+            seg_l,
+            seg_r,
+            self.wire_radius,
+            k_array,
+            self.degree,
+            self.n_qp_pair,
+        )
+        image_all = None
+        if self.ground_z is not None:
+            seg_l_img = self._image_positions(seg_l)
+            seg_r_img = self._image_positions(seg_r)
+            image_all = _seg_seg_full_moments_offedge_swept(
+                seg_l,
+                seg_r,
+                seg_l_img,
+                seg_r_img,
+                self.wire_radius,
+                k_array,
+                self.degree,
+                self.n_qp_pair,
+            )
         for i, kk in enumerate(k_array):
             self.k = float(kk)
             self.omega = self.k * self.c
@@ -1637,7 +1825,11 @@ class BSplineSolver:
             same_edge_k = [
                 (sl, A_st, reg_all[e][i]) for e, (sl, A_st, _g) in enumerate(prep)
             ]
-            z, _ = self.compute_impedance(same_edge_prep=same_edge_k)
+            z, _ = self.compute_impedance(
+                same_edge_prep=same_edge_k,
+                offedge_full=offedge_all[i],
+                image_full=image_all[i] if image_all is not None else None,
+            )
             z_out[i] = z
         self.k = k_save
         self.wavelength = wl_save

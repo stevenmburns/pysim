@@ -35,10 +35,14 @@ try:
     _HAVE_BSPLINE_ACCEL = hasattr(_acc, "seg_seg_full_moments_bspline")
     _HAVE_BSPLINE_STATIC_ACCEL = hasattr(_acc, "seg_seg_static_moments_bspline_uniform")
     _HAVE_BSPLINE_REG_SWEPT_ACCEL = hasattr(_acc, "seg_seg_reg_moments_bspline_swept")
+    _HAVE_BSPLINE_OFFEDGE_SWEPT_ACCEL = hasattr(
+        _acc, "seg_seg_full_moments_bspline_swept"
+    )
 except ImportError:
     _HAVE_BSPLINE_ACCEL = False
     _HAVE_BSPLINE_STATIC_ACCEL = False
     _HAVE_BSPLINE_REG_SWEPT_ACCEL = False
+    _HAVE_BSPLINE_OFFEDGE_SWEPT_ACCEL = False
 
 # Currently the C++ accelerator has explicit instantiations for D in {1, 2}.
 # Extend by adding `seg_seg_full_moments_bspline_kernel<3>(...)` and a switch
@@ -291,3 +295,42 @@ def _seg_seg_full_moments_offedge(
     wu_j = w_j[None, :, :] * u_pow_j
 
     return np.einsum("piq,iqjr,Pjr->pPij", wu_i, G, wu_j)
+
+
+def _seg_seg_full_moments_offedge_swept(
+    seg_l_i, seg_r_i, seg_l_j, seg_r_j, a, k_array, max_d, n_qp
+):
+    """Batched-over-k `_seg_seg_full_moments_offedge`.
+
+    Returns (n_k, max_d+1, max_d+1, N_i, N_j) complex. The per-(i,j) geometry
+    is k-independent, so the C++ kernel builds it once and reuses it across the
+    whole sweep — the off-edge analog of the swept reg-moment kernel. Lets
+    `compute_impedance_swept` build the all-pairs off-edge moments in one call
+    instead of one single-k call per frequency. Falls back to stacking the
+    single-k path when the accelerator is unavailable.
+    """
+    k_array = np.asarray(k_array, dtype=np.float64)
+    if _HAVE_BSPLINE_OFFEDGE_SWEPT_ACCEL and max_d <= _BSPLINE_ACCEL_MAX_D:
+        gl_xi, gl_w = leggauss(n_qp)
+        t01 = 0.5 * (gl_xi + 1.0)
+        w01 = 0.5 * gl_w
+        return _acc.seg_seg_full_moments_bspline_swept(
+            np.ascontiguousarray(seg_l_i, dtype=np.float64),
+            np.ascontiguousarray(seg_r_i, dtype=np.float64),
+            np.ascontiguousarray(seg_l_j, dtype=np.float64),
+            np.ascontiguousarray(seg_r_j, dtype=np.float64),
+            float(a) * float(a),
+            np.ascontiguousarray(k_array),
+            int(max_d),
+            np.ascontiguousarray(t01, dtype=np.float64),
+            np.ascontiguousarray(w01, dtype=np.float64),
+        )
+    return np.stack(
+        [
+            _seg_seg_full_moments_offedge(
+                seg_l_i, seg_r_i, seg_l_j, seg_r_j, a, float(k), max_d, n_qp
+            )
+            for k in k_array
+        ],
+        axis=0,
+    )
