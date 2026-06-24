@@ -14,7 +14,12 @@ requires-python = ">=3.8"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
+    # Accelerated wheels are built for these three; other platforms fall back to
+    # the pure-Python solver (the C++ extension is an optional build). Not "OS
+    # Independent" — that connotes a pure-Python package, which this isn't.
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
 ]
 # Core runtime deps: the solver and its helpers import these unconditionally
 # (numpy/scipy throughout src/momwire). The C++ _accelerators extension is an
