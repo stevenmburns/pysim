@@ -29,16 +29,15 @@ import numpy as np
 from ._bspline_static_moments import J_static_moment
 from ._quadrature import leggauss
 
-try:
-    from . import _accelerators as _acc
+from ._accel import acc as _acc
 
-    _HAVE_BSPLINE_ACCEL = hasattr(_acc, "seg_seg_full_moments_bspline")
-    _HAVE_BSPLINE_STATIC_ACCEL = hasattr(_acc, "seg_seg_static_moments_bspline_uniform")
-    _HAVE_BSPLINE_REG_SWEPT_ACCEL = hasattr(_acc, "seg_seg_reg_moments_bspline_swept")
-except ImportError:
-    _HAVE_BSPLINE_ACCEL = False
-    _HAVE_BSPLINE_STATIC_ACCEL = False
-    _HAVE_BSPLINE_REG_SWEPT_ACCEL = False
+_HAVE_BSPLINE_ACCEL = _acc is not None and hasattr(_acc, "seg_seg_full_moments_bspline")
+_HAVE_BSPLINE_STATIC_ACCEL = _acc is not None and hasattr(
+    _acc, "seg_seg_static_moments_bspline_uniform"
+)
+_HAVE_BSPLINE_REG_SWEPT_ACCEL = _acc is not None and hasattr(
+    _acc, "seg_seg_reg_moments_bspline_swept"
+)
 
 # Currently the C++ accelerator has explicit instantiations for D in {1, 2}.
 # Extend by adding `seg_seg_full_moments_bspline_kernel<3>(...)` and a switch

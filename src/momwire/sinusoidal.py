@@ -20,12 +20,9 @@ import numpy as np
 import scipy.linalg
 import scipy.sparse
 
-try:
-    from momwire import _accelerators as _acc
+from ._accel import acc as _acc
 
-    _HAVE_FIELD_TENSOR = hasattr(_acc, "sinusoidal_field_tensor")
-except ImportError:
-    _HAVE_FIELD_TENSOR = False
+_HAVE_FIELD_TENSOR = _acc is not None and hasattr(_acc, "sinusoidal_field_tensor")
 
 _EULER_GAMMA = 0.5772156649015329
 

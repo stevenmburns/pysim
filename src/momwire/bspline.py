@@ -51,14 +51,10 @@ from ._bspline_kernels import (
 )
 from ._quadrature import leggauss
 
-try:
-    from . import _accelerators as _acc
+from ._accel import acc as _acc
 
-    _HAVE_BSPLINE_ASSEMBLE_ACCEL = hasattr(_acc, "assemble_Z_bspline")
-    _HAVE_ENRICH_ACCEL = hasattr(_acc, "assemble_Z_enrich")
-except ImportError:
-    _HAVE_BSPLINE_ASSEMBLE_ACCEL = False
-    _HAVE_ENRICH_ACCEL = False
+_HAVE_BSPLINE_ASSEMBLE_ACCEL = _acc is not None and hasattr(_acc, "assemble_Z_bspline")
+_HAVE_ENRICH_ACCEL = _acc is not None and hasattr(_acc, "assemble_Z_enrich")
 
 _BSPLINE_ASSEMBLE_ACCEL_MAX_D = 2
 

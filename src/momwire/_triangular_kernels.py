@@ -34,14 +34,10 @@ import numpy as np
 
 from ._quadrature import leggauss
 
-try:
-    from . import _accelerators as _acc
+from ._accel import acc as _acc
 
-    _HAVE_REG_ACCEL = hasattr(_acc, "seg_seg_reg_quad_batch_1d")
-    _HAVE_OFF_ACCEL = hasattr(_acc, "seg_seg_quad_batch_3d")
-except ImportError:
-    _HAVE_REG_ACCEL = False
-    _HAVE_OFF_ACCEL = False
+_HAVE_REG_ACCEL = _acc is not None and hasattr(_acc, "seg_seg_reg_quad_batch_1d")
+_HAVE_OFF_ACCEL = _acc is not None and hasattr(_acc, "seg_seg_quad_batch_3d")
 
 
 def _Sigma(u, a):

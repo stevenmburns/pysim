@@ -31,14 +31,10 @@ from ._triangular_kernels import (
     _seg_seg_offedge_quad_batch,
 )
 
-try:
-    from . import _accelerators as _acc
+from ._accel import acc as _acc
 
-    _HAVE_ASSEMBLE_Z = hasattr(_acc, "assemble_Z")
-    _HAVE_ASSEMBLE_Z_GENERAL = hasattr(_acc, "assemble_Z_general")
-except ImportError:
-    _HAVE_ASSEMBLE_Z = False
-    _HAVE_ASSEMBLE_Z_GENERAL = False
+_HAVE_ASSEMBLE_Z = _acc is not None and hasattr(_acc, "assemble_Z")
+_HAVE_ASSEMBLE_Z_GENERAL = _acc is not None and hasattr(_acc, "assemble_Z_general")
 
 
 class TriangularSolver:

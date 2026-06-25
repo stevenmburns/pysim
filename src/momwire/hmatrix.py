@@ -57,12 +57,11 @@ from ._aca import (
 )
 from ._quadrature import leggauss
 
-try:
-    from . import _accelerators as _acc
+from ._accel import acc as _acc
 
-    _HAVE_OFFEDGE_BLOCK_ACCEL = hasattr(_acc, "bspline_assemble_offedge_block")
-except ImportError:  # pragma: no cover
-    _HAVE_OFFEDGE_BLOCK_ACCEL = False
+_HAVE_OFFEDGE_BLOCK_ACCEL = _acc is not None and hasattr(
+    _acc, "bspline_assemble_offedge_block"
+)
 
 _OFFEDGE_BLOCK_ACCEL_MAX_D = 2
 
