@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "momwire"
-version = "0.2.1"
+version = "0.2.2"
 authors = [
   { name="Steven M. Burns", email="smburns47@gmail.com" },
 ]
@@ -89,6 +89,17 @@ test-command = 'python -c "import momwire._accelerators; from momwire import tri
 # (It is also cibuildwheel 3.x+'s default, but pin it explicitly so a future
 # default change can't silently drop libmvec.)
 manylinux-x86_64-image = "manylinux_2_28"
+# Do NOT vendor libgomp (`--exclude libgomp.so.1`): auditwheel would otherwise
+# bundle a private copy (momwire.libs/libgomp-<hash>.so) that uses initial-exec
+# TLS. When another OpenMP extension (e.g. pynec-accel) loads the system libgomp
+# first, momwire's vendored copy then fails to dlopen with "cannot allocate
+# memory in static TLS block" and the accelerator silently drops to the slow
+# pure-Python path. Excluding it makes momwire link the SYSTEM libgomp, so both
+# engines share one runtime — the Linux mirror of the macOS `--exclude libomp`,
+# and matching what pynec-accel already does. Needs a system libgomp at runtime
+# (the GCC OpenMP runtime, universal on glibc Linux; `apt install libgomp1` if
+# absent — manylinux images already have it for the build).
+repair-wheel-command = "auditwheel repair --exclude libgomp.so.1 -w {dest_dir} {wheel}"
 
 [tool.cibuildwheel.macos]
 # Native Apple Silicon only for this first cut (the macos-14 runner is arm64).

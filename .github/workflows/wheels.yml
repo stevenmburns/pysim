@@ -71,6 +71,20 @@ jobs:
             fi
           done
           echo "OK: no libomp vendored in the macOS wheels."
+      - name: Assert libgomp is NOT vendored into the Linux wheel
+        # Regression guard for `auditwheel --exclude libgomp.so.1`: a private
+        # vendored libgomp (momwire.libs/libgomp-<hash>.so) reintroduces the
+        # static-TLS clash with pynec-accel (each ends up with its own OpenMP
+        # runtime). cibuildwheel's test-command already proves the wheel LOADS
+        # against the runner's system libgomp.
+        if: runner.os == 'Linux'
+        run: |
+          for whl in wheelhouse/*.whl; do
+            if unzip -l "$whl" | grep -qi 'libgomp'; then
+              echo "ERROR: $whl bundles libgomp — the --exclude regressed."; exit 1
+            fi
+          done
+          echo "OK: no libgomp vendored in the Linux wheels."
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}

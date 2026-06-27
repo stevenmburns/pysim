@@ -7,14 +7,14 @@ in one place. The distinction that matters:
 * **Extension never built** (unsupported platform, or a deliberate pure-Python
   install) — the pure-Python fallback is expected, so stay silent.
 * **Extension built but failed to load** — something is wrong at *runtime*, and
-  the fast path silently vanishes, so warn loudly. The classic cause on Linux is
-  a static-TLS clash when another OpenMP extension is ``dlopen``'d first (e.g. a
-  pynec-accel build that vendors its own ``libgomp``); the import then fails with
-  "cannot allocate memory in static TLS block" and every solver quietly drops to
-  the slow path. On macOS the usual cause is a missing ``libomp``: the wheel
-  links Homebrew's OpenMP runtime but doesn't bundle it (so it can share one
-  ``libomp`` with pynec-accel), so ``brew install libomp`` is required. Either
-  way the fallback used to be invisible — this module makes it audible.
+  the fast path silently vanishes, so warn loudly. The Linux/macOS wheels link
+  the *system* OpenMP runtime rather than bundling one (so they share a single
+  runtime with pynec-accel instead of clashing), so the usual cause is that the
+  runtime is missing: ``apt install libgomp1`` on Linux, ``brew install libomp``
+  on macOS. The older failure — a static-TLS clash from a vendored libgomp
+  (momwire < 0.2.2 or pynec-accel < 1.7.4.post1) loaded after another, failing
+  with "cannot allocate memory in static TLS block" — is the other cause.
+  Either way the fallback used to be invisible — this module makes it audible.
 
 Public attributes:
     ``acc``     — the loaded ``_accelerators`` module, or ``None``.
@@ -61,12 +61,14 @@ def _load():
                 )
             else:
                 hint = (
-                    "On Linux this is usually a static-TLS clash with another "
-                    "OpenMP extension loaded first — e.g. a pynec-accel build "
-                    "that vendors its own libgomp (upgrade to pynec-accel "
-                    ">= 1.7.4.post1). Stopgap: "
-                    "GLIBC_TUNABLES=glibc.rtld.optional_static_tls=2097152 (set "
-                    "before the interpreter starts)."
+                    "On Linux the accelerator links the system libgomp (the GCC "
+                    "OpenMP runtime), which the wheel does not bundle (so it "
+                    "shares one libgomp with pynec-accel); install it if missing "
+                    "(`apt install libgomp1`, or your distro's equivalent). A "
+                    "static-TLS clash from an older vendored-libgomp build "
+                    "(momwire < 0.2.2 or pynec-accel < 1.7.4.post1) is the other "
+                    "cause; the stopgap there is "
+                    "GLIBC_TUNABLES=glibc.rtld.optional_static_tls=2097152."
                 )
             warnings.warn(
                 "momwire: the compiled accelerator '_accelerators' is installed "
