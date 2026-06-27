@@ -126,6 +126,42 @@ jobs:
           python -c "import momwire; assert momwire.accelerated, 'momwire accelerator did not load (libomp?)'"
           pytest tests/test_pynec_backend.py -v
 
+  linux_cross_engine:
+    # Validate the shared-libgomp fix against the REAL built wheel — the case
+    # that actually regressed. (The macOS job above and CI's test-pynec both
+    # build momwire from *source*, which links the system OpenMP runtime directly
+    # and so can never show a wheel-vendoring bug. Only the auditwheel-repaired
+    # wheel vendors/de-vendors libgomp.) This installs the wheelhouse momwire
+    # wheel + pynec-accel and runs the PyNEC cross-validation with NO
+    # GLIBC_TUNABLES: green only when momwire's wheel shares the system libgomp
+    # (the --exclude took effect); a re-vendored private libgomp would fail with
+    # "cannot allocate memory in static TLS block". Manual + needs the wheels.
+    name: Linux cross-engine (PyNEC + momwire wheel, shared libgomp)
+    if: github.event_name == 'workflow_dispatch'
+    needs: build_wheels
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # The de-vendored wheel links the system libgomp at runtime.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgomp1
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-ubuntu-latest
+          path: wheelhouse
+      - run: pip install --upgrade pip
+      # Install the BUILT momwire wheel (NOT source) + the test deps.
+      - run: pip install wheelhouse/momwire-*-cp312-cp312-*manylinux*_x86_64.whl pytest matplotlib scikit-rf
+      - name: Install pynec-accel (the build under test)
+        run: pip install pynec-accel --no-index --find-links "${{ inputs.pynec_find_links }}"
+      - name: Assert the wheel's accelerator loads against the shared system libgomp
+        run: |
+          python -c "import momwire; assert momwire.accelerated, 'momwire accelerator did not load — vendored-libgomp static-TLS clash?'"
+          pytest tests/test_pynec_backend.py -v
+
   make_sdist:
     name: sdist
     runs-on: ubuntu-latest
