@@ -202,14 +202,18 @@ jobs:
             dist/*.whl
             dist/*.tar.gz
 
-  publish-testpypi:
-    # Publish the wheels + sdist to TestPyPI via Trusted Publishing (OIDC) — no
+  publish-pypi:
+    # Publish the wheels + sdist to PyPI via Trusted Publishing (OIDC) — no
     # stored token. Requires a matching trusted/pending publisher configured on
-    # TestPyPI for project `momwire`: owner stevenmburns, repo momwire, workflow
-    # wheels.yml, no environment. Without it the OIDC exchange hard-fails (it
-    # does NOT skip). skip-existing makes re-runs of an already-published version
-    # a no-op instead of an error. Tag-gated, same as the GitHub Release job.
-    name: publish to TestPyPI
+    # PyPI (pypi.org, NOT test.pypi.org) for project `momwire`: owner
+    # stevenmburns, repo momwire, workflow wheels.yml, no environment. Use the
+    # "pending publisher" form for the very first release (the project does not
+    # exist on PyPI yet) — that first tagged run creates it. Without the
+    # publisher configured the OIDC exchange hard-fails (it does NOT skip).
+    # Omitting repository-url defaults the action to https://upload.pypi.org/legacy/.
+    # skip-existing makes re-runs of an already-published version a no-op instead
+    # of an error. Tag-gated, same as the GitHub Release job.
+    name: publish to PyPI
     needs: [build_wheels, make_sdist]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
@@ -220,9 +224,8 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Publish to TestPyPI
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          repository-url: https://test.pypi.org/legacy/
           packages-dir: dist
           skip-existing: true
